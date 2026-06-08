@@ -253,3 +253,34 @@ def test_avg_r_all_stopless_is_none():
 
 def test_expectancy_empty_is_nan():
     assert math.isnan(expectancy([]))
+
+
+# ---------------------------------------------------------------------------
+# M7.9 — outlier_sensitivity
+# ---------------------------------------------------------------------------
+from plutobt.metrics import outlier_sensitivity
+
+
+def test_outlier_sensitivity_top_trade_share_and_recompute():
+    # PnLs: one dominant winner (1000) + small ones.
+    trades = [_trade(1000.0), _trade(50.0), _trade(40.0),
+              _trade(-30.0), _trade(-60.0)]
+    eq = pd.Series([100.0, 1100.0, 1150.0, 1190.0, 1160.0, 1100.0])
+    out = outlier_sensitivity(trades, eq)
+    total = 1000 + 50 + 40 - 30 - 60  # = 1000
+    assert_allclose(out["pct_pnl_top1"], 1000.0 / total, rtol=0, atol=1e-12)
+    assert_allclose(out["pct_pnl_top5"], 1.0, rtol=0, atol=1e-12)  # all 5 trades
+    # Profit factor with the single best winner removed must drop.
+    assert out["profit_factor_ex_best"] < profit_factor(trades)
+    # With the single worst loser removed, profit factor must rise.
+    assert out["profit_factor_ex_worst"] > profit_factor(trades)
+    # Collapse flag: total P&L is dominated by one trade.
+    assert out["collapses_without_top1"] is True
+
+
+def test_outlier_sensitivity_balanced_does_not_collapse():
+    trades = [_trade(100.0), _trade(90.0), _trade(110.0),
+              _trade(-40.0), _trade(-50.0)]
+    eq = pd.Series([100.0, 200.0, 290.0, 400.0, 360.0, 310.0])
+    out = outlier_sensitivity(trades, eq)
+    assert out["collapses_without_top1"] is False
