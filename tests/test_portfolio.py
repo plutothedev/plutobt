@@ -316,3 +316,67 @@ def test_mtm_gap_open_with_commission_to_the_cent():
     assert pf.cash == pytest.approx(100_000.0 - 100.00 - 4.20)
     # Trade.pnl is gross of commission (price-basis only).
     assert pf.trades[0].pnl == pytest.approx(-100.00)
+
+
+def test_trade_boundary_vwap_scale_in_out_pro_rata():
+    """Spec §10.16: scale-in to VWAP, partial scale-out pro-rata."""
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=100_000.0, instrument=nq)
+    # Scale in: 2 @ 20,000 then 2 @ 20,040 => VWAP 20,020, qty 4.
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=20_000.0, commission=0.0))
+    pf.apply_fill(Fill(ts=1100, side="buy", contracts=2, price=20_040.0, commission=0.0))
+    assert pf.position.qty == 4
+    assert pf.position.avg_price == pytest.approx(20_020.0)
+
+    # Scale out 3 @ 20,070 => realized (20,070 - 20,020) * $20 * 3 = +$3,000.
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=3, price=20_070.0, commission=0.0))
+    assert pf.position.qty == 1
+    assert pf.position.avg_price == pytest.approx(20_020.0)  # VWAP unchanged on scale-out
+    assert pf.cash == pytest.approx(103_000.0)
+    assert len(pf.trades) == 1
+    assert pf.trades[0].contracts == 3
+    assert pf.trades[0].pnl == pytest.approx(3_000.0)
+    assert pf.trades[0].open_at_end is False
+
+
+def test_open_at_end_marked_and_flagged():
+    """Spec §10.16 / §5.9: residual open position marked-to-last, flagged."""
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=100_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=20_000.0, commission=0.0))
+    pf.apply_fill(Fill(ts=1100, side="buy", contracts=2, price=20_040.0, commission=0.0))
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=3, price=20_070.0, commission=0.0))
+    # 1 contract remains open at VWAP 20,020. Mark to last close 20,090 and flag.
+    pf.mark(20_090.0)
+    pf.mark_open_at_end(ts=2000)
+    assert pf.position.qty == 1            # position stays open (mark, not close)
+    assert len(pf.trades) == 2
+    closed, open_trade = pf.trades
+    assert closed.open_at_end is False
+    assert open_trade.open_at_end is True
+    assert open_trade.exit_ts is None
+    assert open_trade.exit_price is None
+    assert open_trade.contracts == 1
+    # Unrealized at last mark: (20,090 - 20,020) * $20 * 1 = +$1,400.
+    assert open_trade.pnl == pytest.approx(1_400.0)
+    # Equity includes the open MTM; cash does NOT (unrealized).
+    assert pf.cash == pytest.approx(103_000.0)
+    assert pf.equity(mark_price=20_090.0) == pytest.approx(103_000.0 + 1_400.0)
+
+
+def test_open_at_end_idempotent_no_double_book():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=100_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_000.0, commission=0.0))
+    pf.mark(20_010.0)
+    pf.mark_open_at_end(ts=1000)
+    pf.mark_open_at_end(ts=1000)
+    open_trades = [t for t in pf.trades if t.open_at_end]
+    assert len(open_trades) == 1
+
+
+def test_open_at_end_noop_when_flat():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=100_000.0, instrument=nq)
+    pf.mark_open_at_end(ts=1000)
+    assert pf.trades == []

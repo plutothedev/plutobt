@@ -179,3 +179,46 @@ class Portfolio:
         if eq >= self.instrument.maintenance_margin * qty:
             return 0.0
         return max(0.0, self.instrument.initial_margin * qty - eq)
+
+    def mark_open_at_end(self, ts: int) -> None:
+        """Book a residual open position as a flagged open-at-end Trade (§5.9).
+
+        Marks the open position to the last mark() price and appends a
+        Trade with open_at_end=True (exit_ts/exit_price=None, pnl=unrealized).
+        The position is NOT closed (no cash movement). Idempotent: an
+        open-at-end Trade is booked at most once. No-op when flat.
+        """
+        if self.position.qty == 0 or self.position.avg_price is None:
+            return
+        if any(t.open_at_end for t in self.trades):
+            return
+        mark = self._mark_price
+        if mark is None:
+            mark = self.position.avg_price
+        unrealized = pnl_points(
+            self.position.avg_price, mark, self.position.qty, self.instrument
+        )
+
+        # §0.4 Van Tharp R: r_multiple when initial_stop is set.
+        r_mult: float | None = None
+        initial_stop = self.position.initial_stop
+        avg = self.position.avg_price
+        if initial_stop is not None and avg is not None:
+            risk_per_contract = abs(avg - initial_stop) * self.instrument.point_value
+            contracts = abs(self.position.qty)
+            if risk_per_contract != 0.0:
+                r_mult = unrealized / (risk_per_contract * contracts)
+
+        self.trades.append(
+            Trade(
+                entry_ts=self._open_entry_ts if self._open_entry_ts is not None else ts,
+                exit_ts=None,
+                side="long" if self.position.qty > 0 else "short",
+                contracts=abs(self.position.qty),
+                entry_price=self.position.avg_price,
+                exit_price=None,
+                pnl=unrealized,
+                r_multiple=r_mult,
+                open_at_end=True,
+            )
+        )
