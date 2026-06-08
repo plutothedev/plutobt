@@ -55,3 +55,17 @@ def test_sweep_applies_distinct_per_instrument_costs():
     assert nq_slip == 1.0
     assert cl_slip == 3.0
     assert nq_slip != cl_slip
+
+
+def test_main_prints_in_sample_labeled_reports(capsys):
+    from examples.run_demo import main
+
+    main()
+    out = capsys.readouterr().out
+    # One IN-SAMPLE-labeled report block per symbol.
+    assert out.count("IN-SAMPLE") == 3
+    assert "PlutoBT report: NQ" in out
+    assert "PlutoBT report: ES" in out
+    assert "PlutoBT report: CL" in out
+    # The honesty disclaimer is present in the printed output.
+    assert "not predictive of live results" in out
