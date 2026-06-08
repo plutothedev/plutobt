@@ -14,10 +14,11 @@ from plutobt.report import format_report
 from plutobt.strategies.ema_cross import EMACross
 
 # Symbol -> (sample data file, per-instrument cost config).
+# Each symbol uses its own realistic synthetic price file (distinct seeds/price levels).
 DEMO_TARGETS: dict[str, tuple[str, str]] = {
     "NQ": ("data/sample/nq_5m.json", "configs/nq.toml"),
-    "ES": ("data/sample/nq_5m.json", "configs/es.toml"),
-    "CL": ("data/sample/nq_5m.json", "configs/cl.toml"),
+    "ES": ("data/sample/es_5m.json", "configs/es.toml"),
+    "CL": ("data/sample/cl_5m.json", "configs/cl.toml"),
 }
 
 
