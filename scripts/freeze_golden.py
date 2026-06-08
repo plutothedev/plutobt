@@ -35,7 +35,7 @@ def main() -> None:
     metrics = compute_metrics(result, periods_per_year=cfg.periods_per_year)
     numeric = {
         k: v for k, v in metrics.items()
-        if isinstance(v, (int, float)) and not isinstance(v, bool)
+        if isinstance(v, int | float) and not isinstance(v, bool)
     }
     payload = {
         "equity_ts": [int(x) for x in result.equity_curve.index],

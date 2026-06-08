@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")  # headless, before pyplot import
 import matplotlib.pyplot as plt
 
@@ -10,7 +11,6 @@ from plutobt.data import load_bars
 from plutobt.engine import Engine
 from plutobt.instruments import get_instrument
 from plutobt.plotting import plot_equity, plot_trades
-
 from tests.conftest import GoldenStrategy
 
 ROOT = Path(__file__).resolve().parents[1]

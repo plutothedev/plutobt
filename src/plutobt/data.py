@@ -206,7 +206,7 @@ def tag_sessions(df: pd.DataFrame, instrument: Instrument) -> pd.DataFrame:
 _PRICE_COLS = ("open", "high", "low", "close")
 
 
-def assert_positive_prices(df: "pd.DataFrame") -> None:
+def assert_positive_prices(df: pd.DataFrame) -> None:
     """Refuse %/log returns on a series with any non-positive price (§5.6).
 
     Additive (backwards-difference / Panama) continuous-contract adjustment can

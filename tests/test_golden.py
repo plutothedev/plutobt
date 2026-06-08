@@ -3,15 +3,12 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import pytest
 
 from plutobt.config import BacktestConfig, load_config
 from plutobt.data import load_bars
 from plutobt.engine import Engine
 from plutobt.instruments import get_instrument
 from plutobt.metrics import compute_metrics
-
 from tests.conftest import GoldenStrategy
 
 SAMPLE = Path(__file__).resolve().parents[1] / "data" / "sample" / "nq_5m.json"
@@ -115,7 +112,7 @@ def test_golden_metrics_within_tolerance():
     metrics = compute_metrics(result, periods_per_year=cfg.periods_per_year)
     exp = json.loads(EXPECTED.read_text(encoding="utf-8"))["metrics"]
     for key, exp_val in exp.items():
-        if isinstance(exp_val, (int, float)) and not isinstance(exp_val, bool):
+        if isinstance(exp_val, int | float) and not isinstance(exp_val, bool):
             np.testing.assert_allclose(
                 float(metrics[key]), float(exp_val),
                 rtol=RTOL, atol=ATOL, err_msg=f"metric '{key}' drifted",

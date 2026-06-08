@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from plutobt.engine import BacktestResult
 
 
-def plot_equity(result: "BacktestResult", ax=None):
+def plot_equity(result: BacktestResult, ax=None):
     """Plot the equity curve (and its running-peak drawdown shading).
 
     Parameters
@@ -39,7 +39,7 @@ def plot_equity(result: "BacktestResult", ax=None):
     return ax
 
 
-def plot_trades(df: "pd.DataFrame", result: "BacktestResult", ax=None):
+def plot_trades(df: pd.DataFrame, result: BacktestResult, ax=None):
     """Plot close price with entry/exit markers from the trade log.
 
     Parameters
