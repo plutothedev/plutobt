@@ -8,7 +8,7 @@ Lopez de Prado / Freqtrade truncation detector; the injected ``.shift(-1)``
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd

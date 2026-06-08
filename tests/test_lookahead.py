@@ -39,7 +39,7 @@ def _leaky(df):
 
 def test_assert_causal_passes_on_causal_precompute():
     # Pure ewm(adjust=False) recursion is causal; full-sample grid.
-    assert_causal(_causal_ema_fixed, _frame(), sample=None) is None
+    assert assert_causal(_causal_ema_fixed, _frame(), sample=None) is None
 
 
 def test_assert_causal_peek_positive_control_raises():

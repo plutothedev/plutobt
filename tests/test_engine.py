@@ -2,11 +2,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from plutobt.engine import Engine
-from plutobt.strategy import Strategy, Context
 from plutobt.config import BacktestConfig
-from plutobt.instruments import get_instrument
-from plutobt.broker import Broker
+from plutobt.engine import Engine
+from plutobt.instruments import get_instrument, pnl_points
+from plutobt.lookahead import assert_causal
+from plutobt.strategy import Strategy
 
 
 def _bars(closes, ts0=0, step=300):
@@ -37,7 +37,6 @@ def test_engine_decision_at_t_fills_at_t_plus_1_open():
     df = _bars([20000.0, 20010.0, 20020.0, 20030.0])
     result = eng.run(df, BuyOnceAtBar1())
     # exactly one entry fill, at bar index 2 (ts=600), price = open of bar 2.
-    fills = [t for t in result.trades]
     assert len(result.trades) == 1
     assert result.trades[0].entry_ts == 600
     assert result.trades[0].entry_price == pytest.approx(20020.0)
@@ -149,9 +148,6 @@ def test_engine_open_position_marked_to_last_not_dropped():
     assert len(result.equity_curve) == 3
 
 
-from plutobt.instruments import pnl_points
-
-
 def test_buy_and_hold_within_expiry_identity():
     nq = get_instrument("NQ")
     eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
@@ -256,16 +252,13 @@ def test_held_position_keeps_resting_stop_across_gap():
     assert result.trades[0].open_at_end is True
 
 
-from plutobt.lookahead import assert_causal
-
-
 def test_engine_strategy_precompute_is_causal_and_deterministic():
     nq = get_instrument("NQ")
     s = EMACrossEngine()
     df = _bars([20000.0 + i * 3.0 for i in range(40)])
 
     # the strategy's precompute must pass the causality detector...
-    assert_causal(s.precompute, df, sample=12) is None
+    assert assert_causal(s.precompute, df, sample=12) is None
 
     # ...and the engine result must be reproducible (same input -> same output).
     eng1 = Engine(nq, BacktestConfig(slippage_ticks=1.0, commission_per_side=2.50))

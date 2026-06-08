@@ -9,12 +9,11 @@ from dataclasses import dataclass
 import pandas as pd
 
 from plutobt import __version__
+from plutobt.broker import Broker
 from plutobt.config import BacktestConfig
 from plutobt.instruments import Instrument
 from plutobt.portfolio import Portfolio, Trade
-from plutobt.broker import Broker
-from plutobt.strategy import Strategy, Context
-
+from plutobt.strategy import Context, Strategy
 
 # ---------------------------------------------------------------------------
 # §0.1: BacktestResult defined ONCE at module scope (consumers import from here)

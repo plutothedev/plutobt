@@ -1,12 +1,10 @@
 import pandas as pd
-import pytest
 
-from plutobt.strategy import Strategy, Context
-from plutobt.instruments import get_instrument
-from plutobt.portfolio import Position
 from plutobt.broker import Broker
 from plutobt.config import BacktestConfig
-from plutobt.portfolio import Portfolio
+from plutobt.instruments import get_instrument
+from plutobt.portfolio import Portfolio, Position
+from plutobt.strategy import Context, Strategy
 
 
 def test_strategy_base_precompute_is_identity_passthrough():

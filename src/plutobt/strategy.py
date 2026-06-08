@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from plutobt.broker import Broker
 from plutobt.instruments import Instrument
 from plutobt.portfolio import Position
-from plutobt.broker import Broker
 
 
 @dataclass
