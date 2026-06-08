@@ -93,3 +93,33 @@ def test_portfolio_equity_when_flat_equals_cash():
     # Flat => no open MTM regardless of mark price.
     assert pf.equity(mark_price=20_000.0) == 50_000.0
     assert pf.equity(mark_price=15_000.0) == 50_000.0
+
+
+def test_apply_fill_open_long_sets_vwap_and_only_commission_off_cash():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=20_000.0, commission=5.0))
+    assert pf.position.qty == 2
+    assert pf.position.avg_price == 20_000.0
+    # Performance-bond: notional (2 * 20000 * $20) is NOT deducted; only commission.
+    assert pf.cash == 50_000.0 - 5.0
+
+
+def test_apply_fill_scale_in_recomputes_vwap():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=20_000.0, commission=4.0))
+    pf.apply_fill(Fill(ts=1100, side="buy", contracts=1, price=20_030.0, commission=2.0))
+    assert pf.position.qty == 3
+    # VWAP = (2*20000 + 1*20030) / 3 = 20010.0
+    assert pf.position.avg_price == pytest.approx(20_010.0)
+    assert pf.cash == 50_000.0 - 4.0 - 2.0
+
+
+def test_apply_fill_open_short_sets_negative_qty():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="sell", contracts=3, price=20_000.0, commission=6.0))
+    assert pf.position.qty == -3
+    assert pf.position.avg_price == 20_000.0
+    assert pf.cash == 50_000.0 - 6.0

@@ -62,3 +62,37 @@ class Portfolio:
             self.instrument,
         )
         return self.cash + open_mtm
+
+    def apply_fill(self, fill: Fill) -> None:
+        """Update position (VWAP) + cash on a fill (spec §5.2).
+
+        Commission is always deducted from cash. Opening/scaling into a
+        position does NOT subtract notional (performance-bond, not a loan).
+        Closing/reducing realizes pro-rata P&L into cash and books Trades.
+        """
+        self.cash -= fill.commission
+        signed = fill.contracts if fill.side == "buy" else -fill.contracts
+        cur_qty = self.position.qty
+
+        # Opening from flat, or scaling in the same direction.
+        if cur_qty == 0 or (cur_qty > 0) == (signed > 0):
+            self._scale_in(fill, signed)
+            return
+
+        # Opposite direction: reduce / close / flip.
+        self._reduce_or_flip(fill, signed)
+
+    def _scale_in(self, fill: Fill, signed: int) -> None:
+        cur_qty = self.position.qty
+        if cur_qty == 0:
+            self.position.qty = signed
+            self.position.avg_price = fill.price
+            self._open_entry_ts = fill.ts
+            return
+        new_qty = cur_qty + signed
+        # VWAP on absolute sizes (sign is uniform here).
+        prior_avg = self.position.avg_price
+        self.position.avg_price = (
+            prior_avg * abs(cur_qty) + fill.price * abs(signed)
+        ) / abs(new_qty)
+        self.position.qty = new_qty
