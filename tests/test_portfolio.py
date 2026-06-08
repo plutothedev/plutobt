@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -237,10 +238,10 @@ def test_margin_call_restore_to_initial_crude_3400():
     Drive equity to 6,600 (below maintenance) on a 1-lot and assert the call
     restores to INITIAL: 10,000 - 6,600 = $3,400.
     """
-    cl = get_instrument("CL")
-    # Pin the reference margins so the test is independent of registry drift.
-    assert cl.initial_margin == pytest.approx(10_000.0)
-    assert cl.maintenance_margin == pytest.approx(7_000.0)
+    # Textbook reference (Britannica, cited §5.2): initial 10,000 / maint 7,000.
+    # Build a LOCAL fixture so the engine check stays independent of the
+    # CME-representative registry value (which is NOT 10k/7k).
+    cl = replace(get_instrument("CL"), initial_margin=10_000.0, maintenance_margin=7_000.0)
 
     pf = Portfolio(starting_cash=10_000.0, instrument=cl)
     pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=70.00, commission=0.0))
@@ -254,7 +255,8 @@ def test_margin_call_restore_to_initial_crude_3400():
 
 
 def test_margin_call_uses_last_mark():
-    cl = get_instrument("CL")
+    # Local 10k/7k textbook fixture (decoupled from the registry).
+    cl = replace(get_instrument("CL"), initial_margin=10_000.0, maintenance_margin=7_000.0)
     pf = Portfolio(starting_cash=10_000.0, instrument=cl)
     pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=70.00, commission=0.0))
     # 2 lots: maintenance breach when equity < 14,000; initial target 20,000.

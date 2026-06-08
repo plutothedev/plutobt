@@ -64,7 +64,7 @@ REGISTRY: dict[str, Instrument] = {
     "CL": Instrument(
         symbol="CL", point_value=1000.0, tick_size=0.01, tick_value=10.0, currency="USD",
         session_open_ct="08:00", session_close_ct="13:30",
-        slippage_ticks=2.0, initial_margin=10_000.0, maintenance_margin=7_000.0,
+        slippage_ticks=2.0, initial_margin=7700.0, maintenance_margin=7000.0,
         settlement="physical", price_format="decimal",
     ),
     "GC": Instrument(
