@@ -206,3 +206,20 @@ def test_mark_does_not_move_cash():
     assert pf.cash == pytest.approx(50_000.0)
     # Short down 50 pts * $20 * 2 = -$2000 unrealized.
     assert pf.equity(mark_price=20_050.0) == pytest.approx(48_000.0)
+
+
+def test_margin_ok_gate_on_initial_margin():
+    cl = get_instrument("CL")  # representative initial_margin from registry
+    pf = Portfolio(starting_cash=10_000.0, instrument=cl)
+    im = cl.initial_margin
+    n_ok = int(10_000.0 // im)
+    assert pf.margin_ok(n_ok) is True
+    assert pf.margin_ok(n_ok + 1) is False
+
+
+def test_margin_ok_uses_current_cash_not_equity():
+    cl = get_instrument("CL")
+    pf = Portfolio(starting_cash=cl.initial_margin, instrument=cl)
+    # Exactly enough cash for 1 contract.
+    assert pf.margin_ok(1) is True
+    assert pf.margin_ok(2) is False

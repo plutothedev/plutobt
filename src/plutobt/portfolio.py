@@ -156,3 +156,7 @@ class Portfolio:
         Does not move cash: unrealized MTM is reflected only through equity().
         """
         self._mark_price = float(price)
+
+    def margin_ok(self, contracts: int) -> bool:
+        """Entry gate (spec §5.2): cash >= initial_margin * contracts."""
+        return self.cash >= self.instrument.initial_margin * contracts
