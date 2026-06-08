@@ -231,3 +231,61 @@ def test_verify_ts_is_open_false_when_ts_marks_close():
         r[0] += 300
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
     assert verify_ts_is_open(df, nq) is False
+
+
+# ---------------------------------------------------------------------------
+# M3.5 — tag_sessions RTH/ETH + 15:10/15:15 boundary (§10.10)
+# ---------------------------------------------------------------------------
+
+from plutobt.data import tag_sessions
+
+
+def test_tag_sessions_adds_session_column():
+    nq = get_instrument("NQ")
+    rows = _rth_day_5m(2025, 6, 2)
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = tag_sessions(df, nq)
+    assert "session" in out.columns
+    assert set(out["session"].unique()) == {"RTH"}
+    # original df not mutated
+    assert "session" not in df.columns
+
+
+def test_tag_sessions_rth_boundary_1510_open_1515_close():  # §10.10
+    nq = get_instrument("NQ")
+    assert nq.session_open_ct == "08:30"
+    assert nq.session_close_ct == "15:15"
+    rows = _rth_day_5m(2025, 6, 2)  # 81 bars, last opens 15:10 CT
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = tag_sessions(df, nq)
+
+    idx = pd.DatetimeIndex(
+        pd.to_datetime(out["ts"], unit="s", utc=True)
+    ).tz_convert(CT)
+    # the LAST RTH bar opens 15:10 ...
+    last_rth = out.index[out["session"] == "RTH"][-1]
+    assert idx[last_rth].strftime("%H:%M") == "15:10"
+    assert out.loc[last_rth, "session"] == "RTH"
+    # ... and closes 15:15 (open + one 5-min interval)
+    close_ct = idx[last_rth] + pd.Timedelta(minutes=5)
+    assert close_ct.strftime("%H:%M") == "15:15"
+
+
+def test_tag_sessions_1515_open_bar_is_eth_not_rth():  # §10.10 upper edge
+    nq = get_instrument("NQ")
+    rows = _rth_day_5m(2025, 6, 2)
+    # append a bar OPENING exactly at 15:15 CT -> must be ETH (interval is half-open)
+    t1515 = _ct_ts(2025, 6, 2, 15, 15)
+    rows.append([t1515, 100.0, 101.0, 99.0, 100.5, 10])
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = tag_sessions(df, nq)
+    assert out.iloc[-1]["session"] == "ETH"
+
+
+def test_tag_sessions_overnight_bar_is_eth():
+    nq = get_instrument("NQ")
+    t_overnight = _ct_ts(2025, 6, 2, 2, 0)  # 02:00 CT -> ETH
+    rows = [[t_overnight, 100.0, 101.0, 99.0, 100.5, 10]] + _rth_day_5m(2025, 6, 2)
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = tag_sessions(df, nq)
+    assert out.iloc[0]["session"] == "ETH"
