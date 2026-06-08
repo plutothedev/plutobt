@@ -284,3 +284,35 @@ def test_outlier_sensitivity_balanced_does_not_collapse():
     eq = pd.Series([100.0, 200.0, 290.0, 400.0, 360.0, 310.0])
     out = outlier_sensitivity(trades, eq)
     assert out["collapses_without_top1"] is False
+
+
+# ---------------------------------------------------------------------------
+# M7.10 — cost_sensitivity (sweep) — §10.15 monotonic
+# ---------------------------------------------------------------------------
+from plutobt.metrics import cost_sensitivity
+
+
+def test_cost_sensitivity_sweep_is_monotonic_non_increasing():
+    # A run_fn whose metrics degrade as slippage rises (the realistic direction).
+    def run_fn(slippage_ticks: float) -> dict:
+        return {
+            "sharpe": 1.6 - 0.4 * slippage_ticks,
+            "profit_factor": 2.4 - 0.3 * slippage_ticks,
+            "expectancy": 150.0 - 25.0 * slippage_ticks,
+        }
+
+    df = cost_sensitivity(run_fn, [1.0, 2.0, 4.0])
+    assert list(df.index) == [1.0, 2.0, 4.0]
+    assert list(df.columns) == ["sharpe", "profit_factor", "expectancy"]
+    # §10.15: every metric column is monotonically non-increasing with slippage.
+    for col in df.columns:
+        diffs = df[col].diff().dropna()
+        assert (diffs <= 1e-12).all(), f"{col} not monotonic non-increasing"
+
+
+def test_cost_sensitivity_preserves_slippage_order_as_index():
+    def run_fn(slippage_ticks: float) -> dict:
+        return {"sharpe": -slippage_ticks}
+
+    df = cost_sensitivity(run_fn, [4.0, 1.0, 2.0])
+    assert list(df.index) == [4.0, 1.0, 2.0]  # caller order preserved, not sorted
