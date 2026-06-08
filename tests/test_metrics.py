@@ -59,3 +59,29 @@ def test_sharpe_ci_is_sr_plus_minus_196_se():
     assert_allclose(hi, sr + 1.96 * se, rtol=0, atol=1e-15)
     # This CI straddles 0 -> not significant.
     assert lo < 0.0 < hi
+
+
+# ---------------------------------------------------------------------------
+# M7.3 — psr (Probabilistic Sharpe Ratio, PSR(0))
+# ---------------------------------------------------------------------------
+from plutobt.metrics import psr
+
+
+def test_psr_zero_reference():
+    # PSR(0) = Phi( SR_hat*sqrt(n-1) / sqrt(1 - g3*SR + ((g4-1)/4)*SR^2) )
+    # For REF_RETURNS: SR=0.39528470752104744, g3=-0.03705794133009825,
+    # g4=1.7675781249999996, n=10 -> z=1.1602447548720627, PSR=0.877025414964864
+    r = pd.Series(REF_RETURNS)
+    got = psr(r, sr0=0.0)
+    assert_allclose(got, 0.877025414964864, rtol=0, atol=1e-9)
+
+
+def test_psr_against_sr0_benchmark_lowers_probability():
+    r = pd.Series(REF_RETURNS)
+    # Comparing against a higher benchmark Sharpe must reduce the probability.
+    assert psr(r, sr0=0.30) < psr(r, sr0=0.0)
+
+
+def test_psr_zero_std_returns_nan():
+    r = pd.Series([0.0, 0.0, 0.0, 0.0])
+    assert math.isnan(psr(r, sr0=0.0))
