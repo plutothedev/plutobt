@@ -15,7 +15,7 @@ def _frame(n=60):
     })
 
 
-def _causal_ema(df):
+def _noncausal_ema_with_global_mean(df):
     df = df.copy()
     df["ema_f"] = df["close"].ewm(span=10, adjust=False, min_periods=10).mean()
     df["long"] = df["ema_f"] > df["close"].mean()  # mean of <=t prefix is causal-per-prefix? -> NO
@@ -51,7 +51,7 @@ def test_assert_causal_peek_positive_control_raises():
 def test_assert_causal_full_sample_normalization_is_a_leak():
     # df.close.mean() over the WHOLE series is non-causal -> caught.
     with pytest.raises(AssertionError, match="non-causal"):
-        assert_causal(_causal_ema, _frame())
+        assert_causal(_noncausal_ema_with_global_mean, _frame())
 
 
 def test_assert_causal_sampled_grid_runs_cheaply():

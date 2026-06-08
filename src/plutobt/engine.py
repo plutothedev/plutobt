@@ -70,7 +70,7 @@ class Engine:
         n = len(data)
         if n >= 2:
             diffs = pd.Series(ts_arr[1:] - ts_arr[:-1])
-            interval = int(diffs.mode().iloc[0]) if not diffs.empty else 0
+            interval = int(diffs.mode().iloc[0])
         else:
             interval = 0
         has_session = "session" in data.columns
@@ -90,7 +90,6 @@ class Engine:
             warm = any(pd.isna(getattr(bar, c)) for c in signal_cols)
 
             if not warm:
-                portfolio.mark(float(bar.close))
                 ctx = Context(
                     bar=bar,
                     position=portfolio.position,
@@ -106,12 +105,11 @@ class Engine:
             # Detect a session discontinuity; on gap+default policy, cancel the
             # unfilled entry order but leave any resting protective stop intact.
             if t + 1 < n:
-                cur = data.iloc[t]
                 nxt = data.iloc[t + 1]
-                gap = int(nxt.ts) - int(cur.ts)
+                gap = int(nxt.ts) - int(bar.ts)
                 discontinuity = interval > 0 and gap > interval
                 if has_session:
-                    discontinuity = discontinuity or (cur.session != nxt.session)
+                    discontinuity = discontinuity or (bar.session != nxt.session)
                 if discontinuity and not self.config.carry_overnight:
                     # §0: cancel_pending_entry drops the unfilled entry; resting
                     # protective stop on a held position is deliberately untouched.
@@ -152,6 +150,5 @@ class Engine:
                 "carry_overnight": self.config.carry_overnight,
                 "allow_short": self.config.allow_short,
             },
-            "periods_per_year": self.config.periods_per_year,
             "instrument": self.instrument.symbol,
         }
