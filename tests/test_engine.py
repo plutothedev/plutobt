@@ -147,3 +147,42 @@ def test_engine_open_position_marked_to_last_not_dropped():
     assert final_equity == pytest.approx(100_000.0 + 800.0)
     # the open position is NOT silently removed from the equity curve length.
     assert len(result.equity_curve) == 3
+
+
+from plutobt.instruments import pnl_points
+
+
+def test_buy_and_hold_within_expiry_identity():
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    closes = [20000.0, 20010.0, 20025.0, 20040.0, 20100.0]
+    df = _bars(closes)  # entry decision bar0 -> fill bar1 open=20010
+    result = eng.run(df, BuyAndStayLong())
+
+    entry_fill = 20010.0
+    last_close = closes[-1]
+    expected_pnl = pnl_points(entry_fill, last_close, contracts=1, instrument=nq)
+    # = (20100 - 20010) * 20 * 1 = 90 * 20 = 1800.0
+    assert expected_pnl == pytest.approx(1800.0)
+
+    # engine equity gain == identity P&L, no costs.
+    equity_gain = result.equity_curve.iloc[-1] - 100_000.0
+    assert equity_gain == pytest.approx(expected_pnl)
+    # and the open trade's pnl matches the same identity.
+    assert result.trades[0].pnl == pytest.approx(expected_pnl)
+
+
+def test_buy_and_hold_with_costs_deducts_commission_and_slippage():
+    nq = get_instrument("NQ")
+    # 1 tick slippage on entry buy = +0.25pt = fill 20010.25; $2.50/contract/side.
+    eng = Engine(nq, BacktestConfig(slippage_ticks=1.0, commission_per_side=2.50))
+    closes = [20000.0, 20010.0, 20100.0]
+    df = _bars(closes)
+    result = eng.run(df, BuyAndStayLong())
+
+    entry_fill = 20010.0 + 1.0 * nq.tick_size  # 20010.25
+    gross = pnl_points(entry_fill, closes[-1], contracts=1, instrument=nq)
+    # one side of commission paid at entry (still open at end): -2.50
+    expected = gross - 2.50
+    equity_gain = result.equity_curve.iloc[-1] - 100_000.0
+    assert equity_gain == pytest.approx(expected)
