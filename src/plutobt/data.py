@@ -203,6 +203,30 @@ def tag_sessions(df: pd.DataFrame, instrument: Instrument) -> pd.DataFrame:
     return out
 
 
+_PRICE_COLS = ("open", "high", "low", "close")
+
+
+def assert_positive_prices(df: "pd.DataFrame") -> None:
+    """Refuse %/log returns on a series with any non-positive price (§5.6).
+
+    Additive (backwards-difference / Panama) continuous-contract adjustment can
+    push historical prices to zero or negative, making percentage and log
+    returns undefined or sign-flipped. Points/dollar P&L is still valid, but
+    callers must not compute ratio returns on such a series. Raises ValueError
+    naming the first offending (column, row).
+    """
+    for col in _PRICE_COLS:
+        bad = df.index[df[col] <= 0]
+        if len(bad) > 0:
+            row = int(bad[0])
+            val = df[col].iloc[df.index.get_loc(bad[0])]
+            raise ValueError(
+                f"non-positive price in column '{col}' at row {row} "
+                f"(value={val!r}); percentage/log returns are undefined on "
+                f"non-positive prices (§5.6). Use points/dollar P&L instead."
+            )
+
+
 def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """Resample OHLCV bars to a coarser cadence (e.g. "15min").
 
