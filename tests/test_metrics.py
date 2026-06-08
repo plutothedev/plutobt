@@ -316,3 +316,113 @@ def test_cost_sensitivity_preserves_slippage_order_as_index():
 
     df = cost_sensitivity(run_fn, [4.0, 1.0, 2.0])
     assert list(df.index) == [4.0, 1.0, 2.0]  # caller order preserved, not sorted
+
+
+# ---------------------------------------------------------------------------
+# M7.11 — compute_metrics (assembler, §0.2 key set, IN-SAMPLE label)
+# ---------------------------------------------------------------------------
+from plutobt.metrics import IN_SAMPLE_LABEL, compute_metrics
+from plutobt.portfolio import Trade  # noqa: F401  (re-import for clarity)
+
+# §0.2 EXACT required key set (single source of truth, M9 reads only these).
+_REQUIRED_KEYS = [
+    "label", "sharpe", "sharpe_raw", "sharpe_se", "sharpe_ci",
+    "psr", "sortino", "calmar", "annual_return",
+    "max_drawdown_depth", "max_drawdown_duration", "trailing_hwm_drawdown",
+    "win_rate", "profit_factor", "expectancy", "avg_r",
+    "T", "periods_per_year", "n_trades", "exposure",
+]
+
+
+def _result_with(equity: pd.Series, trades, manifest=None):
+    # Build a minimal BacktestResult-like object for the assembler.
+    from plutobt.engine import BacktestResult  # imported lazily to avoid cycles
+    return BacktestResult(
+        equity_curve=equity,
+        trades=trades,
+        metrics={},
+        manifest=manifest if manifest is not None else {"periods_per_year": None},
+    )
+
+
+def test_compute_metrics_first_key_is_label_and_is_in_sample():
+    eq = pd.Series([100.0, 110.0, 105.0, 120.0, 90.0, 95.0, 130.0, 125.0])
+    trades = [_trade(300.0), _trade(-100.0)]
+    out = compute_metrics(_result_with(eq, trades), periods_per_year=20412.0)
+    # First key MUST be "label" and carry the IN-SAMPLE stamp.
+    assert next(iter(out)) == "label"
+    assert out["label"] == IN_SAMPLE_LABEL
+
+
+def test_compute_metrics_includes_exactly_required_keys():
+    """§0.2: compute_metrics must include ALL required keys."""
+    eq = pd.Series([100.0, 110.0, 105.0, 120.0, 90.0, 95.0, 130.0, 125.0])
+    out = compute_metrics(_result_with(eq, [_trade(10.0)]), periods_per_year=20412.0)
+    for key in _REQUIRED_KEYS:
+        assert key in out, f"Missing required key: {key}"
+    # T = number of bar returns = len(equity) - 1
+    assert out["T"] == 7
+    assert_allclose(out["periods_per_year"], 20412.0, rtol=0, atol=0)
+
+
+def test_compute_metrics_sharpe_raw_vs_annualized():
+    """sharpe = annualized, sharpe_raw = per-bar (§0.2)."""
+    eq_vals = [100.0] + list(np.cumprod(1.0 + np.array(REF_RETURNS)) * 100.0)
+    eq = pd.Series(eq_vals)
+    out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
+    rets = pd.Series(eq_vals).pct_change().dropna()
+    assert_allclose(out["sharpe_raw"], sharpe(rets, 1.0), rtol=1e-12, atol=0)
+    assert_allclose(out["sharpe"], sharpe(rets, 20412.0), rtol=1e-12, atol=0)
+
+
+def test_compute_metrics_sharpe_ci_is_tuple():
+    """§0.2: sharpe_ci must be a (low, high) tuple."""
+    eq = pd.Series([100.0, 110.0, 105.0, 120.0])
+    out = compute_metrics(_result_with(eq, []), periods_per_year=1.0)
+    assert isinstance(out["sharpe_ci"], tuple)
+    assert len(out["sharpe_ci"]) == 2
+    lo, hi = out["sharpe_ci"]
+    assert lo < hi
+
+
+def test_compute_metrics_annual_return_per_s07():
+    """§0.7: annual_return = mean(returns) * periods_per_year."""
+    eq = pd.Series([100.0, 110.0, 105.0, 120.0, 90.0, 95.0, 130.0, 125.0])
+    ppy = 20412.0
+    out = compute_metrics(_result_with(eq, []), periods_per_year=ppy)
+    rets = eq.pct_change().dropna()
+    expected_ann_ret = float(rets.mean() * ppy)
+    assert_allclose(out["annual_return"], expected_ann_ret, rtol=1e-12, atol=0)
+
+
+def test_compute_metrics_win_rate_per_s03():
+    """§0.3: win_rate = closed_wins / n_closed; 0.0 when no closed trades."""
+    eq = pd.Series([100.0, 110.0, 120.0, 130.0])
+    # 3 closed trades: 2 wins, 1 loss -> win_rate = 2/3
+    trades = [_trade(10.0), _trade(20.0), _trade(-5.0)]
+    out = compute_metrics(_result_with(eq, trades), periods_per_year=1.0)
+    assert_allclose(out["win_rate"], 2.0 / 3.0, rtol=0, atol=1e-12)
+
+
+def test_compute_metrics_win_rate_zero_when_no_closed_trades():
+    """§0.3: win_rate = 0.0 when n_closed == 0."""
+    eq = pd.Series([100.0, 110.0])
+    out = compute_metrics(_result_with(eq, []), periods_per_year=1.0)
+    assert out["win_rate"] == 0.0
+
+
+def test_compute_metrics_derives_periods_per_year_from_manifest():
+    """periods_per_year=None => derive from manifest's stored value."""
+    eq = pd.Series([100.0, 101.0, 102.0])
+    res = _result_with(eq, [], manifest={"periods_per_year": 20412.0})
+    out = compute_metrics(res, periods_per_year=None)
+    assert_allclose(out["periods_per_year"], 20412.0, rtol=0, atol=0)
+
+
+def test_compute_metrics_n_trades_is_closed_count():
+    """n_trades counts closed trades only (open-at-end excluded)."""
+    eq = pd.Series([100.0, 110.0, 120.0])
+    closed = [_trade(10.0), _trade(-5.0)]
+    open_end = [_trade(20.0, open_at_end=True)]
+    out = compute_metrics(_result_with(eq, closed + open_end), periods_per_year=1.0)
+    assert out["n_trades"] == 2  # only closed trades
