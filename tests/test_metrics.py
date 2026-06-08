@@ -1,6 +1,7 @@
 """Tests for plutobt.metrics (M7 tasks, §10.7, §10.15)."""
 
 import math
+import pathlib
 
 import numpy as np
 import pandas as pd
@@ -24,6 +25,8 @@ from plutobt.metrics import (
     trailing_hwm_drawdown,
 )
 from plutobt.portfolio import Trade
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Canonical reference returns series reused across §10.7 tasks.
 # mean = 0.01, population std (ddof=0) = 0.025298221281347035, sharpe = 0.39528470752104744
@@ -473,3 +476,61 @@ def test_metrics_module_exposes_full_public_api():
         "outlier_sensitivity", "cost_sensitivity", "compute_metrics",
     ):
         assert hasattr(m, name), name
+
+
+# ---------------------------------------------------------------------------
+# §10.15 — cost-sweep monotonicity backed by the REAL engine
+# ---------------------------------------------------------------------------
+
+def test_real_engine_metrics_degrade_monotonically_with_slippage():
+    """§10.15: run the REAL engine at slippage_ticks in {1,2,4} on the sample
+    bars; assert sharpe and profit_factor are non-increasing as slippage rises.
+
+    This proves the ENGINE degrades under cost pressure, not just a synthetic
+    run_fn (the existing test_cost_sensitivity_sweep_is_monotonic_non_increasing
+    only validates the tabulator utility with a hand-crafted function).
+    """
+    from tests.conftest import GoldenStrategy
+
+    from plutobt.config import BacktestConfig
+    from plutobt.data import load_bars
+    from plutobt.engine import Engine
+    from plutobt.instruments import get_instrument
+
+    sample = _REPO_ROOT / "data" / "sample" / "nq_5m.json"
+    df = load_bars(str(sample))
+    nq = get_instrument("NQ")
+    ppy = 20412.0
+    slippages = [1.0, 2.0, 4.0]
+
+    def run_fn(slippage_ticks: float) -> dict:
+        cfg = BacktestConfig(
+            commission_per_side=2.5,
+            slippage_ticks=slippage_ticks,
+            periods_per_year=ppy,
+            carry_overnight=False,
+        )
+        result = Engine(nq, cfg).run(df, GoldenStrategy())
+        m = compute_metrics(result, periods_per_year=ppy)
+        pf = m["profit_factor"]
+        exp = m["expectancy"]
+        return {
+            "sharpe": m["sharpe"],
+            # profit_factor / expectancy may be NaN (no trades); coerce to a
+            # numeric sentinel that won't falsely break monotonicity.
+            "profit_factor": pf if not math.isnan(pf) else float("-inf"),
+            "expectancy": exp if not math.isnan(exp) else float("-inf"),
+        }
+
+    tab = cost_sensitivity(run_fn, slippages)
+    assert list(tab.index) == slippages
+
+    # Assert non-increasing (with small float tolerance) for each metric.
+    for col in ["sharpe", "profit_factor", "expectancy"]:
+        vals = tab[col].tolist()
+        for lo, hi in zip(vals, vals[1:]):
+            assert lo >= hi - 1e-10, (
+                f"{col} not non-increasing with slippage: "
+                f"{slippages[vals.index(lo)]}→{slippages[vals.index(hi)]}: "
+                f"{lo} > {hi}"
+            )
