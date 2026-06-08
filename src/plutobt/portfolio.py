@@ -111,12 +111,7 @@ class Portfolio:
         self.cash += realized
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
-        r_mult: float | None = None
-        initial_stop = self.position.initial_stop
-        if initial_stop is not None and avg is not None:
-            risk_per_contract = abs(avg - initial_stop) * self.instrument.point_value
-            if risk_per_contract != 0.0:
-                r_mult = realized / (risk_per_contract * closing)
+        r_mult = self._calc_r_multiple(realized, closing)
 
         self.trades.append(
             Trade(
@@ -144,6 +139,22 @@ class Portfolio:
         self.position.avg_price = fill.price
         self.position.initial_stop = None
         self._open_entry_ts = fill.ts
+
+    def _calc_r_multiple(self, pnl: float, contracts: int) -> float | None:
+        """Van Tharp R = pnl / (risk_per_contract * contracts).
+
+        None when there is no attached stop or the per-contract risk is zero
+        (§0.4). ``contracts`` is the unsigned number of contracts the ``pnl``
+        is measured over.
+        """
+        avg = self.position.avg_price
+        initial_stop = self.position.initial_stop
+        if initial_stop is None or avg is None:
+            return None
+        risk_per_contract = abs(avg - initial_stop) * self.instrument.point_value
+        if risk_per_contract == 0.0:
+            return None
+        return pnl / (risk_per_contract * contracts)
 
     def _go_flat(self) -> None:
         self.position = Position()
@@ -198,14 +209,7 @@ class Portfolio:
         unrealized = pnl_points(self.position.avg_price, mark, self.position.qty, self.instrument)
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
-        r_mult: float | None = None
-        initial_stop = self.position.initial_stop
-        avg = self.position.avg_price
-        if initial_stop is not None and avg is not None:
-            risk_per_contract = abs(avg - initial_stop) * self.instrument.point_value
-            contracts = abs(self.position.qty)
-            if risk_per_contract != 0.0:
-                r_mult = unrealized / (risk_per_contract * contracts)
+        r_mult = self._calc_r_multiple(unrealized, abs(self.position.qty))
 
         self.trades.append(
             Trade(
