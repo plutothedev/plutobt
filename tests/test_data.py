@@ -128,3 +128,64 @@ def test_validate_bars_raises_when_strict():
     df.loc[1, "volume"] = -5
     with pytest.raises(ValueError, match="validate_bars: 1 error"):
         validate_bars(df, strict=True)
+
+
+# ---------------------------------------------------------------------------
+# M3.3 — validate_bars ts monotonic+unique guard + gap report (§10.12 partial)
+# ---------------------------------------------------------------------------
+
+
+def _seq_df(ts: list[int]) -> pd.DataFrame:
+    n = len(ts)
+    return pd.DataFrame(
+        {
+            "ts": ts,
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.0] * n,
+            "volume": [10] * n,
+        }
+    )
+
+
+def test_validate_bars_duplicate_ts_guard_fires():  # §10.12 partial
+    df = _seq_df([1700000000, 1700000300, 1700000300, 1700000600])
+    rep = validate_bars(df)
+    assert rep.ok is False
+    assert any("duplicate ts" in e for e in rep.errors)
+    assert 2 in rep.bad_rows  # the repeated row
+
+
+def test_validate_bars_nonmonotonic_ts_guard_fires():  # §10.12 partial
+    df = _seq_df([1700000000, 1700000600, 1700000300])  # row 2 goes backwards
+    rep = validate_bars(df)
+    assert rep.ok is False
+    assert any("non-monotonic ts" in e for e in rep.errors)
+    assert 2 in rep.bad_rows
+
+
+def test_validate_bars_strict_raises_on_nonmonotonic():  # §10.12 partial
+    df = _seq_df([1700000000, 1700000600, 1700000300])
+    with pytest.raises(ValueError, match="validate_bars"):
+        validate_bars(df, strict=True)
+
+
+def test_validate_bars_gap_report():
+    # 5-min cadence (300s); one weekend-sized gap after row 2
+    ts = [1700000000, 1700000300, 1700000600, 1700000600 + 49 * 3600]
+    df = _seq_df(ts)
+    rep = validate_bars(df)
+    assert rep.ok is True  # a gap is reported, not an error
+    assert rep.modal_interval == 300
+    assert rep.max_gap == 49 * 3600
+    # gap recorded at the row that opens after the gap (index 3)
+    assert (3, 49 * 3600) in rep.gaps
+
+
+def test_validate_bars_no_gaps_on_regular_series():
+    df = _seq_df([1700000000, 1700000300, 1700000600])
+    rep = validate_bars(df)
+    assert rep.modal_interval == 300
+    assert rep.gaps == []
+    assert rep.max_gap == 0
