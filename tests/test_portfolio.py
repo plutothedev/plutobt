@@ -2,7 +2,8 @@ import math
 
 import pytest
 
-from plutobt.portfolio import Position, Trade
+from plutobt.instruments import get_instrument
+from plutobt.portfolio import Fill, Portfolio, Position, Trade
 
 
 def test_position_defaults_flat():
@@ -57,10 +58,6 @@ def test_trade_open_at_end_flag():
     assert t.exit_price is None
     assert t.open_at_end is True
     assert math.isclose(t.pnl, -50.0)
-
-
-from plutobt.instruments import get_instrument
-from plutobt.portfolio import Fill, Portfolio
 
 
 def test_fill_value_type_fields():
@@ -202,7 +199,7 @@ def test_mark_does_not_move_cash():
     nq = get_instrument("NQ")
     pf = Portfolio(starting_cash=50_000.0, instrument=nq)
     pf.apply_fill(Fill(ts=1000, side="sell", contracts=2, price=20_000.0, commission=0.0))
-    pf.mark(20_050.0)   # adverse for short
+    pf.mark(20_050.0)  # adverse for short
     assert pf.cash == pytest.approx(50_000.0)
     # Short down 50 pts * $20 * 2 = -$2000 unrealized.
     assert pf.equity(mark_price=20_050.0) == pytest.approx(48_000.0)
@@ -291,7 +288,8 @@ def test_mtm_gap_open_entry_stop_exit_to_the_cent():
 
     # Interim mark at the entry bar's close (20,020) — unrealized only.
     pf.mark(20_020.00)
-    assert pf.equity(mark_price=20_020.00) == pytest.approx(100_000.0 + (20_020.00 - 20_012.00) * 20.0)
+    expected_equity = 100_000.0 + (20_020.00 - 20_012.00) * 20.0
+    assert pf.equity(mark_price=20_020.00) == pytest.approx(expected_equity)
 
     # Exit via stop fill at 20,007.00 (a non-close price).
     pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_007.00, commission=0.0))
@@ -349,7 +347,7 @@ def test_open_at_end_marked_and_flagged():
     # 1 contract remains open at VWAP 20,020. Mark to last close 20,090 and flag.
     pf.mark(20_090.0)
     pf.mark_open_at_end(ts=2000)
-    assert pf.position.qty == 1            # position stays open (mark, not close)
+    assert pf.position.qty == 1  # position stays open (mark, not close)
     assert len(pf.trades) == 2
     closed, open_trade = pf.trades
     assert closed.open_at_end is False
@@ -380,3 +378,43 @@ def test_open_at_end_noop_when_flat():
     pf = Portfolio(starting_cash=100_000.0, instrument=nq)
     pf.mark_open_at_end(ts=1000)
     assert pf.trades == []
+
+
+def test_r_multiple_populated_for_stop_protected_trade():
+    """§0.4: r_multiple = realized_pnl / (|entry - stop| * point_value * contracts).
+
+    NQ ($20/pt). Entry 20,000, initial_stop 19,990. Risk = 10 pts * $20 * 1 = $200.
+    Exit at 20,030: realized = +30 pts * $20 = +$600 => r = 600 / 200 = 3.0.
+    """
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_000.0, commission=0.0))
+    # Set initial_stop directly (broker sets this in M5; wire the mechanism here).
+    pf.position.initial_stop = 19_990.0
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_030.0, commission=0.0))
+    tr = pf.trades[0]
+    assert tr.pnl == pytest.approx(600.0)
+    assert tr.r_multiple == pytest.approx(3.0)
+
+
+def test_r_multiple_none_when_no_stop():
+    """§0.4: r_multiple is None when initial_stop is not set."""
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_000.0, commission=0.0))
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_010.0, commission=0.0))
+    assert pf.trades[0].r_multiple is None
+
+
+def test_r_multiple_open_at_end_with_stop():
+    """§0.4: r_multiple also computed in mark_open_at_end when initial_stop set."""
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_000.0, commission=0.0))
+    pf.position.initial_stop = 19_990.0  # risk = 10 pts * $20 = $200
+    pf.mark(20_020.0)  # unrealized = +20 pts * $20 = +$400 => r = 400/200 = 2.0
+    pf.mark_open_at_end(ts=1000)
+    tr = pf.trades[0]
+    assert tr.open_at_end is True
+    assert tr.pnl == pytest.approx(400.0)
+    assert tr.r_multiple == pytest.approx(2.0)

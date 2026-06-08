@@ -9,7 +9,7 @@ from plutobt.instruments import Instrument, pnl_points
 
 @dataclass
 class Position:
-    qty: int = 0                       # signed; >0 long, <0 short, 0 flat
+    qty: int = 0  # signed; >0 long, <0 short, 0 flat
     avg_price: float | None = None
     initial_stop: float | None = None
 
@@ -30,7 +30,7 @@ class Trade:
 @dataclass
 class Fill:
     ts: int
-    side: str                          # "buy" | "sell"
+    side: str  # "buy" | "sell"
     contracts: int
     price: float
     commission: float
@@ -92,15 +92,15 @@ class Portfolio:
         new_qty = cur_qty + signed
         # VWAP on absolute sizes (sign is uniform here).
         prior_avg = self.position.avg_price
-        self.position.avg_price = (
-            prior_avg * abs(cur_qty) + fill.price * abs(signed)
-        ) / abs(new_qty)
+        self.position.avg_price = (prior_avg * abs(cur_qty) + fill.price * abs(signed)) / abs(
+            new_qty
+        )
         self.position.qty = new_qty
 
     def _reduce_or_flip(self, fill: Fill, signed: int) -> None:
         cur_qty = self.position.qty
         avg = self.position.avg_price
-        closing = min(abs(signed), abs(cur_qty))   # contracts being closed
+        closing = min(abs(signed), abs(cur_qty))  # contracts being closed
         side_str = "long" if cur_qty > 0 else "short"
 
         # Pro-rata realized P&L on the closed contracts, fill-basis.
@@ -131,7 +131,7 @@ class Portfolio:
             )
         )
 
-        remaining = cur_qty + signed   # signed residual after applying the fill
+        remaining = cur_qty + signed  # signed residual after applying the fill
         if remaining == 0:
             self._go_flat()
             return
@@ -195,9 +195,7 @@ class Portfolio:
         mark = self._mark_price
         if mark is None:
             mark = self.position.avg_price
-        unrealized = pnl_points(
-            self.position.avg_price, mark, self.position.qty, self.instrument
-        )
+        unrealized = pnl_points(self.position.avg_price, mark, self.position.qty, self.instrument)
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
         r_mult: float | None = None
