@@ -6,6 +6,7 @@ from plutobt.instruments import Instrument
 from plutobt.instruments import REGISTRY, get_instrument
 from plutobt.instruments import parse_price
 from plutobt.instruments import ticks_to_price
+from plutobt.instruments import pnl_points
 
 
 def test_instrument_is_frozen_dataclass_with_exact_fields():
@@ -166,3 +167,66 @@ def test_ticks_to_price_signed_and_fractional():
     cl = get_instrument("CL")          # tick 0.01
     assert ticks_to_price(-3, cl) == pytest.approx(-0.03)
     assert ticks_to_price(2.5, cl) == pytest.approx(0.025)
+
+
+def test_pnl_points_nq_ten_point_long_one_contract():
+    nq = get_instrument("NQ")
+    # +10 points * $20/pt * 1 = $200
+    assert pnl_points(20000.0, 20010.0, 1, nq) == pytest.approx(200.0)
+
+
+def test_pnl_points_short_is_negative_of_long():
+    nq = get_instrument("NQ")
+    long_pnl = pnl_points(20000.0, 20010.0, 1, nq)
+    short_pnl = pnl_points(20000.0, 20010.0, -1, nq)
+    assert short_pnl == pytest.approx(-long_pnl)
+    assert short_pnl == pytest.approx(-200.0)
+
+
+def test_pnl_points_scales_with_contracts():
+    es = get_instrument("ES")
+    # +4 points * $50/pt * 3 = $600
+    assert pnl_points(5000.0, 5004.0, 3, es) == pytest.approx(600.0)
+
+
+# §10.1: per-symbol single-tick move -> exactly one tick_value of P&L, values
+# taken verbatim from the §5.3 table.
+@pytest.mark.parametrize(
+    "symbol,expected_tick_value",
+    [
+        ("NQ", 5.0), ("MNQ", 0.5), ("ES", 12.5), ("MES", 1.25),
+        ("YM", 5.0), ("RTY", 5.0), ("CL", 10.0), ("GC", 10.0), ("ZN", 15.625),
+    ],
+)
+def test_section_10_1_one_tick_move_equals_tick_value(symbol, expected_tick_value):
+    inst = get_instrument(symbol)
+    one_tick_up = ticks_to_price(1, inst)          # decimal size of one tick
+    pnl = pnl_points(0.0, one_tick_up, 1, inst)    # 1 contract, +1 tick
+    assert pnl == pytest.approx(expected_tick_value)
+    assert pnl == pytest.approx(inst.tick_value)
+
+
+def test_section_10_1_nq_n_tick_move_dollars():
+    # explicit N-tick check: 8 ticks * $5/tick = $40 on NQ
+    nq = get_instrument("NQ")
+    eight_ticks = ticks_to_price(8, nq)            # 2.0 points
+    assert pnl_points(0.0, eight_ticks, 1, nq) == pytest.approx(40.0)
+
+
+def test_section_10_1_zn_half_of_one_32nd_identity():
+    # ½ of 1/32 = 1/64 = 0.015625 decimal points; * $1,000/pt = $15.625
+    zn = get_instrument("ZN")
+    assert zn.tick_size == pytest.approx(0.5 * (1 / 32))
+    assert zn.tick_size == pytest.approx(1 / 64)
+    assert zn.tick_size == pytest.approx(0.015625)
+    one_tick = ticks_to_price(1, zn)
+    assert pnl_points(0.0, one_tick, 1, zn) == pytest.approx(1000.0 / 64.0)
+    assert pnl_points(0.0, one_tick, 1, zn) == pytest.approx(15.625)
+
+
+def test_section_10_1_zn_32nds_parse_to_pnl_end_to_end():
+    # buy 110'080, sell 110'085: +0.5/32 = 1 ZN tick = $15.625 on 1 contract
+    zn = get_instrument("ZN")
+    entry = parse_price("110'080", zn)
+    exit_ = parse_price("110'085", zn)
+    assert pnl_points(entry, exit_, 1, zn) == pytest.approx(15.625)

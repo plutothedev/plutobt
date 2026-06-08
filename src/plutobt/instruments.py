@@ -122,3 +122,12 @@ def parse_price(raw: str | float, instrument: Instrument) -> float:
 def ticks_to_price(ticks: float, instrument: Instrument) -> float:
     """Decimal price magnitude of ``ticks`` ticks (signed). ticks * tick_size."""
     return ticks * instrument.tick_size
+
+
+def pnl_points(entry: float, exit: float, contracts: int, instrument: Instrument) -> float:
+    """Signed P&L in account currency: (exit - entry) * point_value * contracts.
+
+    ``contracts`` is signed (>0 long, <0 short). Inputs are decimal points
+    (run raw quotes through ``parse_price`` first).
+    """
+    return (exit - entry) * instrument.point_value * contracts
