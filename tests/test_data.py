@@ -289,3 +289,46 @@ def test_tag_sessions_overnight_bar_is_eth():
     df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
     out = tag_sessions(df, nq)
     assert out.iloc[0]["session"] == "ETH"
+
+
+# ---------------------------------------------------------------------------
+# M3.6 — resample OHLCV with left-labeled buckets (ts=open, 5.5)
+# ---------------------------------------------------------------------------
+
+from plutobt.data import resample
+
+
+def test_resample_5m_to_15m_ohlcv():
+    # three consecutive 5-min bars -> one 15-min bar
+    base = _ct_ts(2025, 6, 2, 8, 30)
+    rows = [
+        [base + 0, 100.0, 105.0, 99.0, 101.0, 10],
+        [base + 300, 101.0, 106.0, 98.0, 102.0, 20],
+        [base + 600, 102.0, 104.0, 97.0, 103.0, 30],
+    ]
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = resample(df, "15min")
+
+    assert list(out.columns) == ["ts", "open", "high", "low", "close", "volume"]
+    assert len(out) == 1
+    r = out.iloc[0]
+    assert r["ts"] == base          # ts of the bucket = its OPEN (left label)
+    assert r["open"] == 100.0       # first
+    assert r["high"] == 106.0       # max
+    assert r["low"] == 97.0         # min
+    assert r["close"] == 103.0      # last
+    assert r["volume"] == 60        # sum
+
+
+def test_resample_drops_empty_buckets():
+    base = _ct_ts(2025, 6, 2, 8, 30)
+    # two bars 15 min apart -> two separate 15-min buckets, no empty NaN bucket between
+    rows = [
+        [base + 0, 100.0, 105.0, 99.0, 101.0, 10],
+        [base + 900, 102.0, 104.0, 97.0, 103.0, 30],
+    ]
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = resample(df, "15min")
+    assert len(out) == 2
+    assert out["ts"].tolist() == [base, base + 900]
+    assert not out.isna().any().any()

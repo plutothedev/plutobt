@@ -220,6 +220,7 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         .dropna(subset=["open"])
     )
     out = agg.reset_index()
-    out["ts"] = (out["index"].view("int64") // 1_000_000_000).astype("int64")
+    # The datetime column is named "ts" (inherits from the Series used in set_index).
+    out["ts"] = out["ts"].astype("int64") // 1_000_000_000
     out["volume"] = out["volume"].astype("int64")
     return out[_COLUMNS].reset_index(drop=True)
