@@ -116,3 +116,34 @@ def test_engine_no_order_during_warmup_nan_window():
     # the earliest possible entry fill is at or after the first warmed bar's t+1.
     if result.trades:
         assert result.trades[0].entry_ts >= 900
+
+
+class BuyAndStayLong(Strategy):
+    def precompute(self, df):
+        df = df.copy()
+        df["go"] = df.index == 0
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.go and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=1)
+
+
+def test_engine_open_position_marked_to_last_not_dropped():
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _bars([20000.0, 20010.0, 20050.0])  # entry fills bar1 open=20010
+    result = eng.run(df, BuyAndStayLong())
+
+    # exactly one trade, still open at end, flagged.
+    assert len(result.trades) == 1
+    tr = result.trades[0]
+    assert tr.open_at_end is True
+    assert tr.exit_ts is None and tr.exit_price is None
+
+    # final equity reflects unrealized MTM to last close (20050) from fill 20010:
+    # 1 contract * $20/pt * (20050 - 20010) = +$800 on top of starting cash.
+    final_equity = result.equity_curve.iloc[-1]
+    assert final_equity == pytest.approx(100_000.0 + 800.0)
+    # the open position is NOT silently removed from the equity curve length.
+    assert len(result.equity_curve) == 3
