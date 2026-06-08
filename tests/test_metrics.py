@@ -183,3 +183,43 @@ def test_calmar_annual_return_over_abs_max_dd():
 
 def test_calmar_zero_drawdown_returns_inf():
     assert math.isinf(calmar(0.20, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# M7.7 — profit_factor (inf-guard + open-at-end exclusion)
+# ---------------------------------------------------------------------------
+from plutobt.portfolio import Trade
+
+from plutobt.metrics import profit_factor
+
+
+def _trade(pnl: float, r_multiple=None, open_at_end: bool = False) -> Trade:
+    # Minimal Trade for trade-stat tests; only fields the metric reads matter.
+    # Trade.side is "long"/"short" per §0.5.
+    return Trade(
+        entry_ts=0, exit_ts=1, side="long", contracts=1,
+        entry_price=100.0, exit_price=100.0 + pnl, pnl=pnl,
+        r_multiple=r_multiple, open_at_end=open_at_end,
+    )
+
+
+def test_profit_factor_hand_calc():
+    # gross_profit = 600, gross_loss = 150 -> PF = 4.0
+    trades = [_trade(300.0), _trade(200.0), _trade(100.0),
+              _trade(-100.0), _trade(-50.0)]
+    assert_allclose(profit_factor(trades), 4.0, rtol=0, atol=1e-12)
+
+
+def test_profit_factor_no_losers_is_inf():
+    trades = [_trade(100.0), _trade(50.0)]
+    assert math.isinf(profit_factor(trades))
+
+
+def test_profit_factor_excludes_open_at_end_trade():
+    # Open-at-end trade is excluded from PF (§5.7) even if it would change the ratio.
+    trades = [_trade(300.0), _trade(-100.0), _trade(-999.0, open_at_end=True)]
+    assert_allclose(profit_factor(trades), 3.0, rtol=0, atol=1e-12)
+
+
+def test_profit_factor_empty_is_nan():
+    assert math.isnan(profit_factor([]))
