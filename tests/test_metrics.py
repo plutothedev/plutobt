@@ -223,3 +223,33 @@ def test_profit_factor_excludes_open_at_end_trade():
 
 def test_profit_factor_empty_is_nan():
     assert math.isnan(profit_factor([]))
+
+
+# ---------------------------------------------------------------------------
+# M7.8 — expectancy and avg_r (Van Tharp R; N/A excluded)
+# ---------------------------------------------------------------------------
+from plutobt.metrics import avg_r, expectancy
+
+
+def test_expectancy_hand_calc():
+    # win_rate=0.6, avg_win=200, loss_rate=0.4, avg_loss=75
+    # expectancy = 0.6*200 - 0.4*75 = 120 - 30 = 90
+    trades = [_trade(300.0), _trade(200.0), _trade(100.0),
+              _trade(-100.0), _trade(-50.0)]
+    assert_allclose(expectancy(trades), 90.0, rtol=0, atol=1e-12)
+
+
+def test_avg_r_excludes_none_r_multiple():
+    # R-multiples present: [2.0, 1.5, None, -1.0] -> avg over the 3 non-None = 0.8333...
+    trades = [_trade(0.0, r_multiple=2.0), _trade(0.0, r_multiple=1.5),
+              _trade(0.0, r_multiple=None), _trade(0.0, r_multiple=-1.0)]
+    assert_allclose(avg_r(trades), 5.0 / 6.0, rtol=0, atol=1e-12)
+
+
+def test_avg_r_all_stopless_is_none():
+    trades = [_trade(0.0, r_multiple=None), _trade(0.0, r_multiple=None)]
+    assert avg_r(trades) is None
+
+
+def test_expectancy_empty_is_nan():
+    assert math.isnan(expectancy([]))
