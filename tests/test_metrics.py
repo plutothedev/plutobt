@@ -138,6 +138,17 @@ def test_psr_zero_std_returns_nan():
     assert math.isnan(psr(r, sr0=0.0))
 
 
+def test_psr_nonpositive_variance_adj_returns_nan_not_raise():
+    # The variance-adjustment term 1 - g3*sr + ((g4-1)/4)*sr^2 can in principle
+    # go <= 0 for extreme skew/kurtosis (sqrt would raise). The kurtosis-skew
+    # inequality makes this unreachable from sample moments, so we drive it via
+    # the skew/kurtosis override hook: sr_hat~0.395, g3=5, g4=1 ->
+    # variance_adj = 1 - 5*0.395 + 0 = -0.976 < 0.
+    r = pd.Series(REF_RETURNS)
+    got = psr(r, sr0=0.0, skew=5.0, kurtosis=1.0)
+    assert math.isnan(got)  # NaN, not a ValueError from math.sqrt of a negative
+
+
 # ---------------------------------------------------------------------------
 # M7.4 — sortino (full-N downside denominator, MAR) — §10.7 divide-by-N
 # ---------------------------------------------------------------------------
@@ -301,6 +312,10 @@ def test_outlier_sensitivity_top_trade_share_and_recompute():
     assert out["profit_factor_ex_best"] < profit_factor(trades)
     # With the single worst loser removed, profit factor must rise.
     assert out["profit_factor_ex_worst"] > profit_factor(trades)
+    # Expectancy is recomputed ex-best AND ex-worst (symmetry); removing the
+    # best winner lowers expectancy, removing the worst loser raises it.
+    assert out["expectancy_ex_best"] < expectancy(trades)
+    assert out["expectancy_ex_worst"] > expectancy(trades)
     # Collapse flag: total P&L is dominated by one trade.
     assert out["collapses_without_top1"] is True
 
@@ -428,6 +443,20 @@ def test_compute_metrics_n_trades_is_closed_count():
     open_end = [_trade(20.0, open_at_end=True)]
     out = compute_metrics(_result_with(eq, closed + open_end), periods_per_year=1.0)
     assert out["n_trades"] == 2  # only closed trades
+
+
+def test_compute_metrics_exposure_fraction():
+    """exposure = fraction of equity bars inside any [entry_ts, exit_ts] interval."""
+    # 10-bar equity curve, ts index 0..9.
+    eq = pd.Series([100.0 + i for i in range(10)], index=list(range(10)), dtype=float)
+    # Trade A spans ts 1..3 (bars 1,2,3 = 3 bars); Trade B spans ts 6..7 (bars 6,7 = 2).
+    # Disjoint intervals -> 5 of 10 bars in market -> exposure = 0.5.
+    trade_a = Trade(entry_ts=1, exit_ts=3, side="long", contracts=1,
+                    entry_price=100.0, exit_price=103.0, pnl=3.0)
+    trade_b = Trade(entry_ts=6, exit_ts=7, side="long", contracts=1,
+                    entry_price=106.0, exit_price=107.0, pnl=1.0)
+    out = compute_metrics(_result_with(eq, [trade_a, trade_b]), periods_per_year=1.0)
+    assert_allclose(out["exposure"], 0.5, rtol=0, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

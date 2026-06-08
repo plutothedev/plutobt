@@ -24,7 +24,10 @@ IN_SAMPLE_LABEL = (
     "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
 )
 
-MIN_TRADE_SAMPLE = 30  # below this, PF/expectancy flagged "insufficient sample" (§5.7)
+# Min-sample threshold for trade-based stats (§5.7). compute_metrics does NOT
+# flag this; format_report (M9) imports this constant and surfaces the
+# "insufficient sample" warning from the n_trades output key below the threshold.
+MIN_TRADE_SAMPLE = 30
 
 
 def sharpe(returns: pd.Series, periods_per_year: float) -> float:
@@ -59,12 +62,22 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def psr(returns: pd.Series, sr0: float = 0.0) -> float:
+def psr(
+    returns: pd.Series,
+    sr0: float = 0.0,
+    *,
+    skew: float | None = None,
+    kurtosis: float | None = None,
+) -> float:
     """Probabilistic Sharpe Ratio vs benchmark ``sr0`` (Bailey & Lopez de Prado).
 
     Conventions (stated per §9 item 10): per-bar (non-annualized) SR_hat;
     sqrt(n-1) scaling; non-excess (Pearson) kurtosis g4; population (biased)
     skew g3 and kurtosis g4. Returns NaN when std is 0.
+
+    ``skew`` / ``kurtosis`` override the sample g3 / g4 (testing hook for the
+    variance-adjustment guard; the kurtosis-skew inequality makes a non-positive
+    adjustment unreachable from real sample moments).
 
     MinTRL (Minimum Track Record Length) is OUT of v1; PSR stays in.
     """
@@ -76,9 +89,14 @@ def psr(returns: pd.Series, sr0: float = 0.0) -> float:
     sr_hat = r.mean() / std
     d = r - r.mean()
     m2 = (d**2).mean()
-    g3 = (d**3).mean() / m2**1.5          # population skew
-    g4 = (d**4).mean() / m2**2            # non-excess (Pearson) kurtosis
-    denom = math.sqrt(1.0 - g3 * sr_hat + ((g4 - 1.0) / 4.0) * sr_hat**2)
+    g3 = (d**3).mean() / m2**1.5 if skew is None else skew      # population skew
+    g4 = (d**4).mean() / m2**2 if kurtosis is None else kurtosis  # Pearson kurtosis
+    # The variance-adjustment term can go non-positive for extreme
+    # skew/kurtosis; sqrt of it would raise. Guard with NaN instead.
+    variance_adj = 1.0 - g3 * sr_hat + ((g4 - 1.0) / 4.0) * sr_hat**2
+    if variance_adj <= 0.0:
+        return float("nan")
+    denom = math.sqrt(variance_adj)
     z = (sr_hat - sr0) * math.sqrt(n - 1) / denom
     return _norm_cdf(z)
 
@@ -107,8 +125,8 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
     """Max drawdown depth (signed fraction, <= 0) and duration in bars.
 
     Depth = min over t of equity_t / running_peak_t - 1.
-    Duration = longest peak-to-recovery span in bars; if the deepest
-    drawdown never recovers, it runs to the last bar. Positional (integer)
+    Duration = duration of the deepest drawdown episode (peak-to-recovery);
+    if it never recovers, runs to the last bar. Positional (integer)
     bar distance is used, independent of the index dtype.
     """
     eq = np.asarray(equity, dtype=float)
@@ -169,7 +187,8 @@ def profit_factor(trades: list[Trade]) -> float:
 
     inf-guard: returns +inf when there are profits but no losers; returns NaN
     when there are no closed trades at all. Open-at-end trades are excluded.
-    Min-sample flagging (n < 30) is applied by ``compute_metrics``, not here.
+    Min-sample flagging (n < MIN_TRADE_SAMPLE) is surfaced by ``format_report``
+    (M9) from the n_trades output key -- not here, and not in ``compute_metrics``.
     """
     closed = _closed_trades(trades)
     if not closed:
@@ -243,6 +262,7 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
         "profit_factor_ex_best": profit_factor(ex_best),
         "profit_factor_ex_worst": profit_factor(ex_worst),
         "expectancy_ex_best": expectancy(ex_best),
+        "expectancy_ex_worst": expectancy(ex_worst),
         "total_pnl": total,
         "total_pnl_ex_best": total_ex_best,
         "collapses_without_top1": bool(total > 0.0 and total_ex_best <= 0.0),
@@ -332,24 +352,16 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     exp = expectancy(trades)
     a_r = avg_r(trades)
 
-    # Exposure: fraction of equity bars where position != 0
-    # approximated as n_trades > 0 positions / total bars
-    # Use a simple proxy: sum of (exit_ts - entry_ts) bars / total bars
-    # We use a straightforward definition: bars in the equity curve where
-    # a trade was open. Since we don't have per-bar position flags here,
-    # we compute exposure as total_traded_bars / T.
+    # Exposure: fraction of equity bars inside any trade's [entry_ts, exit_ts]
+    # interval (open-at-end trades carry exit_ts to the last bar).
     if t_count > 0 and trades:
-        equity_index = equity.index.to_numpy()
-        total_bars = len(equity_index)
-        # Count bars inside any trade's [entry_ts, exit_ts] interval.
-        # For open-at-end trades exit_ts may be the last bar.
+        ts_arr = equity.index.to_numpy()
+        total_bars = len(ts_arr)
         in_market = np.zeros(total_bars, dtype=bool)
-        ts_arr = equity_index
-        for t in trades:
+        for t in trades:  # O(n_trades * T); acceptable at v1 scale
             entry = t.entry_ts
             exit_ = t.exit_ts if t.exit_ts is not None else ts_arr[-1]
-            mask = (ts_arr >= entry) & (ts_arr <= exit_)
-            in_market |= mask
+            in_market |= (ts_arr >= entry) & (ts_arr <= exit_)
         exposure_val = float(in_market.sum() / total_bars)
     else:
         exposure_val = 0.0
