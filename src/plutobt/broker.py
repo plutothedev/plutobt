@@ -208,6 +208,12 @@ class Broker:
                 self.pending = None
                 if order.attached_stop is not None:
                     self.resting_stop = order.attached_stop
+                    # §0.4: set initial_stop on the position opened by this entry.
+                    # Only set when the fill actually opened/flipped (not a scale-in
+                    # that kept the original direction with an existing initial_stop).
+                    pos = self.portfolio.position
+                    if pos.initial_stop is None:
+                        pos.initial_stop = order.attached_stop
             elif order.kind == "limit":
                 price = self._limit_fill(order, next_bar)
                 if price is not None:
@@ -218,6 +224,10 @@ class Broker:
                     self.pending = None
                     if order.attached_stop is not None:
                         self.resting_stop = order.attached_stop
+                        # §0.4: set initial_stop on the position opened by this entry.
+                        pos = self.portfolio.position
+                        if pos.initial_stop is None:
+                            pos.initial_stop = order.attached_stop
             else:
                 raise ValueError(f"unknown order kind: {order.kind!r}")
         if self.portfolio.position.qty == 0:

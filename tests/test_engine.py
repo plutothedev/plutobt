@@ -1,12 +1,18 @@
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from plutobt.config import BacktestConfig
+from plutobt.data import load_bars
 from plutobt.engine import Engine
 from plutobt.instruments import get_instrument, pnl_points
 from plutobt.lookahead import assert_causal
+from plutobt.metrics import compute_metrics
 from plutobt.strategy import Strategy
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _bars(closes, ts0=0, step=300):
@@ -281,3 +287,56 @@ def test_engine_rejects_a_leaky_strategy_via_assert_causal():
     df = _bars([20000.0 + i * 2.0 for i in range(30)])
     with pytest.raises(AssertionError, match="non-causal"):
         assert_causal(Leaky().precompute, df)
+
+
+# ---------------------------------------------------------------------------
+# C1: attached_stop wires to Position.initial_stop → r_multiple/avg_r populate
+# ---------------------------------------------------------------------------
+
+class _StopProtectedEMA(Strategy):
+    """EMA(20/50) cross that always attaches a stop on entry; used for §0.4 E2E."""
+
+    def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["ema_f"] = df["close"].ewm(span=20, adjust=False, min_periods=20).mean()
+        df["ema_s"] = df["close"].ewm(span=50, adjust=False, min_periods=50).mean()
+        df["long"] = df["ema_f"] > df["ema_s"]
+        return df
+
+    def on_bar(self, ctx) -> None:
+        if ctx.bar.long and ctx.position.qty == 0:
+            # Attach a stop 20 ticks below the close so initial_stop is always set.
+            stop = ctx.bar.close - 20 * ctx.tick
+            ctx.broker.buy(contracts=1, stop=stop)
+        elif (not ctx.bar.long) and ctx.position.qty != 0:
+            ctx.broker.close()
+
+
+def test_r_multiple_and_avg_r_populate_with_attached_stop():
+    """§0.4 E2E: attached_stop must flow into Position.initial_stop so
+    r_multiple / avg_r are non-None after running through the real engine."""
+    sample = _REPO_ROOT / "data" / "sample" / "nq_5m.json"
+    df = load_bars(str(sample))
+    nq = get_instrument("NQ")
+    cfg = BacktestConfig(
+        commission_per_side=2.5,
+        slippage_ticks=1.0,
+        periods_per_year=20412.0,
+        carry_overnight=False,
+    )
+    result = Engine(nq, cfg).run(df, _StopProtectedEMA())
+
+    # There must be at least one closed trade for this assertion to be meaningful.
+    closed = [t for t in result.trades if not t.open_at_end]
+    assert len(closed) >= 1, "No closed trades — sample may be too short"
+
+    # Every closed trade that was entered with a stop must carry an r_multiple.
+    assert result.trades[0].r_multiple is not None, (
+        "r_multiple is None; attached_stop was not wired to Position.initial_stop"
+    )
+
+    # compute_metrics must produce a real (non-None) avg_r.
+    metrics = compute_metrics(result, periods_per_year=20412.0)
+    assert metrics["avg_r"] is not None, "avg_r is None after wiring initial_stop"
+    assert isinstance(metrics["avg_r"], float)
+    assert not (metrics["avg_r"] != metrics["avg_r"])  # not NaN
