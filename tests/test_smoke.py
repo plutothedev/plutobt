@@ -99,3 +99,16 @@ def test_ci_workflow_runs_matrix_on_pinned_stack():
 def test_pathlib_root_exists():
     assert isinstance(REPO_ROOT, pathlib.Path)
     assert REPO_ROOT.is_dir()
+
+
+def test_public_api_names_resolve():
+    """import plutobt; key public names must resolve without AttributeError."""
+    for name in (
+        "Engine", "BacktestResult", "BacktestConfig", "load_config",
+        "Strategy", "Context", "get_instrument", "REGISTRY",
+        "load_bars", "compute_metrics", "format_report",
+    ):
+        assert hasattr(plutobt, name), f"plutobt.{name} not found in __init__"
+    # Spot-check that they are the real objects, not None.
+    assert plutobt.Engine is not None
+    assert plutobt.BacktestResult is not None

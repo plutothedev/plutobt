@@ -375,11 +375,14 @@ def test_compute_metrics_first_key_is_label_and_is_in_sample():
 
 
 def test_compute_metrics_includes_exactly_required_keys():
-    """§0.2: compute_metrics must include ALL required keys."""
+    """§0.2: compute_metrics must include EXACTLY the required keys — no extras."""
     eq = pd.Series([100.0, 110.0, 105.0, 120.0, 90.0, 95.0, 130.0, 125.0])
     out = compute_metrics(_result_with(eq, [_trade(10.0)]), periods_per_year=20412.0)
-    for key in _REQUIRED_KEYS:
-        assert key in out, f"Missing required key: {key}"
+    assert set(out) == set(_REQUIRED_KEYS), (
+        f"Key mismatch.\n"
+        f"  Missing: {set(_REQUIRED_KEYS) - set(out)}\n"
+        f"  Extra:   {set(out) - set(_REQUIRED_KEYS)}"
+    )
     # T = number of bar returns = len(equity) - 1
     assert out["T"] == 7
     assert_allclose(out["periods_per_year"], 20412.0, rtol=0, atol=0)
@@ -490,12 +493,11 @@ def test_real_engine_metrics_degrade_monotonically_with_slippage():
     run_fn (the existing test_cost_sensitivity_sweep_is_monotonic_non_increasing
     only validates the tabulator utility with a hand-crafted function).
     """
-    from tests.conftest import GoldenStrategy
-
     from plutobt.config import BacktestConfig
     from plutobt.data import load_bars
     from plutobt.engine import Engine
     from plutobt.instruments import get_instrument
+    from tests.conftest import GoldenStrategy
 
     sample = _REPO_ROOT / "data" / "sample" / "nq_5m.json"
     df = load_bars(str(sample))
@@ -528,7 +530,7 @@ def test_real_engine_metrics_degrade_monotonically_with_slippage():
     # Assert non-increasing (with small float tolerance) for each metric.
     for col in ["sharpe", "profit_factor", "expectancy"]:
         vals = tab[col].tolist()
-        for lo, hi in zip(vals, vals[1:]):
+        for lo, hi in zip(vals, vals[1:], strict=False):
             assert lo >= hi - 1e-10, (
                 f"{col} not non-increasing with slippage: "
                 f"{slippages[vals.index(lo)]}→{slippages[vals.index(hi)]}: "
