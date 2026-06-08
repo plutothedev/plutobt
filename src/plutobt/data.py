@@ -28,12 +28,17 @@ def load_bars(path: str) -> pd.DataFrame:
     """
     with open(path, encoding="utf-8") as fh:
         rows = json.load(fh)
-    if not isinstance(rows, list) or len(rows) == 0:
+    if not isinstance(rows, list):
+        raise ValueError(
+            f"expected a JSON array of bars in {path!r}, got {type(rows).__name__}"
+        )
+    if len(rows) == 0:
         raise ValueError(f"no bars in {path!r}")
     for i, row in enumerate(rows):
         if not isinstance(row, list | tuple) or len(row) != 6:
+            got = len(row) if isinstance(row, list | tuple) else type(row).__name__
             raise ValueError(
-                f"row {i}: expected 6 fields [ts,o,h,l,c,v], got {len(row)}"
+                f"row {i}: expected 6 fields [ts,o,h,l,c,v], got {got}"
             )
     arr = np.asarray(rows, dtype="float64")
     df = pd.DataFrame(
@@ -205,6 +210,9 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     label='left'/closed='left' so the resampled ts marks the bar OPEN,
     consistent with §5.5. Empty buckets (gaps) are dropped. ts returns to a
     plain int64 column with a RangeIndex.
+
+    Note: a 'session' label (if present) is NOT preserved; call tag_sessions
+    on the result if session labels are needed at the coarser cadence.
     """
     dt = pd.to_datetime(df["ts"], unit="s", utc=True)
     work = df.set_index(dt)
