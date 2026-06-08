@@ -4,15 +4,70 @@ import math
 
 import numpy as np
 import pandas as pd
-import pytest
 from numpy.testing import assert_allclose
 
-from plutobt.metrics import sharpe
+from plutobt.metrics import (
+    IN_SAMPLE_LABEL,
+    avg_r,
+    calmar,
+    compute_metrics,
+    cost_sensitivity,
+    expectancy,
+    max_drawdown,
+    outlier_sensitivity,
+    profit_factor,
+    psr,
+    sharpe,
+    sharpe_ci,
+    sharpe_se,
+    sortino,
+    trailing_hwm_drawdown,
+)
+from plutobt.portfolio import Trade
 
 # Canonical reference returns series reused across §10.7 tasks.
 # mean = 0.01, population std (ddof=0) = 0.025298221281347035, sharpe = 0.39528470752104744
 REF_RETURNS = [0.02, -0.01, 0.03, -0.02, 0.04, -0.01, 0.02, -0.03, 0.01, 0.05]
 
+# §0.2 EXACT required key set (single source of truth, M9 reads only these).
+_REQUIRED_KEYS = [
+    "label", "sharpe", "sharpe_raw", "sharpe_se", "sharpe_ci",
+    "psr", "sortino", "calmar", "annual_return",
+    "max_drawdown_depth", "max_drawdown_duration", "trailing_hwm_drawdown",
+    "win_rate", "profit_factor", "expectancy", "avg_r",
+    "T", "periods_per_year", "n_trades", "exposure",
+]
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _trade(pnl: float, r_multiple=None, open_at_end: bool = False) -> Trade:
+    """Minimal Trade for trade-stat tests; only fields the metric reads matter.
+    Trade.side is "long"/"short" per §0.5.
+    """
+    return Trade(
+        entry_ts=0, exit_ts=1, side="long", contracts=1,
+        entry_price=100.0, exit_price=100.0 + pnl, pnl=pnl,
+        r_multiple=r_multiple, open_at_end=open_at_end,
+    )
+
+
+def _result_with(equity: pd.Series, trades, manifest=None):
+    """Build a minimal BacktestResult-like object for the assembler."""
+    from plutobt.engine import BacktestResult  # imported lazily to avoid cycles
+    return BacktestResult(
+        equity_curve=equity,
+        trades=trades,
+        metrics={},
+        manifest=manifest if manifest is not None else {"periods_per_year": None},
+    )
+
+
+# ---------------------------------------------------------------------------
+# M7.1 — sharpe (per-bar, risk-free, factor printed)
+# ---------------------------------------------------------------------------
 
 def test_sharpe_per_bar_matches_hand_calc():
     r = pd.Series(REF_RETURNS)
@@ -37,8 +92,6 @@ def test_sharpe_zero_std_returns_zero():
 # ---------------------------------------------------------------------------
 # M7.2 — sharpe_se and sharpe_ci (Lo 2002)
 # ---------------------------------------------------------------------------
-from plutobt.metrics import sharpe_ci, sharpe_se
-
 
 def test_sharpe_se_lo_2002():
     # SE(SR) = sqrt((1 + 0.5*SR^2)/n)
@@ -64,8 +117,6 @@ def test_sharpe_ci_is_sr_plus_minus_196_se():
 # ---------------------------------------------------------------------------
 # M7.3 — psr (Probabilistic Sharpe Ratio, PSR(0))
 # ---------------------------------------------------------------------------
-from plutobt.metrics import psr
-
 
 def test_psr_zero_reference():
     # PSR(0) = Phi( SR_hat*sqrt(n-1) / sqrt(1 - g3*SR + ((g4-1)/4)*SR^2) )
@@ -90,8 +141,6 @@ def test_psr_zero_std_returns_nan():
 # ---------------------------------------------------------------------------
 # M7.4 — sortino (full-N downside denominator, MAR) — §10.7 divide-by-N
 # ---------------------------------------------------------------------------
-from plutobt.metrics import sortino
-
 
 def test_sortino_full_n_denominator():
     # DR = sqrt((1/N) * sum(min(R-MAR,0)^2)); MAR=0, N=10.
@@ -129,8 +178,6 @@ def test_sortino_no_downside_returns_inf():
 # ---------------------------------------------------------------------------
 # M7.5 — max_drawdown (depth + duration)
 # ---------------------------------------------------------------------------
-from plutobt.metrics import max_drawdown
-
 
 def test_max_drawdown_depth_and_duration():
     # peak 120 @ idx3, trough 90 @ idx4, recovery 130 @ idx6.
@@ -160,8 +207,6 @@ def test_max_drawdown_monotonic_up_is_zero():
 # ---------------------------------------------------------------------------
 # M7.6 — trailing_hwm_drawdown and calmar
 # ---------------------------------------------------------------------------
-from plutobt.metrics import calmar, trailing_hwm_drawdown
-
 
 def test_trailing_hwm_drawdown_is_worst_dip_from_running_peak():
     # Same curve as max_drawdown; worst trailing dip from running HWM = 0.25 (positive).
@@ -188,20 +233,6 @@ def test_calmar_zero_drawdown_returns_inf():
 # ---------------------------------------------------------------------------
 # M7.7 — profit_factor (inf-guard + open-at-end exclusion)
 # ---------------------------------------------------------------------------
-from plutobt.portfolio import Trade
-
-from plutobt.metrics import profit_factor
-
-
-def _trade(pnl: float, r_multiple=None, open_at_end: bool = False) -> Trade:
-    # Minimal Trade for trade-stat tests; only fields the metric reads matter.
-    # Trade.side is "long"/"short" per §0.5.
-    return Trade(
-        entry_ts=0, exit_ts=1, side="long", contracts=1,
-        entry_price=100.0, exit_price=100.0 + pnl, pnl=pnl,
-        r_multiple=r_multiple, open_at_end=open_at_end,
-    )
-
 
 def test_profit_factor_hand_calc():
     # gross_profit = 600, gross_loss = 150 -> PF = 4.0
@@ -228,8 +259,6 @@ def test_profit_factor_empty_is_nan():
 # ---------------------------------------------------------------------------
 # M7.8 — expectancy and avg_r (Van Tharp R; N/A excluded)
 # ---------------------------------------------------------------------------
-from plutobt.metrics import avg_r, expectancy
-
 
 def test_expectancy_hand_calc():
     # win_rate=0.6, avg_win=200, loss_rate=0.4, avg_loss=75
@@ -258,8 +287,6 @@ def test_expectancy_empty_is_nan():
 # ---------------------------------------------------------------------------
 # M7.9 — outlier_sensitivity
 # ---------------------------------------------------------------------------
-from plutobt.metrics import outlier_sensitivity
-
 
 def test_outlier_sensitivity_top_trade_share_and_recompute():
     # PnLs: one dominant winner (1000) + small ones.
@@ -289,8 +316,6 @@ def test_outlier_sensitivity_balanced_does_not_collapse():
 # ---------------------------------------------------------------------------
 # M7.10 — cost_sensitivity (sweep) — §10.15 monotonic
 # ---------------------------------------------------------------------------
-from plutobt.metrics import cost_sensitivity
-
 
 def test_cost_sensitivity_sweep_is_monotonic_non_increasing():
     # A run_fn whose metrics degrade as slippage rises (the realistic direction).
@@ -321,29 +346,6 @@ def test_cost_sensitivity_preserves_slippage_order_as_index():
 # ---------------------------------------------------------------------------
 # M7.11 — compute_metrics (assembler, §0.2 key set, IN-SAMPLE label)
 # ---------------------------------------------------------------------------
-from plutobt.metrics import IN_SAMPLE_LABEL, compute_metrics
-from plutobt.portfolio import Trade  # noqa: F401  (re-import for clarity)
-
-# §0.2 EXACT required key set (single source of truth, M9 reads only these).
-_REQUIRED_KEYS = [
-    "label", "sharpe", "sharpe_raw", "sharpe_se", "sharpe_ci",
-    "psr", "sortino", "calmar", "annual_return",
-    "max_drawdown_depth", "max_drawdown_duration", "trailing_hwm_drawdown",
-    "win_rate", "profit_factor", "expectancy", "avg_r",
-    "T", "periods_per_year", "n_trades", "exposure",
-]
-
-
-def _result_with(equity: pd.Series, trades, manifest=None):
-    # Build a minimal BacktestResult-like object for the assembler.
-    from plutobt.engine import BacktestResult  # imported lazily to avoid cycles
-    return BacktestResult(
-        equity_curve=equity,
-        trades=trades,
-        metrics={},
-        manifest=manifest if manifest is not None else {"periods_per_year": None},
-    )
-
 
 def test_compute_metrics_first_key_is_label_and_is_in_sample():
     eq = pd.Series([100.0, 110.0, 105.0, 120.0, 90.0, 95.0, 130.0, 125.0])
@@ -426,3 +428,19 @@ def test_compute_metrics_n_trades_is_closed_count():
     open_end = [_trade(20.0, open_at_end=True)]
     out = compute_metrics(_result_with(eq, closed + open_end), periods_per_year=1.0)
     assert out["n_trades"] == 2  # only closed trades
+
+
+# ---------------------------------------------------------------------------
+# M7.12 — public API gate + lint clean
+# ---------------------------------------------------------------------------
+
+def test_metrics_module_exposes_full_public_api():
+    import plutobt.metrics as m
+
+    for name in (
+        "sharpe", "sharpe_se", "sharpe_ci", "psr", "sortino",
+        "max_drawdown", "trailing_hwm_drawdown", "calmar",
+        "profit_factor", "expectancy", "avg_r",
+        "outlier_sensitivity", "cost_sensitivity", "compute_metrics",
+    ):
+        assert hasattr(m, name), name

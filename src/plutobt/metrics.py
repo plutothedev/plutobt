@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from plutobt.portfolio import Trade
     from plutobt.engine import BacktestResult
+    from plutobt.portfolio import Trade
 
 IN_SAMPLE_LABEL = (
     "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
@@ -158,13 +158,13 @@ def calmar(annual_return: float, max_dd: float) -> float:
     return float(annual_return / abs(max_dd))
 
 
-def _closed_trades(trades: "list[Trade]") -> "list[Trade]":
+def _closed_trades(trades: list[Trade]) -> list[Trade]:
     """Closed (entry-to-flat) trades; open-at-end marks are excluded from
     win-rate / PF / expectancy per §5.7 (still counted in equity/Sharpe)."""
     return [t for t in trades if not t.open_at_end]
 
 
-def profit_factor(trades: "list[Trade]") -> float:
+def profit_factor(trades: list[Trade]) -> float:
     """Gross profit / gross loss over closed trades.
 
     inf-guard: returns +inf when there are profits but no losers; returns NaN
@@ -181,7 +181,7 @@ def profit_factor(trades: "list[Trade]") -> float:
     return float(gross_profit / gross_loss)
 
 
-def expectancy(trades: "list[Trade]") -> float:
+def expectancy(trades: list[Trade]) -> float:
     """Per-trade expectancy = WinRate*AvgWin - LossRate*AvgLoss (§5.7).
 
     Computed over closed trades (open-at-end excluded). AvgLoss is a positive
@@ -200,7 +200,7 @@ def expectancy(trades: "list[Trade]") -> float:
     return float(win_rate_val * avg_win - loss_rate * avg_loss)
 
 
-def avg_r(trades: "list[Trade]") -> "float | None":
+def avg_r(trades: list[Trade]) -> float | None:
     """Average Van Tharp R-multiple over closed trades that HAVE an initial stop.
 
     Stop-less trades carry r_multiple is None and are excluded (count printed by
@@ -212,7 +212,7 @@ def avg_r(trades: "list[Trade]") -> "float | None":
     return float(sum(rs) / len(rs))
 
 
-def outlier_sensitivity(trades: "list[Trade]", equity: pd.Series) -> dict:
+def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
     """Recompute headline trade stats with the single best/worst trade removed,
     and report the share of total P&L from the top-1 / top-5 trades (§5.7).
 
@@ -249,7 +249,7 @@ def outlier_sensitivity(trades: "list[Trade]", equity: pd.Series) -> dict:
     }
 
 
-def cost_sensitivity(run_fn, slippage_ticks_list: "list[float]") -> pd.DataFrame:
+def cost_sensitivity(run_fn, slippage_ticks_list: list[float]) -> pd.DataFrame:
     """Run ``run_fn(slippage_ticks)`` across a list of slippage values and tabulate
     its returned metric dict (§5.7 cost-sensitivity sweep).
 
@@ -267,7 +267,7 @@ def cost_sensitivity(run_fn, slippage_ticks_list: "list[float]") -> pd.DataFrame
     return df
 
 
-def compute_metrics(result: "BacktestResult", periods_per_year: "float | None") -> dict:
+def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> dict:
     """Assemble the full metrics bundle for a BacktestResult, labeled IN-SAMPLE.
 
     §0.2 output keys (SINGLE SOURCE OF TRUTH — M9's format_report reads ONLY these):
