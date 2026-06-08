@@ -1,11 +1,12 @@
-"""Smoke test: the package installs, imports, and exposes a version string."""
+"""Smoke tests: package installs, imports, tooling is pinned and lint-clean (M1)."""
 import importlib
 import pathlib
+import subprocess
+import sys
 import tomllib
 
-from tests.conftest import REPO_ROOT
-
 import plutobt
+from tests.conftest import REPO_ROOT
 
 CONTRACT_MODULES = [
     "plutobt.instruments",
@@ -39,23 +40,19 @@ def test_version_is_pep440_string():
 
 
 def test_pyproject_declares_package_and_src_layout():
-    root = pathlib.Path(__file__).resolve().parents[1]
-    with (root / "pyproject.toml").open("rb") as fh:
+    with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
         cfg = tomllib.load(fh)
     assert cfg["project"]["name"] == "plutobt"
     assert cfg["project"]["version"] == "0.1.0"
     assert cfg["project"]["requires-python"] == ">=3.11"
-    # src layout: setuptools must find packages under src/
     assert cfg["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
-    # pytest must look in tests/ with importmode=importlib (src layout best practice)
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
     assert cfg["tool"]["pytest"]["ini_options"]["importmode"] == "importlib"
 
 
 def test_all_contract_modules_import():
     for name in CONTRACT_MODULES:
-        mod = importlib.import_module(name)
-        assert mod is not None
+        assert importlib.import_module(name) is not None
 
 
 def _parse_lock(text):
@@ -64,7 +61,6 @@ def _parse_lock(text):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # format: name==version  (uv pip compile / pip freeze style)
         name, _, version = line.partition("==")
         if version:
             pins[name.lower()] = version.split()[0]
@@ -76,3 +72,18 @@ def test_requirements_lock_pins_exact_versions():
     pins = _parse_lock(lock)
     for pkg, ver in PINNED.items():
         assert pins.get(pkg) == ver, f"{pkg} must be pinned to =={ver}"
+
+
+def test_ruff_check_passes():
+    proc = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "src", "tests"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_pathlib_root_exists():
+    assert isinstance(REPO_ROOT, pathlib.Path)
+    assert REPO_ROOT.is_dir()
