@@ -150,7 +150,7 @@ def test_parse_price_zn_rejects_malformed_quote():
     with pytest.raises(ValueError):
         parse_price("110-085", zn)   # wrong separator
     with pytest.raises(ValueError):
-        parse_price("110'85", zn)    # fractional part must be 2 or 3 digits
+        parse_price("110'85", zn)    # fractional part must be exactly 3 digits (CME ZN convention)
 
 
 def test_ticks_to_price_nq_one_tick_is_quarter_point():
