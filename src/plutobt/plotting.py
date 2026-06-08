@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import matplotlib.pyplot as plt
-
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -25,6 +23,10 @@ def plot_equity(result: BacktestResult, ax=None):
     -------
     The matplotlib Axes with the equity curve drawn.
     """
+    # Lazy import: never lock the backend at module import; the caller/test
+    # picks the backend (e.g. Agg for headless) before importing pyplot.
+    import matplotlib.pyplot as plt
+
     if ax is None:
         _, ax = plt.subplots()
     eq = result.equity_curve
@@ -55,6 +57,10 @@ def plot_trades(df: pd.DataFrame, result: BacktestResult, ax=None):
     -------
     The matplotlib Axes with price + trade markers drawn.
     """
+    # Lazy import: never lock the backend at module import; the caller/test
+    # picks the backend (e.g. Agg for headless) before importing pyplot.
+    import matplotlib.pyplot as plt
+
     if ax is None:
         _, ax = plt.subplots()
     ax.plot(df["ts"].to_numpy(), df["close"].to_numpy(), label="close",

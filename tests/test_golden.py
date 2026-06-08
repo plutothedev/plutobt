@@ -21,14 +21,12 @@ RTOL = 1e-9
 ATOL = 1e-6
 
 
-def _run():
-    df = load_bars(str(SAMPLE))
-    inst = get_instrument("NQ")
-    cfg = BacktestConfig(commission_per_side=2.5, slippage_ticks=1.0)
-    return Engine(inst, cfg).run(df, GoldenStrategy())
-
-
 def _golden_result():
+    """Single golden pipeline: frozen sample + golden.toml via load_config.
+
+    All golden tests (manifest, equity, metrics, label) go through this one
+    helper so they can't silently diverge if golden.toml gains a field.
+    """
     df = load_bars(str(SAMPLE))
     inst = get_instrument("NQ")
     cfg = load_config(str(GOLDEN_CFG))
@@ -41,20 +39,20 @@ def _golden_result():
 
 
 def test_manifest_carries_data_sha256():
-    result = _run()
+    result = _golden_result()
     assert "data_sha256" in result.manifest
     assert isinstance(result.manifest["data_sha256"], str)
     assert len(result.manifest["data_sha256"]) == 64  # hex sha256
 
 
 def test_manifest_records_roll_metadata_keys():
-    result = _run()
+    result = _golden_result()
     for key in ("roll_trigger", "splice_method", "adjustment_method", "as_of_date"):
         assert key in result.manifest, f"manifest missing roll key: {key}"
 
 
 def test_manifest_roll_metadata_documents_v1_defaults():
-    result = _run()
+    result = _golden_result()
     m = result.manifest
     assert m["adjustment_method"] == "backwards_difference"  # additive Panama (§5.6 default)
     assert m["splice_method"] == "none_single_expiry"        # synthetic single expiry

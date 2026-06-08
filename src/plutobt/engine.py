@@ -36,6 +36,10 @@ class BacktestResult:
 _BASE_COLS = frozenset(("ts", "open", "high", "low", "close", "volume", "session"))
 _STARTING_CASH = 100_000.0
 
+# v1 default roll/sample vintage; NOT the run date (back-adjustment construction
+# is out of v1, §5.6). Stamped into every manifest's roll metadata.
+_ROLL_AS_OF_DEFAULT = "2026-06-07"
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -150,5 +154,5 @@ class Engine:
             "roll_trigger": "none_single_expiry",
             "splice_method": "none_single_expiry",
             "adjustment_method": "backwards_difference",
-            "as_of_date": "2026-06-07",
+            "as_of_date": _ROLL_AS_OF_DEFAULT,
         }
