@@ -155,3 +155,31 @@ def test_max_drawdown_monotonic_up_is_zero():
     depth, duration = max_drawdown(eq)
     assert depth == 0.0
     assert duration == 0
+
+
+# ---------------------------------------------------------------------------
+# M7.6 — trailing_hwm_drawdown and calmar
+# ---------------------------------------------------------------------------
+from plutobt.metrics import calmar, trailing_hwm_drawdown
+
+
+def test_trailing_hwm_drawdown_is_worst_dip_from_running_peak():
+    # Same curve as max_drawdown; worst trailing dip from running HWM = 0.25 (positive).
+    eq = pd.Series([100, 110, 105, 120, 90, 95, 130, 125],
+                   index=[0, 1, 2, 3, 4, 5, 6, 7], dtype=float)
+    got = trailing_hwm_drawdown(eq)
+    assert_allclose(got, 0.25, rtol=0, atol=1e-12)
+
+
+def test_trailing_hwm_drawdown_never_negative():
+    eq = pd.Series([100, 101, 102], dtype=float)
+    assert trailing_hwm_drawdown(eq) == 0.0
+
+
+def test_calmar_annual_return_over_abs_max_dd():
+    # 0.20 / |-0.25| = 0.8
+    assert_allclose(calmar(0.20, -0.25), 0.8, rtol=0, atol=1e-12)
+
+
+def test_calmar_zero_drawdown_returns_inf():
+    assert math.isinf(calmar(0.20, 0.0))
