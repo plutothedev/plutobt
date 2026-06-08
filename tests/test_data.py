@@ -189,3 +189,45 @@ def test_validate_bars_no_gaps_on_regular_series():
     assert rep.modal_interval == 300
     assert rep.gaps == []
     assert rep.max_gap == 0
+
+
+# ---------------------------------------------------------------------------
+# M3.4 — verify_ts_is_open: empirical ts-convention check (§5.5)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime
+
+from plutobt.data import CT, verify_ts_is_open
+from plutobt.instruments import get_instrument
+
+
+def _ct_ts(y, m, d, hh, mm) -> int:
+    return int(datetime(y, m, d, hh, mm, tzinfo=CT).timestamp())
+
+
+def _rth_day_5m(y, m, d) -> list[list]:
+    # RTH index session 08:30 -> 15:15 CT, 81 five-minute bars, ts = OPEN
+    rows = []
+    t = _ct_ts(y, m, d, 8, 30)
+    for _ in range(81):
+        rows.append([t, 100.0, 101.0, 99.0, 100.5, 10])
+        t += 300
+    return rows
+
+
+def test_verify_ts_is_open_true_when_first_bar_at_session_open():
+    nq = get_instrument("NQ")
+    # two trading days of RTH 5m bars; first bar each day opens 08:30 CT
+    rows = _rth_day_5m(2025, 6, 2) + _rth_day_5m(2025, 6, 3)
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    assert verify_ts_is_open(df, nq) is True
+
+
+def test_verify_ts_is_open_false_when_ts_marks_close():
+    nq = get_instrument("NQ")
+    # shift every ts forward 5 min so the first bar-of-day "opens" 08:35 -> ts = CLOSE convention
+    rows = _rth_day_5m(2025, 6, 2) + _rth_day_5m(2025, 6, 3)
+    for r in rows:
+        r[0] += 300
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    assert verify_ts_is_open(df, nq) is False
