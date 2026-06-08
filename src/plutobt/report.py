@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from plutobt.engine import BacktestResult
+from plutobt.metrics import MIN_TRADE_SAMPLE
 
 _LABEL = "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
 
@@ -42,4 +43,15 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"data_sha256   = {man['data_sha256']}",
         f"engine version = {man['version']}",
     ]
+
+    # §5.7 low-sample warning: trade-based stats (PF/expectancy) are unreliable
+    # below MIN_TRADE_SAMPLE closed trades. compute_metrics always emits n_trades;
+    # surface the warning when it is present and below the threshold.
+    n_trades = m.get("n_trades")
+    if n_trades is not None and n_trades < MIN_TRADE_SAMPLE:
+        lines.append(
+            f"⚠ insufficient sample: n_trades={n_trades} < {MIN_TRADE_SAMPLE}; "
+            f"PF/expectancy unreliable"
+        )
+
     return "\n".join(lines)

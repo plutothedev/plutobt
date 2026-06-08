@@ -429,9 +429,9 @@ def test_compute_metrics_win_rate_zero_when_no_closed_trades():
 
 
 def test_compute_metrics_derives_periods_per_year_from_manifest():
-    """periods_per_year=None => derive from manifest's stored value."""
+    """periods_per_year=None => derive from manifest's config (single source)."""
     eq = pd.Series([100.0, 101.0, 102.0])
-    res = _result_with(eq, [], manifest={"periods_per_year": 20412.0})
+    res = _result_with(eq, [], manifest={"config": {"periods_per_year": 20412.0}})
     out = compute_metrics(res, periods_per_year=None)
     assert_allclose(out["periods_per_year"], 20412.0, rtol=0, atol=0)
 

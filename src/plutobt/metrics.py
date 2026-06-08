@@ -299,8 +299,8 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     ``label`` is always the FIRST key (IN-SAMPLE stamp).
 
     periods_per_year derivation: if the argument is None, fall back to the value
-    stored in result.manifest["periods_per_year"]. For 5m RTH index data this is
-    81 bars/day * 252 = 20412.
+    stored in result.manifest["config"]["periods_per_year"]. For 5m RTH index data
+    this is 81 bars/day * 252 = 20412.
 
     §0.7 annual_return = mean(equity.pct_change().dropna()) * periods_per_year
     (simple returns, consistent with the Sharpe return series).
@@ -316,7 +316,7 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     trades = result.trades
 
     if periods_per_year is None:
-        periods_per_year = result.manifest.get("periods_per_year")
+        periods_per_year = result.manifest.get("config", {}).get("periods_per_year")
     if periods_per_year is None:
         raise ValueError(
             "periods_per_year not provided and not present in result.manifest"

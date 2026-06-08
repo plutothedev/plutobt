@@ -28,7 +28,8 @@ def run_symbol(symbol: str, data_path: str, config_path: str) -> BacktestResult:
     engine = Engine(instrument, config)
     result = engine.run(df, EMACross())
     # Ensure metrics are assembled + labeled IN-SAMPLE with the run's annualization basis.
-    ppy = result.manifest["periods_per_year"]
+    # periods_per_year lives in the config (single source), not a top-level manifest dup.
+    ppy = result.manifest["config"]["periods_per_year"]
     result.metrics = compute_metrics(result, periods_per_year=ppy)
     return result
 

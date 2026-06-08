@@ -82,3 +82,43 @@ def test_format_report_reads_required_keys():
     del res.metrics["max_drawdown_depth"]
     with pytest.raises(KeyError):
         format_report(res, symbol="NQ")
+
+
+def test_format_report_warns_on_low_sample_and_omits_when_enough():
+    from plutobt.metrics import MIN_TRADE_SAMPLE
+
+    # Below the threshold -> the insufficient-sample warning is surfaced.
+    low = _fake_result()
+    low.metrics["n_trades"] = MIN_TRADE_SAMPLE - 1
+    low_text = format_report(low, symbol="NQ")
+    assert "insufficient sample" in low_text
+    assert f"n_trades={MIN_TRADE_SAMPLE - 1}" in low_text
+
+    # At/above the threshold -> no warning line.
+    enough = _fake_result()
+    enough.metrics["n_trades"] = MIN_TRADE_SAMPLE
+    enough_text = format_report(enough, symbol="NQ")
+    assert "insufficient sample" not in enough_text
+
+
+def test_format_report_renders_real_compute_metrics_output():
+    # §0.2: pipe REAL compute_metrics output THROUGH format_report (never a hand-built
+    # dict). A tiny real Engine.run -> compute_metrics -> format_report must render.
+    from plutobt.data import load_bars
+    from plutobt.engine import Engine
+    from plutobt.instruments import get_instrument
+    from plutobt.metrics import compute_metrics
+    from plutobt.strategies.ema_cross import EMACross
+
+    instrument = get_instrument("NQ")
+    cfg = load_config("configs/nq.toml")
+    df = load_bars("data/sample/nq_5m.json")
+    result = Engine(instrument, cfg).run(df, EMACross())
+    ppy = result.manifest["config"]["periods_per_year"]
+    result.metrics = compute_metrics(result, periods_per_year=ppy)
+
+    # Renders without KeyError on the real key set and carries the IN-SAMPLE label.
+    text = format_report(result, symbol="NQ")
+    assert "IN-SAMPLE" in text
+    assert "not predictive of live results" in text
+    assert "PlutoBT report: NQ" in text

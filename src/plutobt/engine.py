@@ -143,9 +143,8 @@ class Engine:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the
         canonical CSV bytes of the input frame (§5.10, §0 key name).
 
-        ``periods_per_year`` is promoted to the top-level manifest from the config
-        so that compute_metrics (and run_symbol) can retrieve it without digging
-        into the nested config dict.
+        ``periods_per_year`` lives ONLY inside ``manifest["config"]`` (single
+        source = config); consumers read it from there, never a top-level dup.
         """
         raw = df.to_csv(index=False).encode("utf-8")
         return {
@@ -153,8 +152,6 @@ class Engine:
             "version": __version__,
             "config": asdict(self.config),
             "instrument": self.instrument.symbol,
-            # periods_per_year: promoted from config for easy access by compute_metrics.
-            "periods_per_year": self.config.periods_per_year,
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
             # synthetic snapshot. These document the continuous-series policy;
             # full back-adjustment construction is out of v1 scope.
