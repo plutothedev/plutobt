@@ -186,3 +186,71 @@ def test_buy_and_hold_with_costs_deducts_commission_and_slippage():
     expected = gross - 2.50
     equity_gain = result.equity_curve.iloc[-1] - 100_000.0
     assert equity_gain == pytest.approx(expected)
+
+
+class BuyOnLastBeforeGap(Strategy):
+    def precompute(self, df):
+        df = df.copy()
+        # fire on the bar immediately before the discontinuity (index 1).
+        df["go"] = df.index == 1
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.go and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=1)
+
+
+def _bars_with_weekend_gap():
+    # 5m bars (step=300s). Friday close then ~49h weekend gap before Sunday open.
+    ts = [0, 300, 300 + 49 * 3600, 300 + 49 * 3600 + 300]
+    closes = [20000.0, 20010.0, 20500.0, 20510.0]  # huge Sunday gap up
+    c = np.asarray(closes, dtype="float64")
+    return pd.DataFrame({
+        "ts": np.asarray(ts, dtype="int64"),
+        "open": c, "high": c + 1.0, "low": c - 1.0,
+        "close": c, "volume": np.ones(4, dtype="int64"),
+    })
+
+
+def test_discontinuity_cancels_unfilled_entry_default_policy():
+    # Decision on bar 1 (last before weekend); default carry_overnight=False
+    # -> the pending entry is cancelled at the gap, NOT filled at Sunday's open.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(carry_overnight=False, slippage_ticks=0.0))
+    df = _bars_with_weekend_gap()
+    result = eng.run(df, BuyOnLastBeforeGap())
+    assert result.trades == []  # NO phantom weekend fill
+
+
+def test_carry_overnight_true_fills_at_next_session_open():
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(carry_overnight=True, slippage_ticks=0.0,
+                                    commission_per_side=0.0))
+    df = _bars_with_weekend_gap()
+    result = eng.run(df, BuyOnLastBeforeGap())
+    # entry carried across the gap fills at the Sunday bar's open = 20500.
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_price == pytest.approx(20500.0)
+
+
+def test_held_position_keeps_resting_stop_across_gap():
+    # Position already filled before the gap; its protective stop must persist.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(carry_overnight=False, slippage_ticks=0.0))
+
+    class _EnterEarly(Strategy):
+        def precompute(self, df):
+            df = df.copy()
+            df["go"] = df.index == 0
+            return df
+
+        def on_bar(self, ctx):
+            if ctx.bar.go and ctx.position.qty == 0:
+                ctx.broker.buy(contracts=1, stop=19900.0)  # resting protective stop
+
+    df = _bars_with_weekend_gap()
+    result = eng.run(df, _EnterEarly())
+    # filled at bar1 open=20010, held through the gap, stop NOT cancelled.
+    assert result.trades and result.trades[0].entry_price == pytest.approx(20010.0)
+    # the position survives the discontinuity (no spurious flat); open at end.
+    assert result.trades[0].open_at_end is True
