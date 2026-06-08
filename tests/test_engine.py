@@ -58,3 +58,61 @@ def test_engine_imports_backtestconfig_from_config_module():
     import plutobt.engine as eng_mod
     from plutobt.config import BacktestConfig as CfgConfig
     assert eng_mod.BacktestConfig is CfgConfig
+
+
+def _recursive_ema(values, span):
+    alpha = 2.0 / (span + 1.0)
+    out = [float("nan")] * len(values)
+    # min_periods=span: first defined value at index span-1, seeded by SMA? No:
+    # pandas adjust=False seeds the recursion at the first observation, but masks
+    # outputs before min_periods. Reference mirrors that exactly.
+    ema = None
+    for i, v in enumerate(values):
+        ema = v if ema is None else alpha * v + (1 - alpha) * ema
+        if i >= span - 1:
+            out[i] = ema
+    return out
+
+
+class EMACrossEngine(Strategy):
+    def precompute(self, df):
+        df = df.copy()
+        df["ema_f"] = df["close"].ewm(span=3, adjust=False, min_periods=3).mean()
+        df["long"] = df["ema_f"] > df["close"]
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.long and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=1)
+
+
+def test_engine_ewm_adjust_false_matches_recursive_reference():
+    closes = [20000.0, 20010.0, 19990.0, 20020.0, 20005.0, 20030.0]
+    df = _bars(closes)
+    got = df["close"].ewm(span=3, adjust=False, min_periods=3).mean().to_numpy()
+    ref = _recursive_ema(closes, span=3)
+    np.testing.assert_allclose(got[2:], np.asarray(ref[2:]), rtol=1e-12)
+    assert np.isnan(got[0]) and np.isnan(got[1])  # masked by min_periods
+
+
+def test_engine_no_order_during_warmup_nan_window():
+    # span=3 -> ema_f is NaN at bars 0,1; 'long' is False there; no fill can
+    # occur from a warm-up bar's decision. Decision on bar 0/1 must be skipped.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+
+    class _Spy(EMACrossEngine):
+        bars_seen = []
+
+        def on_bar(self, ctx):
+            _Spy.bars_seen.append(int(ctx.bar.ts))
+            super().on_bar(ctx)
+
+    df = _bars([20000.0, 20010.0, 19990.0, 20020.0, 20005.0, 20030.0])
+    result = eng.run(df, _Spy())
+    # on_bar never called for ts 0 or 300 (warm-up NaN bars).
+    assert 0 not in _Spy.bars_seen
+    assert 300 not in _Spy.bars_seen
+    # the earliest possible entry fill is at or after the first warmed bar's t+1.
+    if result.trades:
+        assert result.trades[0].entry_ts >= 900
