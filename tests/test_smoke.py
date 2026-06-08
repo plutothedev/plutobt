@@ -5,6 +5,19 @@ import tomllib
 
 import plutobt
 
+CONTRACT_MODULES = [
+    "plutobt.instruments",
+    "plutobt.data",
+    "plutobt.portfolio",
+    "plutobt.broker",
+    "plutobt.strategy",
+    "plutobt.engine",
+    "plutobt.lookahead",
+    "plutobt.metrics",
+    "plutobt.config",
+    "plutobt.plotting",
+]
+
 
 def test_package_imports():
     assert importlib.import_module("plutobt") is plutobt
@@ -27,3 +40,9 @@ def test_pyproject_declares_package_and_src_layout():
     # pytest must look in tests/ with importmode=importlib (src layout best practice)
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
     assert cfg["tool"]["pytest"]["ini_options"]["importmode"] == "importlib"
+
+
+def test_all_contract_modules_import():
+    for name in CONTRACT_MODULES:
+        mod = importlib.import_module(name)
+        assert mod is not None
