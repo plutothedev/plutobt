@@ -223,3 +223,51 @@ def test_margin_ok_uses_current_cash_not_equity():
     # Exactly enough cash for 1 contract.
     assert pf.margin_ok(1) is True
     assert pf.margin_ok(2) is False
+
+
+def test_margin_call_zero_when_above_maintenance():
+    cl = get_instrument("CL")
+    pf = Portfolio(starting_cash=10_000.0, instrument=cl)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=70.00, commission=0.0))
+    # Mark equal to entry: equity == cash == 10000 > maintenance => no call.
+    pf.mark(70.00)
+    assert pf.margin_call_amount() == pytest.approx(0.0)
+
+
+def test_margin_call_restore_to_initial_crude_3400():
+    """Spec §10.5 / §5.2: crude initial 10,000, maint 7,000.
+
+    Drive equity to 6,600 (below maintenance) on a 1-lot and assert the call
+    restores to INITIAL: 10,000 - 6,600 = $3,400.
+    """
+    cl = get_instrument("CL")
+    # Pin the reference margins so the test is independent of registry drift.
+    assert cl.initial_margin == pytest.approx(10_000.0)
+    assert cl.maintenance_margin == pytest.approx(7_000.0)
+
+    pf = Portfolio(starting_cash=10_000.0, instrument=cl)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=70.00, commission=0.0))
+    # CL = $1,000/point. Need equity 6,600 => loss of 3,400 => 3.40 points down.
+    mark = 70.00 - 3.40
+    pf.mark(mark)
+    assert pf.equity(mark_price=mark) == pytest.approx(6_600.0)
+    # equity 6,600 < maintenance 7,000 => breach.
+    # call = initial*qty - equity = 10,000 - 6,600 = 3,400.
+    assert pf.margin_call_amount() == pytest.approx(3_400.0)
+
+
+def test_margin_call_uses_last_mark():
+    cl = get_instrument("CL")
+    pf = Portfolio(starting_cash=10_000.0, instrument=cl)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=70.00, commission=0.0))
+    # 2 lots: maintenance breach when equity < 14,000; initial target 20,000.
+    # But starting cash is only 10,000 — drive a small loss to confirm formula.
+    pf.mark(69.50)  # -0.50 pt * $1000 * 2 = -$1000 => equity 9,000.
+    # equity 9,000 < maint 14,000 => call = 20,000 - 9,000 = 11,000.
+    assert pf.margin_call_amount() == pytest.approx(11_000.0)
+
+
+def test_margin_call_zero_when_flat():
+    cl = get_instrument("CL")
+    pf = Portfolio(starting_cash=10_000.0, instrument=cl)
+    assert pf.margin_call_amount() == pytest.approx(0.0)

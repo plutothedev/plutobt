@@ -160,3 +160,22 @@ class Portfolio:
     def margin_ok(self, contracts: int) -> bool:
         """Entry gate (spec §5.2): cash >= initial_margin * contracts."""
         return self.cash >= self.instrument.initial_margin * contracts
+
+    def margin_call_amount(self) -> float:
+        """Variation-margin call on a maintenance breach (spec §5.2).
+
+        Breach when equity < maintenance_margin * |qty|.
+        On breach the call restores to INITIAL:
+            initial_margin * |qty| - equity   (>= 0)
+        Otherwise 0. Flat => 0. Uses the last mark() price.
+        """
+        qty = abs(self.position.qty)
+        if qty == 0:
+            return 0.0
+        mark = self._mark_price
+        if mark is None:
+            mark = self.position.avg_price
+        eq = self.equity(mark_price=mark)
+        if eq >= self.instrument.maintenance_margin * qty:
+            return 0.0
+        return max(0.0, self.instrument.initial_margin * qty - eq)
