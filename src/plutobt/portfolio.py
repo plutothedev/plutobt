@@ -25,3 +25,12 @@ class Trade:
     pnl: float
     r_multiple: float | None = None
     open_at_end: bool = False
+
+
+@dataclass
+class Fill:
+    ts: int
+    side: str                          # "buy" | "sell"
+    contracts: int
+    price: float
+    commission: float

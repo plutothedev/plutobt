@@ -57,3 +57,21 @@ def test_trade_open_at_end_flag():
     assert t.exit_price is None
     assert t.open_at_end is True
     assert math.isclose(t.pnl, -50.0)
+
+
+from plutobt.portfolio import Fill
+
+
+def test_fill_value_type_fields():
+    f = Fill(ts=1000, side="buy", contracts=2, price=100.25, commission=4.0)
+    assert f.ts == 1000
+    assert f.side == "buy"
+    assert f.contracts == 2
+    assert f.price == 100.25
+    assert f.commission == 4.0
+
+
+def test_fill_sell_side():
+    f = Fill(ts=2000, side="sell", contracts=1, price=108.0, commission=2.0)
+    assert f.side == "sell"
+    assert f.contracts == 1
