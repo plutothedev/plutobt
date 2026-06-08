@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import tomllib  # noqa: F401  (used by M9 TOML loading)
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, fields
 
 
 @dataclass
@@ -14,3 +14,18 @@ class BacktestConfig:
     periods_per_year: float | None = None  # None => derived from data/session
     carry_overnight: bool = False
     allow_short: bool = True
+
+
+def load_config(path: str) -> BacktestConfig:
+    """Load a BacktestConfig from a TOML file (stdlib tomllib).
+
+    Omitted keys fall back to the BacktestConfig dataclass defaults.
+    Unknown keys raise ValueError so a typo never silently no-ops.
+    """
+    with open(path, "rb") as fh:
+        raw = tomllib.load(fh)
+    allowed = {f.name for f in fields(BacktestConfig)}
+    for key in raw:
+        if key not in allowed:
+            raise ValueError(f"unknown config key: {key}")
+    return BacktestConfig(**raw)
