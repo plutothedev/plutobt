@@ -1,17 +1,77 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from plutobt.data import load_bars
+from plutobt.data import (
+    CT,
+    ValidationReport,
+    load_bars,
+    resample,
+    tag_sessions,
+    validate_bars,
+    verify_ts_is_open,
+)
+from plutobt.instruments import get_instrument
+
+# ---------------------------------------------------------------------------
+# Helpers shared across all M3 task groups
+# ---------------------------------------------------------------------------
 
 
 def _write_json(tmp_path: Path, rows: list[list]) -> str:
     p = tmp_path / "bars.json"
     p.write_text(json.dumps(rows))
     return str(p)
+
+
+def _ct_ts(y, m, d, hh, mm) -> int:
+    return int(datetime(y, m, d, hh, mm, tzinfo=CT).timestamp())
+
+
+def _rth_day_5m(y, m, d) -> list[list]:
+    # RTH index session 08:30 -> 15:15 CT, 81 five-minute bars, ts = OPEN
+    rows = []
+    t = _ct_ts(y, m, d, 8, 30)
+    for _ in range(81):
+        rows.append([t, 100.0, 101.0, 99.0, 100.5, 10])
+        t += 300
+    return rows
+
+
+def _good_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ts": [1700000000, 1700000300, 1700000600],
+            "open": [100.0, 100.5, 101.0],
+            "high": [101.0, 102.0, 101.5],
+            "low": [99.5, 100.0, 100.5],
+            "close": [100.5, 101.75, 101.25],
+            "volume": [1200, 900, 1100],
+        }
+    )
+
+
+def _seq_df(ts: list[int]) -> pd.DataFrame:
+    n = len(ts)
+    return pd.DataFrame(
+        {
+            "ts": ts,
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.0] * n,
+            "volume": [10] * n,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# M3.1 — load_bars
+# ---------------------------------------------------------------------------
 
 
 def test_load_bars_parses_arrays_into_canonical_columns(tmp_path):
@@ -53,21 +113,6 @@ def test_load_bars_empty_file_raises(tmp_path):
 # ---------------------------------------------------------------------------
 # M3.2 — ValidationReport + validate_bars OHLC/volume/NaN checks
 # ---------------------------------------------------------------------------
-
-from plutobt.data import ValidationReport, validate_bars
-
-
-def _good_df() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "ts": [1700000000, 1700000300, 1700000600],
-            "open": [100.0, 100.5, 101.0],
-            "high": [101.0, 102.0, 101.5],
-            "low": [99.5, 100.0, 100.5],
-            "close": [100.5, 101.75, 101.25],
-            "volume": [1200, 900, 1100],
-        }
-    )
 
 
 def test_validate_bars_clean_data_returns_ok_report():
@@ -135,20 +180,6 @@ def test_validate_bars_raises_when_strict():
 # ---------------------------------------------------------------------------
 
 
-def _seq_df(ts: list[int]) -> pd.DataFrame:
-    n = len(ts)
-    return pd.DataFrame(
-        {
-            "ts": ts,
-            "open": [100.0] * n,
-            "high": [101.0] * n,
-            "low": [99.0] * n,
-            "close": [100.0] * n,
-            "volume": [10] * n,
-        }
-    )
-
-
 def test_validate_bars_duplicate_ts_guard_fires():  # §10.12 partial
     df = _seq_df([1700000000, 1700000300, 1700000300, 1700000600])
     rep = validate_bars(df)
@@ -195,25 +226,6 @@ def test_validate_bars_no_gaps_on_regular_series():
 # M3.4 — verify_ts_is_open: empirical ts-convention check (§5.5)
 # ---------------------------------------------------------------------------
 
-from datetime import datetime
-
-from plutobt.data import CT, verify_ts_is_open
-from plutobt.instruments import get_instrument
-
-
-def _ct_ts(y, m, d, hh, mm) -> int:
-    return int(datetime(y, m, d, hh, mm, tzinfo=CT).timestamp())
-
-
-def _rth_day_5m(y, m, d) -> list[list]:
-    # RTH index session 08:30 -> 15:15 CT, 81 five-minute bars, ts = OPEN
-    rows = []
-    t = _ct_ts(y, m, d, 8, 30)
-    for _ in range(81):
-        rows.append([t, 100.0, 101.0, 99.0, 100.5, 10])
-        t += 300
-    return rows
-
 
 def test_verify_ts_is_open_true_when_first_bar_at_session_open():
     nq = get_instrument("NQ")
@@ -236,8 +248,6 @@ def test_verify_ts_is_open_false_when_ts_marks_close():
 # ---------------------------------------------------------------------------
 # M3.5 — tag_sessions RTH/ETH + 15:10/15:15 boundary (§10.10)
 # ---------------------------------------------------------------------------
-
-from plutobt.data import tag_sessions
 
 
 def test_tag_sessions_adds_session_column():
@@ -295,8 +305,6 @@ def test_tag_sessions_overnight_bar_is_eth():
 # M3.6 — resample OHLCV with left-labeled buckets (ts=open, 5.5)
 # ---------------------------------------------------------------------------
 
-from plutobt.data import resample
-
 
 def test_resample_5m_to_15m_ohlcv():
     # three consecutive 5-min bars -> one 15-min bar
@@ -332,3 +340,29 @@ def test_resample_drops_empty_buckets():
     assert len(out) == 2
     assert out["ts"].tolist() == [base, base + 900]
     assert not out.isna().any().any()
+
+
+# ---------------------------------------------------------------------------
+# M3.7 — full pipeline round-trip
+# ---------------------------------------------------------------------------
+
+
+def test_data_pipeline_round_trip(tmp_path):
+    nq = get_instrument("NQ")
+    rows = _rth_day_5m(2025, 6, 2)  # 81 clean RTH 5m bars
+    p = tmp_path / "day.json"
+    p.write_text(json.dumps(rows))
+
+    df = load_bars(str(p))
+    rep = validate_bars(df)
+    assert rep.ok is True
+    assert rep.modal_interval == 300
+    assert verify_ts_is_open(df, nq) is True
+
+    tagged = tag_sessions(df, nq)
+    assert (tagged["session"] == "RTH").all()
+
+    fifteen = resample(df, "15min")
+    # 81 five-min RTH bars -> 27 fifteen-min bars
+    assert len(fifteen) == 27
+    assert validate_bars(fifteen).ok is True

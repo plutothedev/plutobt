@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import time
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -26,12 +26,12 @@ def load_bars(path: str) -> pd.DataFrame:
     Columns: ts(int64), open/high/low/close(float64), volume(int64).
     ts is kept as a column (default RangeIndex), per the DATA API contract.
     """
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         rows = json.load(fh)
     if not isinstance(rows, list) or len(rows) == 0:
         raise ValueError(f"no bars in {path!r}")
     for i, row in enumerate(rows):
-        if not isinstance(row, (list, tuple)) or len(row) != 6:
+        if not isinstance(row, list | tuple) or len(row) != 6:
             raise ValueError(
                 f"row {i}: expected 6 fields [ts,o,h,l,c,v], got {len(row)}"
             )
@@ -167,7 +167,7 @@ def verify_ts_is_open(df: pd.DataFrame, instrument: Instrument) -> bool:
     local_times = idx.time
     first_times: list[time] = []
     seen: set = set()
-    for d, t in zip(local_dates, local_times):
+    for d, t in zip(local_dates, local_times, strict=False):
         if d not in seen:
             seen.add(d)
             first_times.append(t)
