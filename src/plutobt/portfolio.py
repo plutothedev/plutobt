@@ -149,3 +149,10 @@ class Portfolio:
         self.position = Position()
         self._open_entry_ts = None
         self._mark_price = None
+
+    def mark(self, price: float) -> None:
+        """Record the per-bar mark price for MTM (spec §5.2 settlement proxy).
+
+        Does not move cash: unrealized MTM is reflected only through equity().
+        """
+        self._mark_price = float(price)

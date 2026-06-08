@@ -186,3 +186,23 @@ def test_apply_fill_flip_closes_then_opens_remainder():
     assert pf.trades[0].contracts == 2
     assert pf.trades[0].side == "long"
     assert pf.trades[0].pnl == pytest.approx(200.0)
+
+
+def test_mark_updates_unrealized_via_equity():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_000.0, commission=0.0))
+    pf.mark(20_005.0)
+    # Unrealized +5 pts * $20 = +$100; cash unchanged (no realization on mark).
+    assert pf.cash == pytest.approx(50_000.0)
+    assert pf.equity(mark_price=20_005.0) == pytest.approx(50_100.0)
+
+
+def test_mark_does_not_move_cash():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="sell", contracts=2, price=20_000.0, commission=0.0))
+    pf.mark(20_050.0)   # adverse for short
+    assert pf.cash == pytest.approx(50_000.0)
+    # Short down 50 pts * $20 * 2 = -$2000 unrealized.
+    assert pf.equity(mark_price=20_050.0) == pytest.approx(48_000.0)
