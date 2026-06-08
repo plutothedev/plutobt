@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 from plutobt.engine import BacktestResult
 
@@ -37,7 +36,7 @@ def test_generalization_sweep_runs_all_three_symbols():
 
     results = run_demo_all()
     assert set(results.keys()) == {"NQ", "ES", "CL"}
-    for symbol, result in results.items():
+    for _symbol, result in results.items():
         assert isinstance(result, BacktestResult)
         assert len(result.equity_curve) > 0
         assert "sharpe" in result.metrics
