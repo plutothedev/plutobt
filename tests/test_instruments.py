@@ -4,6 +4,7 @@ import pytest
 
 from plutobt.instruments import Instrument
 from plutobt.instruments import REGISTRY, get_instrument
+from plutobt.instruments import parse_price
 
 
 def test_instrument_is_frozen_dataclass_with_exact_fields():
@@ -103,3 +104,45 @@ def test_index_futures_session_is_rth_0830_to_1515_ct():
         inst = get_instrument(symbol)
         assert inst.session_open_ct == "08:30"
         assert inst.session_close_ct == "15:15"
+
+
+def test_parse_price_decimal_passthrough_float():
+    nq = get_instrument("NQ")
+    assert parse_price(20150.25, nq) == 20150.25
+
+
+def test_parse_price_decimal_passthrough_string():
+    nq = get_instrument("NQ")
+    assert parse_price("20150.25", nq) == 20150.25
+
+
+def test_parse_price_zn_32nds_half_tick():
+    # spec §5.3 worked example: 110'085 = 110 + 8.5/32
+    zn = get_instrument("ZN")
+    assert parse_price("110'085", zn) == pytest.approx(110 + 8.5 / 32)
+
+
+def test_parse_price_zn_32nds_whole_tick():
+    # 110'080 = 110 + 8/32 (no half-32nd)
+    zn = get_instrument("ZN")
+    assert parse_price("110'080", zn) == pytest.approx(110 + 8.0 / 32)
+
+
+def test_parse_price_zn_32nds_high_handle_and_31nds():
+    # 131'315 = 131 + 31.5/32 (handle > 100, max 32nds region)
+    zn = get_instrument("ZN")
+    assert parse_price("131'315", zn) == pytest.approx(131 + 31.5 / 32)
+
+
+def test_parse_price_zn_accepts_already_decimal_float():
+    # a float on a 32nds instrument is treated as already-decimal points
+    zn = get_instrument("ZN")
+    assert parse_price(110.265625, zn) == pytest.approx(110.265625)
+
+
+def test_parse_price_zn_rejects_malformed_quote():
+    zn = get_instrument("ZN")
+    with pytest.raises(ValueError):
+        parse_price("110-085", zn)   # wrong separator
+    with pytest.raises(ValueError):
+        parse_price("110'85", zn)    # fractional part must be 2 or 3 digits

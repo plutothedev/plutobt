@@ -88,3 +88,32 @@ def get_instrument(symbol: str) -> Instrument:
     except KeyError:
         known = ", ".join(sorted(REGISTRY))
         raise KeyError(f"unknown symbol {symbol!r}; known symbols: {known}") from None
+
+
+def parse_price(raw: str | float, instrument: Instrument) -> float:
+    """Convert a raw quote to decimal points.
+
+    Decimal instruments pass through. For ``thirty_seconds`` (Treasury 32nds),
+    a string ``"<handle>'<32nds>[half]"`` like ``"110'085"`` parses to
+    ``110 + 8.5/32`` (the optional 3rd digit is a half-32nd). Numeric input on a
+    32nds instrument is treated as already-decimal points (spec §5.3).
+    """
+    if instrument.price_format != "thirty_seconds":
+        return float(raw)
+
+    if not isinstance(raw, str):
+        return float(raw)
+
+    if "'" not in raw:
+        raise ValueError(f"malformed 32nds quote {raw!r}: expected \"<handle>'<32nds>\"")
+
+    handle_str, _, frac_str = raw.partition("'")
+    if not handle_str or len(frac_str) != 3 or not frac_str.isdigit():
+        raise ValueError(
+            f"malformed 32nds quote {raw!r}: fractional part must be exactly 3 digits"
+        )
+
+    handle = float(handle_str)
+    thirty_seconds = float(frac_str[:2])
+    thirty_seconds += int(frac_str[2]) / 10.0   # e.g. '5' -> +0.5 of a 32nd, '0' -> +0.0
+    return handle + thirty_seconds / 32.0
