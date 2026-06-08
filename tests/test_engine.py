@@ -254,3 +254,37 @@ def test_held_position_keeps_resting_stop_across_gap():
     assert result.trades and result.trades[0].entry_price == pytest.approx(20010.0)
     # the position survives the discontinuity (no spurious flat); open at end.
     assert result.trades[0].open_at_end is True
+
+
+from plutobt.lookahead import assert_causal
+
+
+def test_engine_strategy_precompute_is_causal_and_deterministic():
+    nq = get_instrument("NQ")
+    s = EMACrossEngine()
+    df = _bars([20000.0 + i * 3.0 for i in range(40)])
+
+    # the strategy's precompute must pass the causality detector...
+    assert_causal(s.precompute, df, sample=12) is None
+
+    # ...and the engine result must be reproducible (same input -> same output).
+    eng1 = Engine(nq, BacktestConfig(slippage_ticks=1.0, commission_per_side=2.50))
+    eng2 = Engine(nq, BacktestConfig(slippage_ticks=1.0, commission_per_side=2.50))
+    r1 = eng1.run(df, EMACrossEngine())
+    r2 = eng2.run(df, EMACrossEngine())
+    np.testing.assert_allclose(r1.equity_curve.to_numpy(),
+                               r2.equity_curve.to_numpy(), rtol=0, atol=0)
+    assert r1.manifest["data_sha256"] == r2.manifest["data_sha256"]
+
+
+def test_engine_rejects_a_leaky_strategy_via_assert_causal():
+    class Leaky(Strategy):
+        def precompute(self, df):
+            df = df.copy()
+            df["future"] = df["close"].shift(-1)  # leak
+            df["long"] = df["future"] > df["close"]
+            return df
+
+    df = _bars([20000.0 + i * 2.0 for i in range(30)])
+    with pytest.raises(AssertionError, match="non-causal"):
+        assert_causal(Leaky().precompute, df)
