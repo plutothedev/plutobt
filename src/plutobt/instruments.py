@@ -117,3 +117,8 @@ def parse_price(raw: str | float, instrument: Instrument) -> float:
     thirty_seconds = float(frac_str[:2])
     thirty_seconds += int(frac_str[2]) / 10.0   # e.g. '5' -> +0.5 of a 32nd, '0' -> +0.0
     return handle + thirty_seconds / 32.0
+
+
+def ticks_to_price(ticks: float, instrument: Instrument) -> float:
+    """Decimal price magnitude of ``ticks`` ticks (signed). ticks * tick_size."""
+    return ticks * instrument.tick_size

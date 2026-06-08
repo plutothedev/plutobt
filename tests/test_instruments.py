@@ -5,6 +5,7 @@ import pytest
 from plutobt.instruments import Instrument
 from plutobt.instruments import REGISTRY, get_instrument
 from plutobt.instruments import parse_price
+from plutobt.instruments import ticks_to_price
 
 
 def test_instrument_is_frozen_dataclass_with_exact_fields():
@@ -146,3 +147,22 @@ def test_parse_price_zn_rejects_malformed_quote():
         parse_price("110-085", zn)   # wrong separator
     with pytest.raises(ValueError):
         parse_price("110'85", zn)    # fractional part must be 2 or 3 digits
+
+
+def test_ticks_to_price_nq_one_tick_is_quarter_point():
+    nq = get_instrument("NQ")
+    assert ticks_to_price(1, nq) == pytest.approx(0.25)
+    assert ticks_to_price(4, nq) == pytest.approx(1.0)
+
+
+def test_ticks_to_price_zn_one_tick_is_one_64th():
+    # ZN tick = 1/64 = 0.015625 in decimal points
+    zn = get_instrument("ZN")
+    assert ticks_to_price(1, zn) == pytest.approx(1 / 64)
+    assert ticks_to_price(2, zn) == pytest.approx(1 / 32)
+
+
+def test_ticks_to_price_signed_and_fractional():
+    cl = get_instrument("CL")          # tick 0.01
+    assert ticks_to_price(-3, cl) == pytest.approx(-0.03)
+    assert ticks_to_price(2.5, cl) == pytest.approx(0.025)
