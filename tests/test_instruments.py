@@ -2,11 +2,14 @@ import dataclasses
 
 import pytest
 
-from plutobt.instruments import Instrument
-from plutobt.instruments import REGISTRY, get_instrument
-from plutobt.instruments import parse_price
-from plutobt.instruments import ticks_to_price
-from plutobt.instruments import pnl_points
+from plutobt.instruments import (
+    REGISTRY,
+    Instrument,
+    get_instrument,
+    parse_price,
+    pnl_points,
+    ticks_to_price,
+)
 
 
 def test_instrument_is_frozen_dataclass_with_exact_fields():
@@ -230,3 +233,11 @@ def test_section_10_1_zn_32nds_parse_to_pnl_end_to_end():
     entry = parse_price("110'080", zn)
     exit_ = parse_price("110'085", zn)
     assert pnl_points(entry, exit_, 1, zn) == pytest.approx(15.625)
+
+
+def test_every_registry_instrument_tick_value_matches_tick_math():
+    # closes §10.1 across the whole registry: a +1 tick move on 1 contract
+    # always equals the published tick_value, with no symbol left out.
+    for symbol, inst in REGISTRY.items():
+        one_tick = ticks_to_price(1, inst)
+        assert pnl_points(0.0, one_tick, 1, inst) == pytest.approx(inst.tick_value), symbol
