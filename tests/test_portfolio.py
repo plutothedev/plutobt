@@ -271,3 +271,48 @@ def test_margin_call_zero_when_flat():
     cl = get_instrument("CL")
     pf = Portfolio(starting_cash=10_000.0, instrument=cl)
     assert pf.margin_call_amount() == pytest.approx(0.0)
+
+
+def test_mtm_gap_open_entry_stop_exit_to_the_cent():
+    """Spec §10.4: fill-basis MTM to the cent.
+
+    NQ ($20/pt). Enter long at a GAP OPEN fill of 20,012.00 (prior close was
+    20,000.00 — the prior-close-to-fill move is NOT ours). Exit via a STOP
+    fill at 20,007.00. True P&L = (20,007 - 20,012) * $20 = -$100.00, exactly.
+    A naive close-to-close ledger would mis-book the unowned +12pt gap.
+    """
+    nq = get_instrument("NQ")
+    assert nq.point_value == 20.0
+    pf = Portfolio(starting_cash=100_000.0, instrument=nq)
+
+    # Entry at gap-open fill (NOT prior close). Commission 0 to isolate basis.
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_012.00, commission=0.0))
+    assert pf.position.avg_price == pytest.approx(20_012.00)
+
+    # Interim mark at the entry bar's close (20,020) — unrealized only.
+    pf.mark(20_020.00)
+    assert pf.equity(mark_price=20_020.00) == pytest.approx(100_000.0 + (20_020.00 - 20_012.00) * 20.0)
+
+    # Exit via stop fill at 20,007.00 (a non-close price).
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_007.00, commission=0.0))
+
+    # Realized fill-to-fill: (20,007 - 20,012) * $20 = -$100.00, to the cent.
+    assert pf.cash == pytest.approx(99_900.00)
+    assert pf.position.qty == 0
+    assert len(pf.trades) == 1
+    tr = pf.trades[0]
+    assert tr.entry_price == pytest.approx(20_012.00)
+    assert tr.exit_price == pytest.approx(20_007.00)
+    assert tr.pnl == pytest.approx(-100.00)
+
+
+def test_mtm_gap_open_with_commission_to_the_cent():
+    """Same seam, now with commission on both sides, exact to the cent."""
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=100_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_012.00, commission=2.10))
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_007.00, commission=2.10))
+    # -100.00 gross - 2.10 - 2.10 commission = -104.20.
+    assert pf.cash == pytest.approx(100_000.0 - 100.00 - 4.20)
+    # Trade.pnl is gross of commission (price-basis only).
+    assert pf.trades[0].pnl == pytest.approx(-100.00)
