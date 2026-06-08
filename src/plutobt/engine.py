@@ -141,13 +141,20 @@ class Engine:
 
     def _build_manifest(self, df: pd.DataFrame) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the
-        canonical CSV bytes of the input frame (§5.10, §0 key name)."""
+        canonical CSV bytes of the input frame (§5.10, §0 key name).
+
+        ``periods_per_year`` is promoted to the top-level manifest from the config
+        so that compute_metrics (and run_symbol) can retrieve it without digging
+        into the nested config dict.
+        """
         raw = df.to_csv(index=False).encode("utf-8")
         return {
             "data_sha256": hashlib.sha256(raw).hexdigest(),
             "version": __version__,
             "config": asdict(self.config),
             "instrument": self.instrument.symbol,
+            # periods_per_year: promoted from config for easy access by compute_metrics.
+            "periods_per_year": self.config.periods_per_year,
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
             # synthetic snapshot. These document the continuous-series policy;
             # full back-adjustment construction is out of v1 scope.

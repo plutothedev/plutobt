@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pytest
 
 from plutobt.strategies.ema_cross import EMACross
 
