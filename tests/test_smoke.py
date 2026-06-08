@@ -47,7 +47,7 @@ def test_pyproject_declares_package_and_src_layout():
     assert cfg["project"]["requires-python"] == ">=3.11"
     assert cfg["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
-    assert cfg["tool"]["pytest"]["ini_options"]["importmode"] == "importlib"
+    assert "--import-mode=importlib" in cfg["tool"]["pytest"]["ini_options"]["addopts"]
 
 
 def test_all_contract_modules_import():
