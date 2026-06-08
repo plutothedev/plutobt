@@ -59,7 +59,8 @@ def test_trade_open_at_end_flag():
     assert math.isclose(t.pnl, -50.0)
 
 
-from plutobt.portfolio import Fill
+from plutobt.instruments import get_instrument
+from plutobt.portfolio import Fill, Portfolio
 
 
 def test_fill_value_type_fields():
@@ -75,3 +76,20 @@ def test_fill_sell_side():
     f = Fill(ts=2000, side="sell", contracts=1, price=108.0, commission=2.0)
     assert f.side == "sell"
     assert f.contracts == 1
+
+
+def test_portfolio_starts_flat_with_cash():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    assert pf.cash == 50_000.0
+    assert pf.position.qty == 0
+    assert pf.position.avg_price is None
+    assert pf.trades == []
+
+
+def test_portfolio_equity_when_flat_equals_cash():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    # Flat => no open MTM regardless of mark price.
+    assert pf.equity(mark_price=20_000.0) == 50_000.0
+    assert pf.equity(mark_price=15_000.0) == 50_000.0
