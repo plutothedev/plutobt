@@ -124,3 +124,34 @@ def test_sortino_annualizes_consistently():
 def test_sortino_no_downside_returns_inf():
     r = pd.Series([0.01, 0.02, 0.03])  # all >= MAR
     assert math.isinf(sortino(r, mar=0.0, periods_per_year=1.0))
+
+
+# ---------------------------------------------------------------------------
+# M7.5 — max_drawdown (depth + duration)
+# ---------------------------------------------------------------------------
+from plutobt.metrics import max_drawdown
+
+
+def test_max_drawdown_depth_and_duration():
+    # peak 120 @ idx3, trough 90 @ idx4, recovery 130 @ idx6.
+    # depth = (90-120)/120 = -0.25 ; duration = 6 - 3 = 3 bars (peak->recovery)
+    eq = pd.Series([100, 110, 105, 120, 90, 95, 130, 125],
+                   index=[0, 1, 2, 3, 4, 5, 6, 7], dtype=float)
+    depth, duration = max_drawdown(eq)
+    assert_allclose(depth, -0.25, rtol=0, atol=1e-12)
+    assert duration == 3
+
+
+def test_max_drawdown_unrecovered_runs_to_end():
+    # Falls and never recovers: duration runs from the peak to the last bar.
+    eq = pd.Series([100, 120, 110, 90, 80], index=[0, 1, 2, 3, 4], dtype=float)
+    depth, duration = max_drawdown(eq)
+    assert_allclose(depth, (80 - 120) / 120, rtol=0, atol=1e-12)
+    assert duration == 3  # idx4 - idx1
+
+
+def test_max_drawdown_monotonic_up_is_zero():
+    eq = pd.Series([100, 101, 102, 103], dtype=float)
+    depth, duration = max_drawdown(eq)
+    assert depth == 0.0
+    assert duration == 0
