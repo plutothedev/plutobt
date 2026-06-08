@@ -1,0 +1,8 @@
+# CL WTI Crude (1,000 bbl). 1 tick CL = 0.01 = $10.00. Wider/thinner -> 3 ticks/side,
+# ~$3.50/side commission. Costs are per-instrument and do NOT auto-carry from NQ.
+commission_per_side = 3.50
+slippage_ticks = 3.0
+risk_free = 0.0
+periods_per_year = 20412.0   # demo holds annualization basis fixed across instruments
+carry_overnight = false
+allow_short = false

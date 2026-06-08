@@ -1,0 +1,7 @@
+# ES E-mini S&P 500. 1 tick ES = 0.25 pt = $12.50. Slippage 1 tick/side; ~$2.50/side.
+commission_per_side = 2.50
+slippage_ticks = 1.0
+risk_free = 0.0
+periods_per_year = 20412.0   # 5m RTH index: 81 bars/day * 252
+carry_overnight = false
+allow_short = false

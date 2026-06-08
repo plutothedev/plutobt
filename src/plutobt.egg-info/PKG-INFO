@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: plutobt
+Version: 0.1.0
+Summary: Hybrid futures backtesting engine
+Author: Michael Cinnamon
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pandas==2.2.2
+Requires-Dist: numpy==1.26.4
+Requires-Dist: matplotlib==3.8.4
+Provides-Extra: dev
+Requires-Dist: pytest==8.2.0; extra == "dev"
+Requires-Dist: ruff==0.4.4; extra == "dev"
+
+# PlutoBT
+
+Hybrid futures backtesting engine in Python. Vectorized signals + event-driven execution, realistic futures fills/margin, verified CME contract specs. MIT.
+
+Contract specs verified against CME Group (NQ, ES, CL, GC, ZN, etc.). See `docs/superpowers/specs/`.
