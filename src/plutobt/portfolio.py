@@ -96,3 +96,56 @@ class Portfolio:
             prior_avg * abs(cur_qty) + fill.price * abs(signed)
         ) / abs(new_qty)
         self.position.qty = new_qty
+
+    def _reduce_or_flip(self, fill: Fill, signed: int) -> None:
+        cur_qty = self.position.qty
+        avg = self.position.avg_price
+        closing = min(abs(signed), abs(cur_qty))   # contracts being closed
+        side_str = "long" if cur_qty > 0 else "short"
+
+        # Pro-rata realized P&L on the closed contracts, fill-basis.
+        # Long close: (exit - entry); short close: (entry - exit). pnl_points
+        # handles the sign via the position's signed qty direction.
+        closed_signed = closing if cur_qty > 0 else -closing
+        realized = pnl_points(avg, fill.price, closed_signed, self.instrument)
+        self.cash += realized
+
+        # §0.4 Van Tharp R: r_multiple when initial_stop is set.
+        r_mult: float | None = None
+        initial_stop = self.position.initial_stop
+        if initial_stop is not None and avg is not None:
+            risk_per_contract = abs(avg - initial_stop) * self.instrument.point_value
+            if risk_per_contract != 0.0:
+                r_mult = realized / (risk_per_contract * closing)
+
+        self.trades.append(
+            Trade(
+                entry_ts=self._open_entry_ts,
+                exit_ts=fill.ts,
+                side=side_str,
+                contracts=closing,
+                entry_price=avg,
+                exit_price=fill.price,
+                pnl=realized,
+                r_multiple=r_mult,
+            )
+        )
+
+        remaining = cur_qty + signed   # signed residual after applying the fill
+        if remaining == 0:
+            self._go_flat()
+            return
+        if (remaining > 0) == (cur_qty > 0):
+            # Partial close: same direction remains, VWAP unchanged.
+            self.position.qty = remaining
+            return
+        # Flip: residual opens a new position in the opposite direction at fill.
+        self.position.qty = remaining
+        self.position.avg_price = fill.price
+        self.position.initial_stop = None
+        self._open_entry_ts = fill.ts
+
+    def _go_flat(self) -> None:
+        self.position = Position()
+        self._open_entry_ts = None
+        self._mark_price = None

@@ -123,3 +123,66 @@ def test_apply_fill_open_short_sets_negative_qty():
     assert pf.position.qty == -3
     assert pf.position.avg_price == 20_000.0
     assert pf.cash == 50_000.0 - 6.0
+
+
+def test_apply_fill_full_close_long_realizes_pnl_and_books_trade():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=20_000.0, commission=0.0))
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_010.0, commission=0.0))
+    # +10 pts * $20/pt * 1 = +$200 realized into cash.
+    assert pf.cash == pytest.approx(50_200.0)
+    assert pf.position.qty == 0
+    assert pf.position.avg_price is None
+    assert len(pf.trades) == 1
+    tr = pf.trades[0]
+    assert tr.side == "long"
+    assert tr.entry_ts == 1000
+    assert tr.exit_ts == 2000
+    assert tr.contracts == 1
+    assert tr.entry_price == pytest.approx(20_000.0)
+    assert tr.exit_price == pytest.approx(20_010.0)
+    assert tr.pnl == pytest.approx(200.0)
+    assert tr.open_at_end is False
+
+
+def test_apply_fill_partial_close_pro_rata_keeps_avg_price():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=3, price=20_000.0, commission=0.0))
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=1, price=20_020.0, commission=0.0))
+    # Close 1 of 3 at +20 pts => +$400 realized; 2 remain at unchanged VWAP 20000.
+    assert pf.position.qty == 2
+    assert pf.position.avg_price == pytest.approx(20_000.0)
+    assert pf.cash == pytest.approx(50_400.0)
+    assert len(pf.trades) == 1
+    assert pf.trades[0].contracts == 1
+    assert pf.trades[0].pnl == pytest.approx(400.0)
+
+
+def test_apply_fill_close_short_realizes_gain_when_price_falls():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="sell", contracts=2, price=20_000.0, commission=0.0))
+    pf.apply_fill(Fill(ts=2000, side="buy", contracts=2, price=19_990.0, commission=0.0))
+    # Short covered 10 pts lower * $20 * 2 = +$400.
+    assert pf.position.qty == 0
+    assert pf.cash == pytest.approx(50_400.0)
+    assert pf.trades[0].side == "short"
+    assert pf.trades[0].pnl == pytest.approx(400.0)
+
+
+def test_apply_fill_flip_closes_then_opens_remainder():
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=2, price=20_000.0, commission=0.0))
+    # Sell 3 while long 2: close 2 (+ realize), open short 1 at fill price.
+    pf.apply_fill(Fill(ts=2000, side="sell", contracts=3, price=20_005.0, commission=0.0))
+    assert pf.position.qty == -1
+    assert pf.position.avg_price == pytest.approx(20_005.0)
+    # Realized: close 2 long at +5 pts * $20 = +$200.
+    assert pf.cash == pytest.approx(50_200.0)
+    assert len(pf.trades) == 1
+    assert pf.trades[0].contracts == 2
+    assert pf.trades[0].side == "long"
+    assert pf.trades[0].pnl == pytest.approx(200.0)
