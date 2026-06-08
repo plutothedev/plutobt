@@ -84,6 +84,18 @@ def test_ruff_check_passes():
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_ci_workflow_runs_matrix_on_pinned_stack():
+    wf = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    # matrix must cover the supported interpreters (§5.10 CI matrix)
+    assert "3.11" in wf
+    assert "3.12" in wf
+    # CI must install the FROZEN lockfile, not loose deps (§5.10 reproducibility)
+    assert "requirements.lock" in wf
+    # CI must run lint and the test suite
+    assert "ruff check" in wf
+    assert "pytest" in wf
+
+
 def test_pathlib_root_exists():
     assert isinstance(REPO_ROOT, pathlib.Path)
     assert REPO_ROOT.is_dir()
