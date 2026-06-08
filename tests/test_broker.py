@@ -121,6 +121,17 @@ def test_fill_pending_returns_empty_when_nothing_pending():
     assert broker.fill_pending(bar) == []
 
 
+def test_instrument_default_slippage_used_when_config_slippage_is_none():
+    inst = get_instrument("NQ")           # instrument.slippage_ticks == 1.0
+    cfg = BacktestConfig()                # slippage_ticks=None
+    pf = Portfolio(starting_cash=100_000.0, instrument=inst)
+    broker = Broker(inst, cfg, pf)
+    broker.buy(contracts=1)
+    bar = Bar(ts=1000, open=15_000.0, high=15_010.0, low=14_990.0, close=15_005.0)
+    fills = broker.fill_pending(bar)
+    assert fills[0].price == 15_000.25    # NQ tick 0.25, 1 tick slippage from instrument default
+
+
 # ---------------------------------------------------------------------------
 # M5.5 — Attached-stop arms resting_stop on entry fill; amend_stop
 # ---------------------------------------------------------------------------

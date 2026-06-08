@@ -13,7 +13,7 @@ from plutobt.portfolio import Fill, Portfolio
 class Order:
     side: str                    # "buy" | "sell"
     contracts: int
-    kind: str                    # "market" | "stop" | "limit"
+    kind: str                    # "market" | "limit"
     price: float | None = None   # trigger for stop/limit
     attached_stop: float | None = None
     status: str = "pending"      # "pending"|"filled"|"cancelled"|"rejected"
@@ -218,6 +218,8 @@ class Broker:
                     self.pending = None
                     if order.attached_stop is not None:
                         self.resting_stop = order.attached_stop
+            else:
+                raise ValueError(f"unknown order kind: {order.kind!r}")
         if self.portfolio.position.qty == 0:
             self.resting_stop = None      # no orphan stop on a flat position
         return fills

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tomllib  # noqa: F401  (used by M9 TOML loading)
-from dataclasses import dataclass  # noqa: F401  (fields re-exported)
+from dataclasses import dataclass
 
 
 @dataclass
