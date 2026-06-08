@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import collections
 import hashlib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import pandas as pd
 
@@ -142,13 +142,13 @@ class Engine:
         return {
             "data_sha256": hashlib.sha256(raw).hexdigest(),
             "version": __version__,
-            "config": {
-                "commission_per_side": self.config.commission_per_side,
-                "slippage_ticks": self.config.slippage_ticks,
-                "risk_free": self.config.risk_free,
-                "periods_per_year": self.config.periods_per_year,
-                "carry_overnight": self.config.carry_overnight,
-                "allow_short": self.config.allow_short,
-            },
+            "config": asdict(self.config),
             "instrument": self.instrument.symbol,
+            # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
+            # synthetic snapshot. These document the continuous-series policy;
+            # full back-adjustment construction is out of v1 scope.
+            "roll_trigger": "none_single_expiry",
+            "splice_method": "none_single_expiry",
+            "adjustment_method": "backwards_difference",
+            "as_of_date": "2026-06-07",
         }
