@@ -85,3 +85,42 @@ def test_psr_against_sr0_benchmark_lowers_probability():
 def test_psr_zero_std_returns_nan():
     r = pd.Series([0.0, 0.0, 0.0, 0.0])
     assert math.isnan(psr(r, sr0=0.0))
+
+
+# ---------------------------------------------------------------------------
+# M7.4 — sortino (full-N downside denominator, MAR) — §10.7 divide-by-N
+# ---------------------------------------------------------------------------
+from plutobt.metrics import sortino
+
+
+def test_sortino_full_n_denominator():
+    # DR = sqrt((1/N) * sum(min(R-MAR,0)^2)); MAR=0, N=10.
+    # sum of squared downside = 0.0015 -> DR = 0.012247448713915891
+    # sortino = mean/DR = 0.01/0.012247... = 0.816496580927726 (per-bar)
+    r = pd.Series(REF_RETURNS)
+    got = sortino(r, mar=0.0, periods_per_year=1.0)
+    assert_allclose(got, 0.816496580927726, rtol=0, atol=1e-12)
+
+
+def test_sortino_rejects_divide_by_downside_count():
+    # The WRONG denominator divides by the count of losers (4), giving
+    # DR_wrong = sqrt(0.0015/4) = 0.019364916731037084 -> sortino_wrong ~ 0.5164.
+    # Assert the correct full-N value differs from the divide-by-count value.
+    r = pd.Series(REF_RETURNS)
+    correct = sortino(r, mar=0.0, periods_per_year=1.0)
+    wrong = 0.01 / math.sqrt(0.0015 / 4)
+    assert not np.isclose(correct, wrong)
+    assert correct > wrong  # full-N (larger N) => smaller DR => larger ratio
+
+
+def test_sortino_annualizes_consistently():
+    r = pd.Series(REF_RETURNS)
+    ppy = 20412.0
+    got = sortino(r, mar=0.0, periods_per_year=ppy)
+    expected = 0.816496580927726 * math.sqrt(ppy)
+    assert_allclose(got, expected, rtol=1e-12, atol=0)
+
+
+def test_sortino_no_downside_returns_inf():
+    r = pd.Series([0.01, 0.02, 0.03])  # all >= MAR
+    assert math.isinf(sortino(r, mar=0.0, periods_per_year=1.0))
