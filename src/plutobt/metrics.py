@@ -336,11 +336,12 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # 0.13])" - a point estimate outside its own interval - live on pluto's
     # screen. `sharpe` is exactly sqrt(periods_per_year) times `sharpe_raw`,
     # and a constant times an estimator has that constant times its standard
-    # error (sharpe_se is Lo 2002's iid-returns result for the per-bar SR), so
+    # error (sharpe_se is Lo 2002's iid-normal result for the per-bar SR), so
     # the same sqrt(periods_per_year) factor scales sharpe_se and sharpe_ci.
     # Neither the sqrt(q) annualization nor Lo's SE is exact once returns are
-    # serially correlated: Lo's own eta(q) correction for that case is not
-    # applied here. The raw-unit statistics stay available through the
+    # serially correlated or far from normal (Mertens 2002 adds the skew and
+    # kurtosis terms psr uses): Lo's own eta(q) correction is not applied
+    # here. The raw-unit statistics stay available through the
     # pinned pure functions and sharpe_raw.
     scale = math.sqrt(periods_per_year)
     se = sharpe_se(sr_raw, t_count) * scale if t_count > 0 else float("nan")
