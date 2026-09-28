@@ -5,7 +5,7 @@ import random
 import pytest
 
 from plutobt.instruments import get_instrument
-from plutobt.metrics import expectancy, outlier_sensitivity, profit_factor
+from plutobt.metrics import expectancy, outlier_sensitivity, profit_factor, trade_net_pnl
 from plutobt.portfolio import Fill, Portfolio, Trade
 
 NQ = get_instrument("NQ")  # point_value 20
@@ -159,18 +159,27 @@ _RTY_NET_ZERO = [("buy", 2000.0, 2000.1), ("buy", 2000.1, 2000.2),
                  ("sell", 2000.2, 2000.1), ("sell", 2000.8, 2000.7)]
 
 
-def test_trades_that_net_exactly_zero_are_scratches_not_wins_or_losses():
-    """Four RTY round trips at $2.50/side each net $0, but float noise in the price
-    differences leaves a few 1e-12 on them, two above zero and two below. Without the
-    scratch band that noise booked two wins and two losses."""
+@pytest.mark.parametrize(("contracts", "min_noise", "max_noise"), [
+    (1, 0.0, 1e-9),         # a few 1e-12 per trade
+    (1_000, 1e-9, 1e-7),    # a few 1e-9: past a 1e-9 band, far inside the 1e-6 one
+], ids=["1-contract", "1000-contracts"])
+def test_trades_that_net_exactly_zero_are_scratches_not_wins_or_losses(
+        contracts, min_noise, max_noise):
+    """Four RTY round trips at $2.50/side per contract each net $0, but float noise in the
+    price differences leaves a little on them, two above zero and two below, growing with
+    the position. Without the scratch band that noise booked two wins and two losses; a
+    band tightened to 1e-9 still lets it through at 1,000 contracts."""
     p = Portfolio(starting_cash=100_000.0, instrument=get_instrument("RTY"))
+    fee = 2.5 * contracts
     for i, (side, entry, exit_) in enumerate(_RTY_NET_ZERO):
         back = "sell" if side == "buy" else "buy"
-        p.apply_fill(Fill(ts=2 * i, side=side, contracts=1, price=entry, commission=2.5))
-        p.apply_fill(Fill(ts=2 * i + 1, side=back, contracts=1, price=exit_, commission=2.5))
+        p.apply_fill(Fill(ts=2 * i, side=side, contracts=contracts, price=entry, commission=fee))
+        p.apply_fill(Fill(ts=2 * i + 1, side=back, contracts=contracts, price=exit_,
+                          commission=fee))
     nets = [t.net_pnl for t in p.trades]
-    assert all(0.0 < abs(x) < 1e-9 for x in nets)      # $0 up to float noise...
-    assert sum(x > 0.0 for x in nets) == 2              # ...two just above zero, two below
+    assert all(min_noise < abs(x) < max_noise for x in nets)   # $0 up to float noise...
+    assert sum(x > 0.0 for x in nets) == 2                      # ...two above zero, two below
+    assert [trade_net_pnl(t) for t in p.trades] == [0.0, 0.0, 0.0, 0.0]
     m, out = _trade_stats(p.trades)
     assert m["win_rate"] == 0.0
     assert m["expectancy"] == 0.0
@@ -188,6 +197,7 @@ def test_a_real_sub_cent_net_win_is_still_a_win():
     p.apply_fill(Fill(ts=2, side="sell", contracts=1, price=100.01, commission=0.0035))
     (t,) = p.trades
     assert t.net_pnl == pytest.approx(0.003)
+    assert trade_net_pnl(t) == pytest.approx(0.003)
     m, _ = _trade_stats(p.trades)
     assert m["win_rate"] == 1.0
     assert m["expectancy"] == pytest.approx(0.003)
