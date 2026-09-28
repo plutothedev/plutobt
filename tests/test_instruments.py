@@ -52,11 +52,12 @@ def test_instrument_is_frozen_dataclass_with_exact_fields():
         inst.symbol = "ES"
 
 
-def test_registry_has_all_nine_futures_symbols():
-    # The 9 verified futures specs are still present and untouched. v0.5 ADDS equity
-    # rows additively (CONTRACT §3.1), so this is a subset check, not exact equality.
+def test_registry_is_exactly_the_nine_futures_and_three_equities():
+    # Full registry membership, byte-exact: a subset check would miss a bogus
+    # extra row (an unverified instrument silently reaching a backtest).
     futures = {"NQ", "MNQ", "ES", "MES", "YM", "RTY", "CL", "GC", "ZN"}
-    assert futures <= set(REGISTRY)
+    equities = {"AAPL", "MSFT", "SPY"}
+    assert set(REGISTRY) == futures | equities
 
 
 def test_get_instrument_returns_registry_object_by_symbol():
@@ -66,11 +67,12 @@ def test_get_instrument_returns_registry_object_by_symbol():
 
 
 def test_get_instrument_unknown_symbol_raises_keyerror_listing_known():
-    # "SPY" is now a real equity row (CONTRACT §3.1); use a genuinely unknown ticker.
+    # A clearly fake ticker: "TSLA" would break this test the day TSLA becomes a
+    # real row, same as "SPY" did before it (CONTRACT §3.1).
     with pytest.raises(KeyError) as exc:
-        get_instrument("TSLA")
+        get_instrument("NOT_A_SYMBOL")
     # message lists the known symbols so the failure is actionable
-    assert "TSLA" in str(exc.value)
+    assert "NOT_A_SYMBOL" in str(exc.value)
     assert "NQ" in str(exc.value)
 
 
@@ -258,6 +260,10 @@ def test_equity_rows_present_with_cash_equity_spec(symbol):
     assert inst.currency == "USD"
     assert inst.settlement == "cash"
     assert inst.price_format == "decimal"
+    # RTH session + assumed slippage, pinned per row: a divergent session or
+    # slippage silently changes fill/exposure math for just that one symbol.
+    assert (inst.session_open_ct, inst.session_close_ct) == ("08:30", "15:00")
+    assert inst.slippage_ticks == 1.0
     # No performance bond for cash equity (documented limit, not an invariant).
     assert inst.initial_margin == 0.0
     assert inst.maintenance_margin == 0.0

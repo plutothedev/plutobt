@@ -421,6 +421,19 @@ def test_compute_metrics_ci_brackets_the_sharpe_it_sits_beside():
     assert_allclose(out["sharpe_se"], raw_se * math.sqrt(20412.0), rtol=1e-9, atol=0)
 
 
+def test_compute_metrics_empty_returns_gives_nan_se_and_ci_not_zero():
+    """A one-point equity curve has zero bar returns (t_count == 0). sharpe_se and
+    sharpe_ci must stay NaN, not collapse to a falsely precise 0.0 / (0.0, 0.0):
+    "no data" must never read as "certainty of zero risk" to a downstream reader."""
+    eq = pd.Series([100.0])
+    out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
+    assert out["T"] == 0
+    assert math.isnan(out["sharpe_se"])
+    lo, hi = out["sharpe_ci"]
+    assert math.isnan(lo)
+    assert math.isnan(hi)
+
+
 def test_compute_metrics_sharpe_ci_is_tuple():
     """§0.2: sharpe_ci must be a (low, high) tuple."""
     eq = pd.Series([100.0, 110.0, 105.0, 120.0])
