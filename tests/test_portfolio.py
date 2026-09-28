@@ -385,6 +385,8 @@ def test_open_at_end_noop_when_flat():
 def test_r_multiple_populated_for_stop_protected_trade():
     """§0.4: r_multiple = realized_pnl / (|entry - stop| * point_value * contracts).
 
+    realized_pnl is NET of the trade's fees; the risk is price risk only. Fees are 0
+    here, so net equals gross.
     NQ ($20/pt). Entry 20,000, initial_stop 19,990. Risk = 10 pts * $20 * 1 = $200.
     Exit at 20,030: realized = +30 pts * $20 = +$600 => r = 600 / 200 = 3.0.
     """

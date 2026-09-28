@@ -16,6 +16,15 @@ class Position:
 
 @dataclass
 class Trade:
+    """One closed slice of a position, or the position still open at the end.
+
+    ``pnl`` is GROSS price P&L on the fill basis, with no fees in it. ``commission`` is
+    the fees attributable to this trade's contracts, and ``net_pnl`` is ``pnl`` minus
+    them: every trade statistic reads ``net_pnl``. ``r_multiple`` is net of those fees,
+    measured against a price-risk 1R (no fees in the risk), so a stop-out exactly at the
+    stop reads below -1R.
+    """
+
     entry_ts: int
     exit_ts: int | None
     side: str
@@ -164,6 +173,11 @@ class Portfolio:
     def _calc_r_multiple(self, pnl: float, contracts: int) -> float | None:
         """Van Tharp R = pnl / (risk_per_contract * contracts).
 
+        ``pnl`` is NET of the fees attributable to ``contracts`` (the pooled entry
+        share plus the closing fill's share; at open-at-end: entry fees only). Risk is
+        price risk only, with no fees in it, so a stop-out exactly at the stop reads
+        below -1R by fees/risk.
+
         None when there is no attached stop or the per-contract risk is zero
         (§0.4). ``contracts`` is the unsigned number of contracts the ``pnl``
         is measured over.
@@ -219,6 +233,8 @@ class Portfolio:
 
         Marks the open position to the last mark() price and appends a
         Trade with open_at_end=True (exit_ts/exit_price=None, pnl=unrealized).
+        Its ``commission`` is entry fees only (the entry fees still pooled on the
+        position; no exit fee has been paid), and its ``r_multiple`` is net of them.
         The position is NOT closed (no cash movement). Idempotent: an
         open-at-end Trade is booked at most once. No-op when flat.
         """

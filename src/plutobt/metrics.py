@@ -29,6 +29,10 @@ IN_SAMPLE_LABEL = (
 # "insufficient sample" warning from the n_trades output key below the threshold.
 MIN_TRADE_SAMPLE = 30
 
+# A trade whose net P&L is within a millionth of a dollar of zero is a scratch: that is
+# float noise from price differences, never money; it is neither a win nor a loss.
+_NET_ZERO_TOL_USD = 1e-6
+
 
 def sharpe(returns: pd.Series, periods_per_year: float) -> float:
     """Annualized Sharpe from per-bar returns (risk-free already removed upstream).
@@ -182,9 +186,18 @@ def _closed_trades(trades: list[Trade]) -> list[Trade]:
     return [t for t in trades if not t.open_at_end]
 
 
+def _net(t: Trade) -> float:
+    """A trade's net P&L, with a scratch (within ``_NET_ZERO_TOL_USD`` of zero) as 0.0."""
+    net = t.net_pnl
+    return 0.0 if abs(net) < _NET_ZERO_TOL_USD else net
+
+
 def profit_factor(trades: list[Trade]) -> float:
     """Gross profit / gross loss over closed trades, each trade NET of its fees.
 
+    Gross profit and gross loss here are sums of the trades' NET P&L (a scratch, within
+    ``_NET_ZERO_TOL_USD`` of zero, is in neither), and 0/0 (no winner and no loser)
+    returns NaN, not +inf.
     inf-guard: returns +inf when there are profits but no losers; returns NaN
     when there are no closed trades at all. Open-at-end trades are excluded.
     Min-sample flagging (n < MIN_TRADE_SAMPLE) is surfaced by ``format_report``
@@ -193,25 +206,26 @@ def profit_factor(trades: list[Trade]) -> float:
     closed = _closed_trades(trades)
     if not closed:
         return float("nan")
-    gross_profit = sum(t.net_pnl for t in closed if t.net_pnl > 0.0)
-    gross_loss = -sum(t.net_pnl for t in closed if t.net_pnl < 0.0)
+    gross_profit = sum(_net(t) for t in closed if _net(t) > 0.0)
+    gross_loss = -sum(_net(t) for t in closed if _net(t) < 0.0)
     if gross_loss == 0.0:
-        return float("inf")
+        return float("inf") if gross_profit > 0.0 else float("nan")
     return float(gross_profit / gross_loss)
 
 
 def expectancy(trades: list[Trade]) -> float:
     """Per-trade expectancy = WinRate*AvgWin - LossRate*AvgLoss (§5.7).
 
-    Computed over closed trades (open-at-end excluded). AvgLoss is a positive
-    magnitude. Returns NaN with no closed trades.
+    Computed over closed trades (open-at-end excluded), each trade NET of its fees; a
+    scratch (within ``_NET_ZERO_TOL_USD`` of zero) counts in n but is neither a win nor
+    a loss. AvgLoss is a positive magnitude. Returns NaN with no closed trades.
     """
     closed = _closed_trades(trades)
     n = len(closed)
     if n == 0:
         return float("nan")
-    wins = [t.net_pnl for t in closed if t.net_pnl > 0.0]
-    losses = [t.net_pnl for t in closed if t.net_pnl < 0.0]
+    wins = [_net(t) for t in closed if _net(t) > 0.0]
+    losses = [_net(t) for t in closed if _net(t) < 0.0]
     win_rate_val = len(wins) / n
     loss_rate = len(losses) / n
     avg_win = (sum(wins) / len(wins)) if wins else 0.0
@@ -222,6 +236,8 @@ def expectancy(trades: list[Trade]) -> float:
 def avg_r(trades: list[Trade]) -> float | None:
     """Average Van Tharp R-multiple over closed trades that HAVE an initial stop.
 
+    Each R is net of its trade's fees, against a price-risk 1R with no fees in it
+    (``Portfolio._calc_r_multiple``), so a stop-out exactly at the stop is below -1R.
     Stop-less trades carry r_multiple is None and are excluded (count printed by
     ``compute_metrics``). Returns None when no closed trade has an R-multiple.
     """
@@ -237,12 +253,14 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
 
     ``collapses_without_top1`` flags when total P&L would go non-positive once
     the single best trade is removed (operationalizes "succeeding on outliers").
+    Every P&L here is NET of fees: trades are ranked, summed and shared by their net
+    P&L, with a scratch (within ``_NET_ZERO_TOL_USD`` of zero) as 0.0.
 
     v1 scope note: Sharpe-recomputed-ex-outlier is OUT of v1 — only profit
     factor + expectancy are recomputed ex-best/ex-worst here.
     """
     closed = _closed_trades(trades)
-    pnls = [t.net_pnl for t in closed]
+    pnls = [_net(t) for t in closed]
     total = sum(pnls)
     ordered = sorted(pnls, reverse=True)
     top1 = ordered[0] if ordered else 0.0
@@ -250,11 +268,11 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
     pct_top1 = (top1 / total) if total != 0.0 else float("nan")
     pct_top5 = (top5 / total) if total != 0.0 else float("nan")
 
-    best = max(closed, key=lambda t: t.net_pnl) if closed else None
-    worst = min(closed, key=lambda t: t.net_pnl) if closed else None
+    best = max(closed, key=lambda t: _net(t)) if closed else None
+    worst = min(closed, key=lambda t: _net(t)) if closed else None
     ex_best = [t for t in closed if t is not best]
     ex_worst = [t for t in closed if t is not worst]
-    total_ex_best = sum(t.net_pnl for t in ex_best)
+    total_ex_best = sum(_net(t) for t in ex_best)
 
     return {
         "pct_pnl_top1": pct_top1,
@@ -296,6 +314,10 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     calmar, annual_return, max_drawdown_depth, max_drawdown_duration,
     trailing_hwm_drawdown, win_rate, profit_factor, expectancy, avg_r,
     T, periods_per_year, n_trades, exposure.
+
+    The trade-stat keys (win_rate, profit_factor, expectancy, avg_r) are NET of fees,
+    over closed trades; a scratch (net within ``_NET_ZERO_TOL_USD`` of zero) counts in
+    n_trades but is neither a win nor a loss.
 
     ``label`` is always the FIRST key (IN-SAMPLE stamp).
 
@@ -363,10 +385,10 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     annual_ret = float(returns.mean() * periods_per_year) if t_count > 0 else 0.0
     calmar_ratio = calmar(annual_ret, dd_depth)
 
-    # Trade stats (closed trades only for win-rate/PF/expectancy/avg_r)
+    # Trade stats, NET of fees (closed trades only for win-rate/PF/expectancy/avg_r)
     closed = _closed_trades(trades)
     n_closed = len(closed)
-    wins = [t for t in closed if t.net_pnl > 0.0]
+    wins = [t for t in closed if _net(t) > 0.0]
     win_rate_val = (len(wins) / n_closed) if n_closed > 0 else 0.0  # §0.3
     pf = profit_factor(trades)
     exp = expectancy(trades)
