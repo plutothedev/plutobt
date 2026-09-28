@@ -14,9 +14,12 @@ from plutobt.portfolio import Position
 class Context:
     """Rebuilt each bar; bar data is read-only (§5.10).
 
-    ``bar`` is an immutable namedtuple row view of bar t. ``position`` is
-    always a typed ``Position`` (never None). ``state`` is a free-form dict
-    persisted across bars for sanctioned mutable strategy state.
+    ``bar`` is an immutable namedtuple row view of bar t. ``position`` is a
+    read-only snapshot of the position for this bar, always a typed ``Position``
+    (never None): it is a copy, so writing to it changes nothing. Move a stop
+    with ``ctx.broker.amend_stop(price)`` and exit with ``ctx.broker.close()``.
+    ``state`` is a free-form dict persisted across bars for sanctioned mutable
+    strategy state.
     """
 
     bar: object
@@ -39,5 +42,10 @@ class Strategy:
         return df
 
     def on_bar(self, ctx: Context) -> None:
-        """Per-bar event hook; place orders via ``ctx.broker``. No-op by default."""
+        """Per-bar event hook; place orders via ``ctx.broker``. No-op by default.
+
+        ``ctx.position`` is a read-only snapshot: stops move with
+        ``ctx.broker.amend_stop(...)`` and exits go through ``ctx.broker.close()``
+        (or an order), never through writes to the position.
+        """
         return None

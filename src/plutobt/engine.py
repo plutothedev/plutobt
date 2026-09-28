@@ -6,7 +6,7 @@ import collections
 import hashlib
 import math
 import numbers
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import pandas as pd
 
@@ -42,12 +42,28 @@ _STARTING_CASH = 100_000.0
 # is out of v1, §5.6). Stamped into every manifest's roll metadata.
 _ROLL_AS_OF_DEFAULT = "2026-06-07"
 
+# The time-order rule, quoted by every refusal of a frame's bar order.
+_TIME_RULE = ("bar timestamps (the 'ts' column) must strictly increase, since the engine "
+              "runs the bars in row order")
+
 # The session-ID rule for break_on="session", quoted by every refusal of the column.
 _SESSION_RULE = (
     "break_on='session' needs a 'session' column holding a trading-session ID on every "
     "bar: a number that never decreases (e.g. the CME trading day as an int YYYYMMDD), "
     "not RTH/ETH labels"
 )
+
+
+def _time_problem(frame: pd.DataFrame) -> str | None:
+    """The first bar whose ts is not after the one before it, naming both; None if the
+    timestamps strictly increase."""
+    if "ts" not in frame.columns:
+        return "the frame has no 'ts' column"
+    ts = frame["ts"].tolist()
+    for i in range(1, len(ts)):
+        if not ts[i] > ts[i - 1]:      # written so that a NaN ts is refused too
+            return f"row {i} (ts {ts[i]}) is not after row {i - 1} (ts {ts[i - 1]})"
+    return None
 
 
 def _session_problem(frame: pd.DataFrame) -> str | None:
@@ -88,11 +104,14 @@ class Engine:
         """Execute the backtest loop over ``df``.
 
         Checks first: a bad config (``break_on``; a commission, slippage or
-            periods_per_year that is not finite) and, in session mode, a bad
-            ``session`` column in ``df`` are refused with a ValueError before the
-            strategy's ``precompute`` runs; a ``session`` column the precompute
-            removed or broke raises FrameError.
-        Decision-at-t: ``on_bar`` is called with bar t's data.
+            periods_per_year that is not finite) and a bad ``df`` (bar timestamps
+            that do not strictly increase; in session mode, a bad ``session``
+            column) are refused with a ValueError before the strategy's
+            ``precompute`` runs. The same frame checks run on what ``precompute``
+            returns, and a frame it broke raises FrameError, naming it.
+        Decision-at-t: ``on_bar`` is called with bar t's data. ``ctx.position`` is
+            a copy of the position for the bar: a strategy's writes to it never
+            reach the book (stops move with ``ctx.broker.amend_stop``).
         Fill-at-t+1: any order placed in ``on_bar(t)`` is filled at bar t+1's open.
         Warm-up: ``on_bar`` is skipped while any derived signal column is NaN.
         Breaks: at a break the pending order is cancelled (``carry_overnight=False``,
@@ -111,20 +130,10 @@ class Engine:
             ``portfolio.mark_open_at_end`` (§0.6 — single source of truth).
         """
         self._check_config()
-        session_breaks = self.config.break_on == "session"
-        if session_breaks:
-            problem = _session_problem(df)
-            if problem is not None:
-                # The caller's own frame, refused before any strategy code runs.
-                raise ValueError(f"{_SESSION_RULE}; {problem}")
+        self._check_frame(df, precomputed=False)       # the caller's own frame
         data = strategy.precompute(df.copy()).reset_index(drop=True)
-        if session_breaks:
-            problem = _session_problem(data)
-            if problem is not None:
-                raise FrameError(
-                    "the strategy's precompute removed or broke the session column: "
-                    f"{problem}. {_SESSION_RULE}"
-                )
+        self._check_frame(data, precomputed=True)      # what the strategy made of it
+        session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
 
         portfolio = Portfolio(starting_cash=_STARTING_CASH, instrument=self.instrument)
@@ -157,7 +166,9 @@ class Engine:
             if not warm:
                 ctx = Context(
                     bar=bar,
-                    position=portfolio.position,
+                    # A copy for this bar: a strategy writing it (qty = 0 to "exit", or
+                    # initial_stop to "trail") must never rewrite the book or its R.
+                    position=replace(portfolio.position),
                     broker=broker,
                     instrument=self.instrument,
                     tick=self.instrument.tick_size,
@@ -206,6 +217,25 @@ class Engine:
             metrics={},
             manifest=manifest,
         )
+
+    def _check_frame(self, frame: pd.DataFrame, *, precomputed: bool) -> None:
+        """Refuse a frame the loop cannot run: bar timestamps that do not strictly
+        increase (checked first: out-of-order bars also scramble the session IDs) and,
+        in session mode, a broken session column. A problem in the caller's frame is a
+        plain ValueError; one in what the strategy's precompute returned is a FrameError
+        naming it."""
+        rules = [(_time_problem, _TIME_RULE, "the bar timestamps")]
+        if self.config.break_on == "session":
+            rules.append((_session_problem, _SESSION_RULE, "the session column"))
+        for find, rule, what in rules:
+            problem = find(frame)
+            if problem is None:
+                continue
+            if precomputed:
+                raise FrameError(
+                    f"the strategy's precompute removed or broke {what}: {problem}. {rule}"
+                )
+            raise ValueError(f"{rule}; {problem}")
 
     def _check_config(self) -> None:
         """Refuse a config the engine cannot honour, before any strategy code runs."""

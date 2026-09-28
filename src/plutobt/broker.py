@@ -177,6 +177,10 @@ class Broker:
         return open_px + slip if side == "buy" else open_px - slip
 
     def _emit_fill(self, ts: int, side: str, contracts: int, price: float) -> Fill:
+        # The backstop every fill passes. An order is checked where it is first touched,
+        # with the clearer message, but the resting stop and the margin trim size a fill
+        # from the POSITION, which no order check sees.
+        _check_size(contracts, f"cannot fill the {side} at ts {_ts_text(ts)}: its size")
         fill = Fill(
             ts=ts,
             side=side,

@@ -455,7 +455,7 @@ def test_a_bad_session_column_in_the_callers_frame_is_a_plain_value_error():
 @pytest.mark.parametrize("breaks_it", [
     lambda df: df.drop(columns=["session"]),
     lambda df: df.assign(session=df["session"].where(df.index != 2)),
-    lambda df: df.iloc[::-1],
+    lambda df: df.assign(session=df["session"].to_numpy()[::-1]),
 ], ids=["removed", "emptied", "reversed"])
 def test_a_precompute_that_breaks_the_session_column_raises_frame_error(breaks_it):
     # A FrameError names the strategy's precompute, so PlutoDesk can answer it with a 422.
@@ -480,3 +480,152 @@ def test_slippage_and_periods_per_year_may_be_left_to_their_defaults():
     cfg = BacktestConfig(slippage_ticks=None, periods_per_year=None)
     (t,) = Engine(NQ, cfg).run(_frame(BREAK), Scripted({0: "buy", 2: "close"})).trades
     assert t.entry_price == 101.0 + 0.25
+
+
+# ---------------------------------------------------------------------------
+# Task 9 re-review (2026-09-28): every fill checks its size, the strategy gets a copy
+# of the position, the flip margin reads the fill bar's open, bars stay in time order.
+# ---------------------------------------------------------------------------
+
+
+def _bars(rows, sessions=None):
+    """A bar a minute from (open, close) pairs, high and low a point outside both."""
+    n = len(rows)
+    df = pd.DataFrame({"ts": pd.Series([T0 + 60 * i for i in range(n)], dtype="int64"),
+                       "open": [float(o) for o, _ in rows],
+                       "high": [max(o, c) + 1.0 for o, c in rows],
+                       "low": [min(o, c) - 1.0 for o, c in rows],
+                       "close": [float(c) for _, c in rows],
+                       "volume": pd.Series([1] * n, dtype="int64")})
+    df["session"] = pd.Series(sessions or [1] * n, dtype="int64")
+    return df
+
+
+@pytest.mark.parametrize(("closes", "then", "qty"), [
+    ([100.0, 100.0, 100.0, 80.0, 80.0], None, 0.5),
+    ([100.0, 100.0, 100.0, 80.0, 80.0], None, 2.5),
+    ([100.0] * 5, lambda b: b.sell(60), 2.5),
+], ids=["stop-0.5", "stop-2.5", "margin-trim-2.5"])
+def test_a_fill_sized_from_the_position_is_checked_too(closes, then, qty):
+    # Re-review candidate: the resting stop fills abs(position.qty) and the margin trim
+    # fills the qty held, sizes no order check sees. A strategy writing the book's qty
+    # booked 2.5 contracts, or hit the portfolio's bare ValueError on 0.5 (a 500 in
+    # PlutoDesk). The book stays reachable as ctx.broker.portfolio, so it writes there.
+    def act(broker):
+        broker.portfolio.position.qty = qty
+        return then(broker) if then is not None else None
+
+    with pytest.raises(OrderError, match=rf"cannot fill the sell at ts {T0 + 180}: its size"):
+        _run_plan(_closes(closes), {0: lambda b: b.buy(1, stop=95.0), 2: act})
+
+
+def test_a_flips_margin_is_marked_at_the_fill_bars_open_not_its_close():
+    # CHARACTERIZATION PIN (re-review candidate): every other test bar has open == close,
+    # so a check marked at the fill bar's CLOSE (look-ahead) passed them all. The flip
+    # fills at bar 3's open (1,000: long 1 from 3,000 is down $40,000, leaving $60,000,
+    # and 4 new contracts need $92,000); bar 3 then closes back at 3,000, which the fill
+    # could not have known. Mutation-proved: the check marked at next_bar.close goes red.
+    df = _bars([(3000, 3000), (3000, 3000), (3000, 3000), (1000, 3000), (3000, 3000)])
+    trades, _ = _run_plan(df, {0: lambda b: b.buy(1), 2: lambda b: b.sell(5)})
+    assert [(t.side, t.contracts, t.open_at_end) for t in trades] == [("long", 1, False)]
+
+
+class CtxPlan(Strategy):
+    """Acts on bar indices: {index: callable(ctx)}."""
+
+    def __init__(self, plan):
+        self.plan, self.i = plan, -1
+
+    def on_bar(self, ctx):
+        self.i += 1
+        act = self.plan.get(self.i)
+        if act is not None:
+            act(ctx)
+
+
+def test_writing_ctx_position_cannot_erase_an_open_loss():
+    # PRE-EXISTING since v0.1 (re-review, 2026-09-28): ctx.position WAS the book's own
+    # Position, so ctx.position.qty = 0 (a strategy's idea of an exit) erased an open
+    # -$400 loss: no trade, and equity back at $100,000. It is a copy for the bar now.
+    def zero_it(ctx):
+        ctx.position.qty = 0
+
+    cfg = BacktestConfig(periods_per_year=252.0, slippage_ticks=0.0)
+    result = Engine(NQ, cfg).run(_closes([100.0, 100.0, 90.0, 80.0, 80.0, 80.0]),
+                                 CtxPlan({0: lambda c: c.broker.buy(1), 3: zero_it}))
+    (t,) = result.trades
+    assert t.open_at_end and t.pnl == -400.0
+    assert result.equity_curve.iloc[-1] == 100_000.0 - 400.0
+
+
+class TrailByWriting(Strategy):
+    """Buys 1 with a stop at 90, then 'trails' by writing ctx.position.initial_stop each
+    bar (the wrong API; ctx.broker.amend_stop is the right one) and closes on bar 3."""
+
+    def __init__(self):
+        self.i, self.stops = -1, []
+
+    def on_bar(self, ctx):
+        self.i += 1
+        if self.i == 0:
+            ctx.broker.buy(1, stop=90.0)
+        elif ctx.position.qty > 0:
+            ctx.position.initial_stop = float(ctx.bar.close) - 0.25
+            self.stops.append(ctx.broker.resting_stop)
+            if self.i == 3:
+                ctx.broker.close()
+
+
+def test_writing_ctx_position_initial_stop_moves_neither_the_stop_nor_r():
+    # PRE-EXISTING since v0.1 (re-review, 2026-09-28): the write rewrote the trade's R
+    # denominator (0.05 read as 2.0) while the real stop never moved.
+    strategy = TrailByWriting()
+    cfg = BacktestConfig(periods_per_year=252.0, slippage_ticks=0.0)
+    (t,) = Engine(NQ, cfg).run(_closes([100.0, 100.0, 100.25, 100.5, 100.5, 100.5]),
+                               strategy).trades
+    assert t.r_multiple == t.pnl / ((100.0 - 90.0) * 20.0)       # 0.05, on the 90 stop
+    assert strategy.stops == [90.0, 90.0, 90.0]                   # the real stop stayed
+
+
+# (the rows of BREAK a frame keeps, in its order; the first row not after the one before)
+_ORDERS = {"reversed": ([4, 3, 2, 1, 0], 1), "shuffled": ([2, 0, 3, 1, 4], 1),
+           "repeated": ([0, 1, 1, 3, 4], 2)}
+_MODES = {"one-session": ([1] * 5, "session"), "gap": (None, "gap")}
+
+
+@pytest.mark.parametrize("mode", list(_MODES))
+@pytest.mark.parametrize("order", list(_ORDERS))
+def test_bars_out_of_time_order_in_the_callers_frame_are_refused(order, mode):
+    # Nothing checked the time order: a reversed or shuffled frame (one session, or any
+    # frame in gap mode) ran time backwards without a word (re-review, 2026-09-28).
+    (rows, bad), (sessions, break_on) = _ORDERS[order], _MODES[mode]
+    df = _frame(BREAK, sessions=sessions).iloc[rows]
+    with pytest.raises(ValueError) as e:
+        Engine(NQ, BacktestConfig(break_on=break_on)).run(df, Precompute())
+    assert not isinstance(e.value, FrameError)                    # the caller's frame
+    ts = [T0 + BREAK[k] for k in rows]
+    assert "must strictly increase" in str(e.value)
+    assert f"row {bad} (ts {ts[bad]}) is not after row {bad - 1} (ts {ts[bad - 1]})" in (
+        str(e.value))
+
+
+@pytest.mark.parametrize("mode", list(_MODES))
+@pytest.mark.parametrize("order", list(_ORDERS))
+def test_a_precompute_that_reorders_the_bars_raises_frame_error(order, mode):
+    (rows, _), (sessions, break_on) = _ORDERS[order], _MODES[mode]
+    reorder = Precompute(lambda df: df.iloc[rows])
+    with pytest.raises(FrameError, match="the strategy's precompute removed or broke the bar "
+                                         "timestamps"):
+        Engine(NQ, BacktestConfig(break_on=break_on)).run(_frame(BREAK, sessions=sessions),
+                                                          reorder)
+
+
+@pytest.mark.parametrize("precomputed", [False, True], ids=["callers-frame", "precompute"])
+def test_time_order_is_checked_before_the_session_ids(precomputed):
+    # Reversing a two-session frame also makes its session IDs decrease; the time order
+    # is the cause, so it is what the refusal names.
+    df = _frame(BREAK, sessions=[1, 1, 1, 2, 2])
+    reverse = Precompute(lambda d: d.iloc[::-1])
+    frame, strategy = (df, reverse) if precomputed else (df.iloc[::-1], Precompute())
+    with pytest.raises(ValueError, match="bar timestamps .* must strictly increase"):
+        Engine(NQ, BacktestConfig(break_on="session")).run(frame, strategy)
