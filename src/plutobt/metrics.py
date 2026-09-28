@@ -291,7 +291,8 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     """Assemble the full metrics bundle for a BacktestResult, labeled IN-SAMPLE.
 
     §0.2 output keys (SINGLE SOURCE OF TRUTH — M9's format_report reads ONLY these):
-    label, sharpe, sharpe_raw, sharpe_se, sharpe_ci (tuple), psr, sortino,
+    label, sharpe, sharpe_raw, sharpe_se, sharpe_ci (tuple; se and ci are
+    ANNUALIZED, the same units as sharpe), psr, sortino,
     calmar, annual_return, max_drawdown_depth, max_drawdown_duration,
     trailing_hwm_drawdown, win_rate, profit_factor, expectancy, avg_r,
     T, periods_per_year, n_trades, exposure.
@@ -328,8 +329,21 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # Sharpe: sharpe_raw = per-bar, sharpe = annualized (§0.2)
     sr_raw = sharpe(returns, 1.0)
     sr_ann = sharpe(returns, periods_per_year)
-    se = sharpe_se(sr_raw, t_count) if t_count > 0 else float("nan")
-    ci = sharpe_ci(sr_raw, t_count) if t_count > 0 else (float("nan"), float("nan"))
+    # SE and CI are reported in the SAME annualized units as `sharpe`, because
+    # every reader pairs the adjacent keys (format_report prints them in one
+    # sentence; the chat model quotes them together). They used to be left on
+    # the raw per-bar Sharpe, which produced "Sharpe 0.640 (95% CI [-0.05,
+    # 0.13])" - a point estimate outside its own interval - live on pluto's
+    # screen. Lo's SE is linear in SR scaling, so annualizing is multiplying
+    # both by sqrt(periods_per_year); the raw-unit statistics stay available
+    # through the pinned pure functions and sharpe_raw.
+    scale = math.sqrt(periods_per_year)
+    se = sharpe_se(sr_raw, t_count) * scale if t_count > 0 else float("nan")
+    if t_count > 0:
+        raw_lo, raw_hi = sharpe_ci(sr_raw, t_count)
+        ci = (raw_lo * scale, raw_hi * scale)
+    else:
+        ci = (float("nan"), float("nan"))
     psr_val = psr(returns, sr0=0.0) if t_count > 1 else float("nan")
 
     # Sortino: annualized (§0.2 key "sortino")

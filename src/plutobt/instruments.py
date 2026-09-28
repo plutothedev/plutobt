@@ -79,6 +79,30 @@ REGISTRY: dict[str, Instrument] = {
         slippage_ticks=1.0, initial_margin=2200.0, maintenance_margin=2000.0,
         settlement="physical", price_format="thirty_seconds",
     ),
+    # --- Equities (v0.5). Cash equity: the multiplier IS point_value (1.0), so a
+    # +1.00 move on N shares is exactly $N — no separate contract multiplier, and a
+    # futures multiplier can never leak into the equity path (CONTRACT §3.1/§3.2).
+    # tick_value == tick_size * point_value (0.01 == 0.01 * 1.0). Margins are 0.0:
+    # no performance bond, so Portfolio.margin_ok always passes (NO buying-power
+    # model in v0.5 — a documented limit, not an invariant). RTH 08:30-15:00 CT.
+    "AAPL": Instrument(
+        symbol="AAPL", point_value=1.0, tick_size=0.01, tick_value=0.01, currency="USD",
+        session_open_ct="08:30", session_close_ct="15:00",
+        slippage_ticks=1.0, initial_margin=0.0, maintenance_margin=0.0,
+        settlement="cash", price_format="decimal",
+    ),
+    "MSFT": Instrument(
+        symbol="MSFT", point_value=1.0, tick_size=0.01, tick_value=0.01, currency="USD",
+        session_open_ct="08:30", session_close_ct="15:00",
+        slippage_ticks=1.0, initial_margin=0.0, maintenance_margin=0.0,
+        settlement="cash", price_format="decimal",
+    ),
+    "SPY": Instrument(
+        symbol="SPY", point_value=1.0, tick_size=0.01, tick_value=0.01, currency="USD",
+        session_open_ct="08:30", session_close_ct="15:00",
+        slippage_ticks=1.0, initial_margin=0.0, maintenance_margin=0.0,
+        settlement="cash", price_format="decimal",
+    ),
 }
 
 

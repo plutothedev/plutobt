@@ -52,8 +52,11 @@ def test_instrument_is_frozen_dataclass_with_exact_fields():
         inst.symbol = "ES"
 
 
-def test_registry_has_all_nine_symbols():
-    assert set(REGISTRY) == {"NQ", "MNQ", "ES", "MES", "YM", "RTY", "CL", "GC", "ZN"}
+def test_registry_has_all_nine_futures_symbols():
+    # The 9 verified futures specs are still present and untouched. v0.5 ADDS equity
+    # rows additively (CONTRACT §3.1), so this is a subset check, not exact equality.
+    futures = {"NQ", "MNQ", "ES", "MES", "YM", "RTY", "CL", "GC", "ZN"}
+    assert futures <= set(REGISTRY)
 
 
 def test_get_instrument_returns_registry_object_by_symbol():
@@ -63,10 +66,11 @@ def test_get_instrument_returns_registry_object_by_symbol():
 
 
 def test_get_instrument_unknown_symbol_raises_keyerror_listing_known():
+    # "SPY" is now a real equity row (CONTRACT §3.1); use a genuinely unknown ticker.
     with pytest.raises(KeyError) as exc:
-        get_instrument("SPY")
+        get_instrument("TSLA")
     # message lists the known symbols so the failure is actionable
-    assert "SPY" in str(exc.value)
+    assert "TSLA" in str(exc.value)
     assert "NQ" in str(exc.value)
 
 
@@ -241,3 +245,32 @@ def test_every_registry_instrument_tick_value_matches_tick_math():
     for symbol, inst in REGISTRY.items():
         one_tick = ticks_to_price(1, inst)
         assert pnl_points(0.0, one_tick, 1, inst) == pytest.approx(inst.tick_value), symbol
+
+
+@pytest.mark.parametrize("symbol", ["AAPL", "MSFT", "SPY"])
+def test_equity_rows_present_with_cash_equity_spec(symbol):
+    inst = get_instrument(symbol)
+    assert inst.symbol == symbol
+    # CONTRACT §3.1 — cash-equity economics, NOT a futures perf-bond.
+    assert inst.point_value == 1.0          # the multiplier IS point_value; 1:1 cash
+    assert inst.tick_size == 0.01
+    assert inst.tick_value == 0.01
+    assert inst.currency == "USD"
+    assert inst.settlement == "cash"
+    assert inst.price_format == "decimal"
+    # No performance bond for cash equity (documented limit, not an invariant).
+    assert inst.initial_margin == 0.0
+    assert inst.maintenance_margin == 0.0
+    # Binding tick-math identity must hold for equity rows too.
+    assert inst.tick_value == pytest.approx(inst.tick_size * inst.point_value, rel=0, abs=1e-9)
+
+
+def test_equity_one_dollar_move_is_one_dollar_per_share():
+    # point_value=1.0 => (exit-entry) * 1.0 * shares = exact cash equity.
+    # A +1.00 move on 10 shares of AAPL is exactly $10 — no futures multiplier.
+    aapl = get_instrument("AAPL")
+    assert pnl_points(150.00, 151.00, 10, aapl) == pytest.approx(10.0)
+    # One tick (0.01) on 1 share equals the published tick_value (0.01).
+    one_tick = ticks_to_price(1, aapl)
+    assert pnl_points(0.0, one_tick, 1, aapl) == pytest.approx(aapl.tick_value)
+    assert pnl_points(0.0, one_tick, 1, aapl) == pytest.approx(0.01)
