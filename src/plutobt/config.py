@@ -14,6 +14,9 @@ class BacktestConfig:
     periods_per_year: float | None = None  # None => derived from data/session
     carry_overnight: bool = False
     allow_short: bool = True
+    break_on: str = "gap"   # "gap" (default): a gap longer than the usual bar interval
+                            # is a break; "session": only a change of the frame's
+                            # `session` column is
 
 
 def load_config(path: str) -> BacktestConfig:

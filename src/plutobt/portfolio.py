@@ -88,7 +88,12 @@ class Portfolio:
         Commission is always deducted from cash. Opening/scaling into a
         position does NOT subtract notional (performance-bond, not a loan).
         Closing/reducing realizes pro-rata P&L into cash and books Trades.
+        A fill of fewer than 1 contract raises ValueError before anything moves.
         """
+        if fill.contracts < 1:
+            # Last line of defence (the broker refuses these first): 0 contracts would
+            # split the fee over zero contracts, and a negative count reverses the side.
+            raise ValueError(f"a fill needs 1 or more contracts, got {fill.contracts!r}")
         self.cash -= fill.commission
         signed = fill.contracts if fill.side == "buy" else -fill.contracts
         cur_qty = self.position.qty

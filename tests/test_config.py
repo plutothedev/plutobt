@@ -16,6 +16,7 @@ def test_backtestconfig_is_dataclass_with_exact_fields():
         "periods_per_year",
         "carry_overnight",
         "allow_short",
+        "break_on",  # wave 1 (2026-09-26): session-based breaks
     }
 
 

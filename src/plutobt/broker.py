@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numbers
 from dataclasses import dataclass
 
 from plutobt.config import BacktestConfig
@@ -17,6 +18,10 @@ class Order:
     price: float | None = None   # trigger for stop/limit
     attached_stop: float | None = None
     status: str = "pending"      # "pending"|"filled"|"cancelled"|"rejected"
+
+
+class OrderError(ValueError):
+    """A strategy asked for an order the engine cannot represent."""
 
 
 class Broker:
@@ -45,6 +50,11 @@ class Broker:
         stop: float | None,
         limit: float | None,
     ) -> Order:
+        whole = isinstance(contracts, numbers.Integral) and not isinstance(contracts, bool)
+        if not whole or contracts < 1:
+            raise OrderError(
+                f"order size must be a whole number of contracts, 1 or more; got {contracts!r}"
+            )
         if limit is not None:
             order = Order(
                 side=side,
@@ -92,10 +102,22 @@ class Broker:
     def amend_stop(self, price: float) -> None:
         self.resting_stop = price
 
-    def cancel_pending_entry(self) -> None:
-        if self.pending is not None:
-            self.pending.status = "cancelled"
-            self.pending = None
+    def cancel_pending_entry(self, keep_exits: bool = False) -> None:
+        order = self.pending
+        if order is None:
+            return
+        if keep_exits and self._is_reducing(order):
+            # An order that reduces the position is an EXIT: it survives the break
+            # and fills at the next session's open, as a resting exit would. A flip
+            # keeps only its closing contracts; the new position's half is an
+            # entry, and entries do not cross a break.
+            held = abs(self.portfolio.position.qty)
+            if order.contracts > held:
+                order.contracts = held
+                order.attached_stop = None
+            return
+        order.status = "cancelled"
+        self.pending = None
         # NOTE: resting_stop is deliberately left untouched (mandatory correction).
 
     # ------------------------------------------------------------------
@@ -113,6 +135,14 @@ class Broker:
         return open_px + slip if side == "buy" else open_px - slip
 
     def _emit_fill(self, ts: int, side: str, contracts: int, price: float) -> Fill:
+        # Every fill passes here, so this repeats _make_entry's check for the orders it
+        # never saw: an Order changed after it was placed, or one queued directly.
+        whole = isinstance(contracts, numbers.Integral) and not isinstance(contracts, bool)
+        if not whole or contracts < 1:
+            raise OrderError(
+                f"cannot fill the {side} order at ts {ts}: order size must be a whole "
+                f"number of contracts, 1 or more; got {contracts!r}"
+            )
         fill = Fill(
             ts=ts,
             side=side,
@@ -192,12 +222,19 @@ class Broker:
                 self.pending = None
             order = None
         if order is not None:
-            if not self._is_reducing(order) and not self.portfolio.margin_ok(
-                order.contracts
-            ):
-                order.status = "rejected"
-                self.pending = None
-                order = None
+            held = abs(self.portfolio.position.qty)
+            reducing = self._is_reducing(order)
+            opening = order.contracts - held if reducing else order.contracts
+            if opening > 0 and not self.portfolio.margin_ok(opening):
+                if reducing:
+                    # A flip whose new side fails margin keeps only its closing
+                    # contracts: the exit goes through, the reversal does not.
+                    order.contracts = held
+                    order.attached_stop = None
+                else:
+                    order.status = "rejected"
+                    self.pending = None
+                    order = None
         if order is not None:
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)

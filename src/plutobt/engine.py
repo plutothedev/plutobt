@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import math
 from dataclasses import asdict, dataclass
 
 import pandas as pd
@@ -78,6 +79,18 @@ class Engine:
         else:
             interval = 0
         has_session = "session" in data.columns
+        if self.config.break_on not in ("gap", "session"):
+            raise ValueError(f"break_on must be 'gap' or 'session', got {self.config.break_on!r}")
+        if not math.isfinite(self.config.commission_per_side):
+            # NaN or inf would poison every statistic without an error (TOML can hold
+            # both); a negative fee is a rebate and stays allowed.
+            raise ValueError(
+                "commission_per_side must be a finite number (a negative fee is a rebate), "
+                f"got {self.config.commission_per_side!r}"
+            )
+        session_breaks = self.config.break_on == "session"
+        if session_breaks and not has_session:
+            raise ValueError("break_on='session' needs a 'session' column on the bar frame")
 
         # Build a namedtuple Row type from the (potentially augmented) column list.
         Row = collections.namedtuple("Row", list(data.columns))
@@ -110,14 +123,21 @@ class Engine:
             # unfilled entry order but leave any resting protective stop intact.
             if t + 1 < n:
                 nxt = data.iloc[t + 1]
-                gap = int(nxt.ts) - int(bar.ts)
-                discontinuity = interval > 0 and gap > interval
-                if has_session:
-                    discontinuity = discontinuity or (bar.session != nxt.session)
+                if session_breaks:
+                    # Only a change of trading session is a break: a stretch of
+                    # bars nobody traded in (omitted by the data vendor) is not.
+                    discontinuity = bar.session != nxt.session
+                else:
+                    gap = int(nxt.ts) - int(bar.ts)
+                    discontinuity = interval > 0 and gap > interval
+                    if has_session:
+                        discontinuity = discontinuity or (bar.session != nxt.session)
                 if discontinuity and not self.config.carry_overnight:
                     # §0: cancel_pending_entry drops the unfilled entry; resting
                     # protective stop on a held position is deliberately untouched.
-                    broker.cancel_pending_entry()
+                    # In session mode a pending EXIT survives the break and fills at
+                    # the next session's open, as a real exit order would.
+                    broker.cancel_pending_entry(keep_exits=session_breaks)
                 broker.fill_pending(nxt)
 
             portfolio.mark(float(bar.close))
