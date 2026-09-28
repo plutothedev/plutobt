@@ -14,9 +14,13 @@ class BacktestConfig:
     periods_per_year: float | None = None  # None => derived from data/session
     carry_overnight: bool = False
     allow_short: bool = True
-    break_on: str = "gap"   # "gap" (default): a gap longer than the usual bar interval
-                            # is a break; "session": only a change of the frame's
-                            # `session` column is
+    # What is a break, where a pending order is cancelled (unless carry_overnight):
+    # "gap" (default): a gap longer than the usual bar interval, or any change of the
+    #   frame's `session` column (RTH/ETH labels work here); exits are cancelled too.
+    # "session": only a change of `session`; an exit survives it and fills at the next
+    #   session's open. `session` must then hold a trading-session ID on every bar that
+    #   never decreases (e.g. the CME trading day as an int YYYYMMDD), not RTH/ETH labels.
+    break_on: str = "gap"
 
 
 def load_config(path: str) -> BacktestConfig:

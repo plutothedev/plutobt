@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import numbers
 from dataclasses import dataclass
 
@@ -22,6 +23,47 @@ class Order:
 
 class OrderError(ValueError):
     """A strategy asked for an order the engine cannot represent."""
+
+
+class FrameError(ValueError):
+    """A strategy's precompute left a bar frame the engine cannot run.
+
+    Engine.run raises it. A problem already in the caller's own frame is a plain
+    ValueError instead, since no strategy code caused it.
+    """
+
+
+def _ts_text(ts) -> str:
+    """A bar's ts for a message, as an int when it is whole: a bar read back from a
+    mixed-dtype frame carries its ts as a float (1700000180.0)."""
+    if isinstance(ts, numbers.Real) and not isinstance(ts, numbers.Integral):
+        if math.isfinite(ts) and float(ts).is_integer():
+            return str(int(ts))
+    return str(ts)
+
+
+def _check_size(contracts, what: str) -> None:
+    """The one rule for an order's size: an int (never a bool), 1 or more.
+
+    Anything else raises OrderError naming ``what`` (the side, and where the order was
+    caught), the value, its type and the fix. Nothing is coerced, so 4.0 is refused
+    like 4.0000001.
+    """
+    if isinstance(contracts, bool):
+        fix = "pass a number of contracts, not True or False"
+    elif isinstance(contracts, numbers.Integral):
+        if contracts >= 1:
+            return
+        fix = ("place no order when the size works out to 0" if contracts == 0
+               else "a size is never negative; buy() and sell() pick the side")
+    elif isinstance(contracts, numbers.Real):
+        fix = "wrap the size in int(...)"
+    else:
+        fix = "pass the number of contracts as an int"
+    raise OrderError(
+        f"{what} must be a whole number of contracts (an int), 1 or more; "
+        f"got {contracts!r} ({type(contracts).__name__}): {fix}"
+    )
 
 
 class Broker:
@@ -50,11 +92,7 @@ class Broker:
         stop: float | None,
         limit: float | None,
     ) -> Order:
-        whole = isinstance(contracts, numbers.Integral) and not isinstance(contracts, bool)
-        if not whole or contracts < 1:
-            raise OrderError(
-                f"order size must be a whole number of contracts, 1 or more; got {contracts!r}"
-            )
+        _check_size(contracts, f"{side} order size")
         if limit is not None:
             order = Order(
                 side=side,
@@ -106,6 +144,10 @@ class Broker:
         order = self.pending
         if order is None:
             return
+        # Checked first: the trim below reads the size, and would repair a bad one. An
+        # Order changed after it was placed, or queued straight into `pending`, never
+        # met placement's check.
+        _check_size(order.contracts, f"at a break, the pending {order.side} order's size")
         if keep_exits and self._is_reducing(order):
             # An order that reduces the position is an EXIT: it survives the break
             # and fills at the next session's open, as a resting exit would. A flip
@@ -135,14 +177,6 @@ class Broker:
         return open_px + slip if side == "buy" else open_px - slip
 
     def _emit_fill(self, ts: int, side: str, contracts: int, price: float) -> Fill:
-        # Every fill passes here, so this repeats _make_entry's check for the orders it
-        # never saw: an Order changed after it was placed, or one queued directly.
-        whole = isinstance(contracts, numbers.Integral) and not isinstance(contracts, bool)
-        if not whole or contracts < 1:
-            raise OrderError(
-                f"cannot fill the {side} order at ts {ts}: order size must be a whole "
-                f"number of contracts, 1 or more; got {contracts!r}"
-            )
         fill = Fill(
             ts=ts,
             side=side,
@@ -211,6 +245,12 @@ class Broker:
         return False
 
     def fill_pending(self, next_bar) -> list[Fill]:
+        if self.pending is not None:
+            # Checked first, before the stop, the margin check or a trim reads the size.
+            order = self.pending
+            _check_size(order.contracts,
+                        f"cannot fill the {order.side} order at ts {_ts_text(next_bar.ts)}: "
+                        "its size")
         fills: list[Fill] = []
         stop_fills = self._fire_resting_stop(next_bar)    # adverse fills first
         fills.extend(stop_fills)
@@ -225,16 +265,25 @@ class Broker:
             held = abs(self.portfolio.position.qty)
             reducing = self._is_reducing(order)
             opening = order.contracts - held if reducing else order.contracts
-            if opening > 0 and not self.portfolio.margin_ok(opening):
+            if opening > 0:
                 if reducing:
-                    # A flip whose new side fails margin keeps only its closing
-                    # contracts: the exit goes through, the reversal does not.
-                    order.contracts = held
-                    order.attached_stop = None
+                    # A flip's new side opens on what its closing half leaves: equity
+                    # marked at this bar's open (before slippage and fees), as close()
+                    # then a new entry would see it, not the cash from before the loss.
+                    basis = self.portfolio.equity(float(next_bar.open))
+                    affordable = basis >= self.instrument.initial_margin * opening
                 else:
-                    order.status = "rejected"
-                    self.pending = None
-                    order = None
+                    affordable = self.portfolio.margin_ok(opening)
+                if not affordable:
+                    if reducing:
+                        # A flip whose new side fails margin keeps only its closing
+                        # contracts: the exit goes through, the reversal does not.
+                        order.contracts = held
+                        order.attached_stop = None
+                    else:
+                        order.status = "rejected"
+                        self.pending = None
+                        order = None
         if order is not None:
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)
@@ -243,7 +292,10 @@ class Broker:
                 )
                 order.status = "filled"
                 self.pending = None
-                if order.attached_stop is not None:
+                # An attached stop protects the position the fill leaves. A fill that
+                # flattens leaves none, and its stop must not become the NEXT position's
+                # initial_stop (that trade's R would read it).
+                if order.attached_stop is not None and self.portfolio.position.qty != 0:
                     self.resting_stop = order.attached_stop
                     # §0.4: set initial_stop on the position opened by this entry.
                     # Only set when the fill actually opened/flipped (not a scale-in
@@ -259,7 +311,8 @@ class Broker:
                     )
                     order.status = "filled"
                     self.pending = None
-                    if order.attached_stop is not None:
+                    # As for a market fill: no stop is left behind on a flat position.
+                    if order.attached_stop is not None and self.portfolio.position.qty != 0:
                         self.resting_stop = order.attached_stop
                         # §0.4: set initial_stop on the position opened by this entry.
                         pos = self.portfolio.position

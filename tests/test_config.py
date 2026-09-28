@@ -28,6 +28,7 @@ def test_backtestconfig_defaults():
     assert cfg.periods_per_year is None
     assert cfg.carry_overnight is False
     assert cfg.allow_short is True
+    assert cfg.break_on == "gap"   # the golden run and the plutobt video depend on it
 
 
 def test_backtestconfig_overrides():
