@@ -183,7 +183,7 @@ def _closed_trades(trades: list[Trade]) -> list[Trade]:
 
 
 def profit_factor(trades: list[Trade]) -> float:
-    """Gross profit / gross loss over closed trades.
+    """Gross profit / gross loss over closed trades, each trade NET of its fees.
 
     inf-guard: returns +inf when there are profits but no losers; returns NaN
     when there are no closed trades at all. Open-at-end trades are excluded.
@@ -193,8 +193,8 @@ def profit_factor(trades: list[Trade]) -> float:
     closed = _closed_trades(trades)
     if not closed:
         return float("nan")
-    gross_profit = sum(t.pnl for t in closed if t.pnl > 0.0)
-    gross_loss = -sum(t.pnl for t in closed if t.pnl < 0.0)
+    gross_profit = sum(t.net_pnl for t in closed if t.net_pnl > 0.0)
+    gross_loss = -sum(t.net_pnl for t in closed if t.net_pnl < 0.0)
     if gross_loss == 0.0:
         return float("inf")
     return float(gross_profit / gross_loss)
@@ -210,8 +210,8 @@ def expectancy(trades: list[Trade]) -> float:
     n = len(closed)
     if n == 0:
         return float("nan")
-    wins = [t.pnl for t in closed if t.pnl > 0.0]
-    losses = [t.pnl for t in closed if t.pnl < 0.0]
+    wins = [t.net_pnl for t in closed if t.net_pnl > 0.0]
+    losses = [t.net_pnl for t in closed if t.net_pnl < 0.0]
     win_rate_val = len(wins) / n
     loss_rate = len(losses) / n
     avg_win = (sum(wins) / len(wins)) if wins else 0.0
@@ -242,7 +242,7 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
     factor + expectancy are recomputed ex-best/ex-worst here.
     """
     closed = _closed_trades(trades)
-    pnls = [t.pnl for t in closed]
+    pnls = [t.net_pnl for t in closed]
     total = sum(pnls)
     ordered = sorted(pnls, reverse=True)
     top1 = ordered[0] if ordered else 0.0
@@ -250,11 +250,11 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
     pct_top1 = (top1 / total) if total != 0.0 else float("nan")
     pct_top5 = (top5 / total) if total != 0.0 else float("nan")
 
-    best = max(closed, key=lambda t: t.pnl) if closed else None
-    worst = min(closed, key=lambda t: t.pnl) if closed else None
+    best = max(closed, key=lambda t: t.net_pnl) if closed else None
+    worst = min(closed, key=lambda t: t.net_pnl) if closed else None
     ex_best = [t for t in closed if t is not best]
     ex_worst = [t for t in closed if t is not worst]
-    total_ex_best = sum(t.pnl for t in ex_best)
+    total_ex_best = sum(t.net_pnl for t in ex_best)
 
     return {
         "pct_pnl_top1": pct_top1,
@@ -366,7 +366,7 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # Trade stats (closed trades only for win-rate/PF/expectancy/avg_r)
     closed = _closed_trades(trades)
     n_closed = len(closed)
-    wins = [t for t in closed if t.pnl > 0.0]
+    wins = [t for t in closed if t.net_pnl > 0.0]
     win_rate_val = (len(wins) / n_closed) if n_closed > 0 else 0.0  # §0.3
     pf = profit_factor(trades)
     exp = expectancy(trades)

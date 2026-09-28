@@ -25,6 +25,15 @@ class Trade:
     pnl: float
     r_multiple: float | None = None
     open_at_end: bool = False
+    # Fees attributable to this trade's contracts: their pro-rata share of the
+    # entry fees still pooled on the position, plus the closing fill's share.
+    # pnl stays PRICE P&L so every existing reader keeps its meaning.
+    commission: float = 0.0
+
+    @property
+    def net_pnl(self) -> float:
+        """P&L after the fees attributable to this trade."""
+        return self.pnl - self.commission
 
 
 @dataclass
@@ -50,6 +59,7 @@ class Portfolio:
         self.trades: list[Trade] = []
         self._mark_price: float | None = None
         self._open_entry_ts: int | None = None
+        self._open_commission: float = 0.0
 
     def equity(self, mark_price: float) -> float:
         """cash + open MTM (fill-basis). Flat => cash."""
@@ -76,6 +86,8 @@ class Portfolio:
 
         # Opening from flat, or scaling in the same direction.
         if cur_qty == 0 or (cur_qty > 0) == (signed > 0):
+            # Entry fees pool on the open position until contracts close.
+            self._open_commission += fill.commission
             self._scale_in(fill, signed)
             return
 
@@ -101,6 +113,13 @@ class Portfolio:
         cur_qty = self.position.qty
         avg = self.position.avg_price
         closing = min(abs(signed), abs(cur_qty))  # contracts being closed
+        # Fees for the closed contracts: their share of the pooled entry fees,
+        # plus this fill's share for them (the rest of a flip fill opens the new
+        # position and becomes ITS entry fee, at the end of this method).
+        entry_share = self._open_commission * closing / abs(cur_qty)
+        exit_share = fill.commission * closing / fill.contracts
+        self._open_commission -= entry_share
+        trade_commission = entry_share + exit_share
         side_str = "long" if cur_qty > 0 else "short"
 
         # Pro-rata realized P&L on the closed contracts, fill-basis.
@@ -111,7 +130,7 @@ class Portfolio:
         self.cash += realized
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
-        r_mult = self._calc_r_multiple(realized, closing)
+        r_mult = self._calc_r_multiple(realized - trade_commission, closing)
 
         self.trades.append(
             Trade(
@@ -123,6 +142,7 @@ class Portfolio:
                 exit_price=fill.price,
                 pnl=realized,
                 r_multiple=r_mult,
+                commission=trade_commission,
             )
         )
 
@@ -139,6 +159,7 @@ class Portfolio:
         self.position.avg_price = fill.price
         self.position.initial_stop = None
         self._open_entry_ts = fill.ts
+        self._open_commission = fill.commission * abs(remaining) / fill.contracts
 
     def _calc_r_multiple(self, pnl: float, contracts: int) -> float | None:
         """Van Tharp R = pnl / (risk_per_contract * contracts).
@@ -160,6 +181,8 @@ class Portfolio:
         self.position = Position()
         self._open_entry_ts = None
         self._mark_price = None
+        # exact reset: x * n / n can leave a ~1e-17 residue after a full close
+        self._open_commission = 0.0
 
     def mark(self, price: float) -> None:
         """Record the per-bar mark price for MTM (spec §5.2 settlement proxy).
@@ -209,7 +232,7 @@ class Portfolio:
         unrealized = pnl_points(self.position.avg_price, mark, self.position.qty, self.instrument)
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
-        r_mult = self._calc_r_multiple(unrealized, abs(self.position.qty))
+        r_mult = self._calc_r_multiple(unrealized - self._open_commission, abs(self.position.qty))
 
         self.trades.append(
             Trade(
@@ -222,5 +245,6 @@ class Portfolio:
                 pnl=unrealized,
                 r_multiple=r_mult,
                 open_at_end=True,
+                commission=self._open_commission,
             )
         )
