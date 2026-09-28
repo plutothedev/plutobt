@@ -587,37 +587,50 @@ def test_writing_ctx_position_initial_stop_moves_neither_the_stop_nor_r():
     assert strategy.stops == [90.0, 90.0, 90.0]                   # the real stop stayed
 
 
-# (the rows of BREAK a frame keeps, in its order; the first row not after the one before)
-_ORDERS = {"reversed": ([4, 3, 2, 1, 0], 1), "shuffled": ([2, 0, 3, 1, 4], 1),
-           "repeated": ([0, 1, 1, 3, 4], 2)}
+# How a frame's bar timestamps go wrong, and the problem its refusal names. A NaN makes
+# the whole ts column float, so the stamps beside it print as floats.
+_BAD_TS = {
+    "reversed": (lambda df: df.iloc[[4, 3, 2, 1, 0]],
+                 f"row 1 (ts {T0 + 180}) is not after row 0 (ts {T0 + 240})"),
+    "shuffled": (lambda df: df.iloc[[2, 0, 3, 1, 4]],
+                 f"row 1 (ts {T0}) is not after row 0 (ts {T0 + 120})"),
+    "repeated": (lambda df: df.iloc[[0, 1, 1, 3, 4]],
+                 f"row 2 (ts {T0 + 60}) is not after row 1 (ts {T0 + 60})"),
+    "nan": (lambda df: df.assign(ts=df["ts"].where(df.index != 2)),
+            f"row 2 (ts nan) is not after row 1 (ts {T0 + 60.0})"),
+    "nan-first": (lambda df: df.assign(ts=df["ts"].where(df.index != 0)),
+                  f"row 1 (ts {T0 + 60.0}) is not after row 0 (ts nan)"),
+    "missing": (lambda df: df.drop(columns=["ts"]), "the frame has no 'ts' column"),
+}
 _MODES = {"one-session": ([1] * 5, "session"), "gap": (None, "gap")}
 
 
 @pytest.mark.parametrize("mode", list(_MODES))
-@pytest.mark.parametrize("order", list(_ORDERS))
-def test_bars_out_of_time_order_in_the_callers_frame_are_refused(order, mode):
+@pytest.mark.parametrize("bad", list(_BAD_TS))
+def test_bars_out_of_time_order_in_the_callers_frame_are_refused(bad, mode):
     # Nothing checked the time order: a reversed or shuffled frame (one session, or any
-    # frame in gap mode) ran time backwards without a word (re-review, 2026-09-28).
-    (rows, bad), (sessions, break_on) = _ORDERS[order], _MODES[mode]
-    df = _frame(BREAK, sessions=sessions).iloc[rows]
+    # frame in gap mode) ran time backwards without a word, a NaN ts crashed on a cryptic
+    # int(nan), and a frame with no ts on a KeyError deep in the run (re-review, 2026-09-28).
+    (breaks, problem), (sessions, break_on) = _BAD_TS[bad], _MODES[mode]
+    df = breaks(_frame(BREAK, sessions=sessions))
     with pytest.raises(ValueError) as e:
         Engine(NQ, BacktestConfig(break_on=break_on)).run(df, Precompute())
     assert not isinstance(e.value, FrameError)                    # the caller's frame
-    ts = [T0 + BREAK[k] for k in rows]
     assert "must strictly increase" in str(e.value)
-    assert f"row {bad} (ts {ts[bad]}) is not after row {bad - 1} (ts {ts[bad - 1]})" in (
-        str(e.value))
+    assert problem in str(e.value)
 
 
 @pytest.mark.parametrize("mode", list(_MODES))
-@pytest.mark.parametrize("order", list(_ORDERS))
-def test_a_precompute_that_reorders_the_bars_raises_frame_error(order, mode):
-    (rows, _), (sessions, break_on) = _ORDERS[order], _MODES[mode]
-    reorder = Precompute(lambda df: df.iloc[rows])
-    with pytest.raises(FrameError, match="the strategy's precompute removed or broke the bar "
-                                         "timestamps"):
+@pytest.mark.parametrize("bad", list(_BAD_TS))
+def test_a_precompute_that_reorders_the_bars_raises_frame_error(bad, mode):
+    # The same frames, made by the strategy's precompute. Unnamed, a precompute that drops
+    # ts raised a KeyError: a 500 in PlutoDesk, not its 422 for a FrameError.
+    (breaks, problem), (sessions, break_on) = _BAD_TS[bad], _MODES[mode]
+    with pytest.raises(FrameError) as e:
         Engine(NQ, BacktestConfig(break_on=break_on)).run(_frame(BREAK, sessions=sessions),
-                                                          reorder)
+                                                          Precompute(breaks))
+    assert (f"the strategy's precompute removed or broke the bar timestamps: {problem}."
+            in str(e.value))
 
 
 @pytest.mark.parametrize("precomputed", [False, True], ids=["callers-frame", "precompute"])
