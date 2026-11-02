@@ -15,7 +15,11 @@ Everything is **futures-accurate, not stock-approximate**:
 - **Performance-bond margin** — initial/maintenance margin, margin calls, mark-to-market equity every bar (`portfolio.py`).
 - **Realistic fills** — directional slippage, gap-through protective stops (price gaps past your stop → you fill at the gap, not the stop), GTC resting stops (`broker.py`).
 - **Verified contract specs** — NQ/ES/CL/GC/ZN/YM/RTY/MNQ/MES point values, tick sizes, margins, all from CME publications. ZN even handles Treasury 32nds quoting (`110'085` = 110 + 8.5/32) (`instruments.py`).
-- Every result ships a **manifest** with a sha256 of the input data → reproducible "golden run" anyone can verify.
+- Every result ships a **manifest** with `data_sha256`: the sha256 of the loaded bars written as CSV (`df.to_csv(index=False)`), not of the file on disk, so `sha256sum nq_5m.json` gives a different value. To check the hash a report prints, from the repo root:
+  ```bash
+  PYTHONPATH=src python -c "import hashlib; from plutobt.data import load_bars; print(hashlib.sha256(load_bars('data/sample/nq_5m.json').to_csv(index=False).encode()).hexdigest())"
+  ```
+  The golden run (`configs/golden_expected.json`) pins that hash, and `pytest` checks it.
 
 ## 4. Repo map
 ```
