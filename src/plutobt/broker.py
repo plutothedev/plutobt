@@ -157,6 +157,9 @@ class Broker:
         return order
 
     def amend_stop(self, price: float) -> None:
+        """Set the resting protective stop. Set while flat, it protects the next entry
+        from that entry's own fill (checked on its entry bar, like an attached stop);
+        if nothing fills on the next bar, a flat book drops it."""
         self.resting_stop = price
 
     def cancel_pending_entry(self, keep_exits: bool = False) -> None:
@@ -412,6 +415,12 @@ class Broker:
                     pos = self.portfolio.position
                     if pos.initial_stop is None:
                         pos.initial_stop = order.attached_stop
+                elif (prior_side is None and self.resting_stop is not None
+                      and self.portfolio.position.qty != 0):
+                    # A stop set with amend_stop while flat is this entry's protective
+                    # stop: live from the fill and checked on the entry bar, as an
+                    # attached stop is (it does not set initial_stop, so R stays None).
+                    armed_at = next_bar.open if order.kind == "market" else price
             if armed_at is not None:
                 # The attached stop is live from the entry fill, so the rest of THIS bar
                 # is checked against it (adverse extreme first, §5.4). Its gap-through

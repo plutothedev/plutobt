@@ -1074,3 +1074,49 @@ def test_a_filled_order_is_not_touched_by_the_next_one():  # positive control
     broker.fill_pending(_flat_bar(1, 100.0))
     broker.close()
     assert first.status == "filled"
+
+
+# ---------------------------------------------------------------------------
+# A stop set with amend_stop while FLAT is the next entry's protective stop: like an
+# attached stop, it is live from the entry fill and checked on the entry bar.
+# ---------------------------------------------------------------------------
+
+def test_stop_set_while_flat_protects_a_market_entry_from_its_entry_bar():
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.amend_stop(14_900.0)
+    broker.buy(contracts=1)
+    fills = broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_850.0, 14_950.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("buy", 1, 15_000.0),
+                                                                ("sell", 1, 14_900.0)]
+    assert pf.position.qty == 0
+    assert broker.resting_stop is None
+
+
+def test_stop_set_while_flat_protects_a_limit_entry_from_its_fill():
+    # Live from the limit's fill (14,980), as an attached stop would be: the low after
+    # it (14,850) takes it out at the stop.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.amend_stop(14_900.0)
+    broker.buy(contracts=1, limit=14_980.0)
+    fills = broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_850.0, 14_950.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("buy", 1, 14_980.0),
+                                                                ("sell", 1, 14_900.0)]
+    assert pf.position.qty == 0
+
+
+def test_stop_set_while_flat_not_touched_stays_resting():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.amend_stop(14_900.0)
+    broker.buy(contracts=1)
+    fills = broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_950.0, 14_990.0))
+    assert [(f.side, f.price) for f in fills] == [("buy", 15_000.0)]
+    assert pf.position.qty == 1
+    assert broker.resting_stop == 14_900.0
+
+
+def test_stop_set_while_flat_is_dropped_when_nothing_fills():  # positive control
+    # No position, no orphan: a flat book keeps no stop past the bar.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.amend_stop(14_900.0)
+    assert broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_850.0, 14_950.0)) == []
+    assert broker.resting_stop is None
