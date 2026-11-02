@@ -26,12 +26,23 @@ class LookaheadError(FrameError, AssertionError):
     """
 
 
-# Float noise, not a leak: two numbers match within RTOL relative or ATOL absolute.
-# pandas centres rolling moments (skew, kurt) on the whole input, so their last digits
-# move by about 1e-11 relative when later bars are removed; a real leak moves a value
-# by far more (one part per million is caught 1000 times over).
-RTOL = 1e-9
-ATOL = 1e-10
+# How two numbers of a float column match (the full frame's value b, a prefix's a):
+#     |a - b| <= RTOL * |b| + SCALE_TOL * scale
+# where scale is that column's largest finite |value| in the full frame. Why both terms:
+# - Honest float noise exists. pandas centres rolling skew and kurt on the whole input,
+#   so their last digits move when later bars are removed: 5e-8 relative on the NQ
+#   sample's rolling(20).kurt, 4e-7 on 1,500 one-minute-like bars. RTOL covers it.
+# - That noise is absolute, not relative to each value: where a kurtosis crosses zero
+#   its relative change is unbounded, so the column's own scale sets a floor. A floor
+#   fixed in absolute units would not do: realized variance of 1e-5 returns sits near
+#   1e-10, and an atol of 1e-10 let a whole-sample mean subtracted from it pass, while
+#   a price column in the tens of thousands would need a far larger one.
+# A leak moves a value by far more than a part per million of its column (a shift, a
+# backfill, a whole-sample mean), so it is caught; a change smaller than that is out of
+# reach by design. Integer, bool, text, categorical and datetime columns (by the full
+# frame's dtype) match exactly: they carry no float noise.
+RTOL = 1e-6
+SCALE_TOL = 1e-6
 
 # sample="auto": every prefix up to AUTO_FULL_MAX bars; above, AUTO_SPACED evenly
 # spaced prefixes plus the first and last AUTO_EDGE (leaks cluster at the edges: a
@@ -44,29 +55,69 @@ _ROW_RULE = ("precompute must return one row per input bar, in order (no dropped
              "added or reordered rows); mark warm-up bars with NaN instead of dropping them")
 
 
-def _values(s: pd.Series) -> tuple[bool, np.ndarray]:
-    """(numeric?, values): float64 with NaN for numbers and bools, objects otherwise."""
-    if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
-        return True, s.to_numpy(dtype="float64", na_value=np.nan)
-    return False, s.to_numpy(dtype=object)
+_FLOAT, _EXACT, _OBJECT = "float", "exact", "object"
+
+
+def _values(s: pd.Series) -> tuple[str, np.ndarray]:
+    """(kind, values): float64 with NaN for a float column; the raw int or bool array for
+    an integer or bool column without missing values (compared exactly); objects for
+    everything else (text, categorical, datetime, nullable ints with NA, arrays)."""
+    dtype = s.dtype
+    if pd.api.types.is_bool_dtype(dtype) or pd.api.types.is_integer_dtype(dtype):
+        if s.hasnans:
+            return _OBJECT, s.to_numpy(dtype=object)
+        return _EXACT, s.to_numpy()
+    if pd.api.types.is_float_dtype(dtype):
+        return _FLOAT, s.to_numpy(dtype="float64", na_value=np.nan)
+    return _OBJECT, s.to_numpy(dtype=object)
 
 
 _SEQUENCES = (np.ndarray, list, tuple, pd.Series, pd.DataFrame)
+_FLOATS = (float, np.floating)
 
 
-def _same_object(u, v, col) -> bool:
-    """Whether two cells of an object column match: arrays (or lists) elementwise within
-    RTOL/ATOL, anything else by ==. A cell whose == is neither true nor false is refused
-    with a FrameError naming the column."""
+def _finite_max(x: np.ndarray) -> float:
+    x = np.abs(x[np.isfinite(x)])
+    return float(x.max()) if x.size else 0.0
+
+
+def _scale(kind: str, values: np.ndarray) -> float:
+    """A column's scale: its largest finite |value| (floats, float cells and arrays of
+    numbers in an object column); 0 for a column compared exactly."""
+    if kind == _FLOAT:
+        return _finite_max(values)
+    if kind == _EXACT:
+        return 0.0
+    scale = 0.0
+    for cell in values:
+        if isinstance(cell, _FLOATS) or isinstance(cell, _SEQUENCES):
+            try:
+                scale = max(scale, _finite_max(np.asarray(cell, dtype="float64").ravel()))
+            except (TypeError, ValueError):
+                pass
+    return scale
+
+
+def _same_object(u, v, col, rtol: float, atol: float) -> bool:
+    """Whether two cells of an object column match: float numbers and arrays of floats
+    by the column's tolerance, integer arrays exactly, anything else by ==. A cell whose
+    == is neither true nor false is refused with a FrameError naming the column."""
     if isinstance(u, _SEQUENCES) or isinstance(v, _SEQUENCES):
         try:
-            x, y = np.asarray(u, dtype="float64"), np.asarray(v, dtype="float64")
-            return x.shape == y.shape and bool(
-                np.isclose(x, y, rtol=RTOL, atol=ATOL, equal_nan=True).all())
+            x, y = np.asarray(u), np.asarray(v)
+            if x.shape != y.shape:
+                return False
+            if x.dtype.kind in "iub" and y.dtype.kind in "iub":
+                return bool(np.array_equal(x, y))
+            x, y = x.astype("float64"), y.astype("float64")
+            return bool(np.isclose(x, y, rtol=rtol, atol=atol, equal_nan=True).all())
         except (TypeError, ValueError):
             x, y = np.asarray(u, dtype=object), np.asarray(v, dtype=object)
             return x.shape == y.shape and all(
-                _same_object(p, q, col) for p, q in zip(x.ravel(), y.ravel(), strict=True))
+                _same_object(p, q, col, rtol, atol)
+                for p, q in zip(x.ravel(), y.ravel(), strict=True))
+    if isinstance(u, _FLOATS) and isinstance(v, _FLOATS):
+        return bool(np.isclose(u, v, rtol=rtol, atol=atol, equal_nan=True))
     try:
         return bool(u == v)
     except (TypeError, ValueError) as e:
@@ -77,25 +128,41 @@ def _same_object(u, v, col) -> bool:
         ) from e
 
 
-def _mismatch_at(a: tuple[bool, np.ndarray], b: tuple[bool, np.ndarray],
-                 col=None) -> int | None:
-    """Position of the first value that differs between two ``_values`` of one length,
-    NaN matching NaN; numbers within RTOL/ATOL, anything else per _same_object. None if
-    none."""
-    (num_a, x), (num_b, y) = a, b
-    if num_a and num_b:
-        same = np.isclose(x, y, rtol=RTOL, atol=ATOL, equal_nan=True)
+def _mismatch_at(a: tuple[str, np.ndarray], b: tuple[str, np.ndarray], col=None, *,
+                 scale: float | None = None, exact: bool = False) -> int | None:
+    """Position of the first value of ``a`` (got) that does not match ``b`` (expected,
+    the full frame's), two ``_values`` of one length; None if none. NaN matches NaN.
+    The expected column's kind decides the rule: a float column within RTOL and
+    SCALE_TOL * scale (``scale`` defaults to the expected values' own), an integer or
+    bool column exactly, an object column cell by cell (_same_object). ``exact=True``
+    compares floats exactly too."""
+    (kind_a, x), (kind_b, y) = a, b
+    if exact:
+        rtol = atol = 0.0
+    else:
+        rtol = RTOL
+        atol = SCALE_TOL * (_scale(kind_b, y) if scale is None else scale)
+    if kind_a == _EXACT and kind_b == _EXACT:
+        same = x == y
+    elif _OBJECT not in (kind_a, kind_b):
+        xf, yf = x.astype("float64"), y.astype("float64")
+        if kind_b == _EXACT:
+            same = (xf == yf) | (np.isnan(xf) & np.isnan(yf))
+        else:
+            same = np.isclose(xf, yf, rtol=rtol, atol=atol, equal_nan=True)
     else:
         na_x, na_y = pd.isna(x), pd.isna(y)
-        same = np.array([(p and q) or (not p and not q and _same_object(u, v, col))
+        same = np.array([(p and q) or (not p and not q
+                                       and _same_object(u, v, col, rtol, atol))
                          for u, v, p, q in zip(x, y, na_x, na_y, strict=True)], dtype=bool)
-    bad = np.flatnonzero(~same)
+    bad = np.flatnonzero(~np.asarray(same, dtype=bool))
     return int(bad[0]) if bad.size else None
 
 
 def _first_mismatch(a: pd.Series, b: pd.Series) -> int | None:
-    """``_mismatch_at`` for two Series of one length."""
-    return _mismatch_at(_values(a), _values(b), a.name)
+    """Position of the first value of ``a`` that is not exactly ``b``'s (NaN matching
+    NaN), for columns that must come back unchanged (ts, the base price columns)."""
+    return _mismatch_at(_values(a), _values(b), a.name, exact=True)
 
 
 def _grid(n: int, sample: int | str | None) -> np.ndarray | range:
@@ -129,9 +196,19 @@ def assert_causal(
     prefix result is compared with the full result's first t+1 rows. The truncation
     points run from t=0 (the 1-bar prefix, which catches a leak into row 0 such as a
     backfilled first return) to t=n-2; the n-bar prefix is the full frame itself.
-    Numbers match within float noise, rtol=1e-9 and atol=1e-10 (RTOL, ATOL): pandas'
-    rolling skew and kurt move their last digits (about 1e-11 relative) when later bars
-    are removed, which is not a leak.
+    Float columns match within float noise, per column: a prefix value a matches the
+    full value b when |a - b| <= RTOL * |b| + SCALE_TOL * scale, RTOL = SCALE_TOL = 1e-6
+    and scale the column's largest finite |value| in the full frame. pandas' rolling
+    skew and kurt move their last digits when later bars are removed (they centre on the
+    whole input), which is not a leak; scaling the floor to the column keeps a leak in
+    a tiny feature (realized variance near 1e-10) as visible as one in a price. So a
+    change smaller than about a part per million of the column is out of reach, by
+    design. Integer, bool, text, categorical and datetime columns (by the full frame's
+    dtype) match exactly. pandas' rolling skew and kurt of raw PRICE LEVELS over short
+    windows (kurt under about 50 bars, skew under about 10) on a series that wanders far
+    from its mean can move by far more than that, up to about 1% of the column, between
+    a prefix and the full frame: such a column is refused although honest. Compute them
+    on returns, where pandas' result does not move at all.
 
     ``sample=None`` (or >= n-1) truncates at every bar: exhaustive, at a cost that grows
     with the square of the bar count. ``sample=k`` truncates at k evenly spaced bars
@@ -164,18 +241,22 @@ def assert_causal(
                       "bars (set causality_sample = None to check every prefix)",
                       UserWarning, stacklevel=stacklevel)
 
-    expected = {col: _values(full[col]) for col in full.columns}
+    expected = {}
+    for col in full.columns:
+        kind, values = _values(full[col])
+        expected[col] = (kind, values, _scale(kind, values))
     for t in grid:
         t = int(t)
         prefix = precompute_fn(df.iloc[: t + 1].copy()).reset_index(drop=True)
         _check_rows(prefix, df.iloc[: t + 1], f"precompute(df[:{t + 1}])")
-        for col, (numeric, values) in expected.items():
+        for col, (kind, values, scale) in expected.items():
             if col not in prefix.columns:
                 raise LookaheadError(
                     f"non-causal column {col!r} at t={t}: it is missing from "
                     f"precompute(df[:{t + 1}]), so it depends on how many bars follow"
                 )
-            bad = _mismatch_at(_values(prefix[col]), (numeric, values[: t + 1]), col)
+            bad = _mismatch_at(_values(prefix[col]), (kind, values[: t + 1]), col,
+                               scale=scale)
             if bad is not None:
                 raise LookaheadError(
                     f"non-causal column {col!r} at t={bad}: "

@@ -193,34 +193,148 @@ def test_sampled_grid_spans_the_first_and_last_proper_prefix():
 
 
 # ---------------------------------------------------------------------------
-# Review fix (2026-11-02): numbers match within float noise (rtol 1e-9, atol 1e-10).
+# Review fix (2026-11-02, second round): a scale-aware tolerance per column. Floats match
+# when |prefix - full| <= RTOL*|full| + SCALE_TOL*scale, scale = the column's largest
+# finite |value| in the full frame; integers, bools, text and dates match exactly.
 # ---------------------------------------------------------------------------
 
 _SAMPLE = pathlib.Path(__file__).resolve().parents[1] / "data" / "sample" / "nq_5m.json"
 
 
-@pytest.mark.parametrize("stat", ["skew", "kurt"])
-def test_assert_causal_passes_honest_rolling_skew_and_kurt(stat):
-    # pandas centres rolling moments on the whole input, so the last digits at bar 42
-    # move when later bars are removed (about 1e-11 relative); 1e-12 refused them.
+def _nq():
     from plutobt.data import load_bars
 
-    df = load_bars(str(_SAMPLE))
-    assert assert_causal(lambda d: d.assign(x=getattr(d["close"].rolling(30), stat)()),
-                         df) is None
+    return load_bars(str(_SAMPLE))
+
+
+def _walk(n, p0, sigma, seed=1):
+    rng = np.random.default_rng(seed)
+    c = p0 * np.exp(np.cumsum(rng.normal(0.0, sigma, n)))
+    return pd.DataFrame({"ts": 1_700_000_000 + 60 * np.arange(n), "open": c, "high": c,
+                         "low": c, "close": c, "volume": 1})
+
+
+@pytest.mark.parametrize("stat", ["skew", "kurt"])
+@pytest.mark.parametrize("window", [20, 30])
+def test_assert_causal_passes_honest_rolling_skew_and_kurt_on_the_nq_sample(stat, window):
+    # pandas centres rolling moments on the whole input, so the last digits move when
+    # later bars are removed: rolling(20).kurt moved 5e-8 relative here and was refused
+    # at rtol 1e-9 (probe p_tol2).
+    def fn(d):
+        return d.assign(x=getattr(d["close"].rolling(window), stat)())
+
+    assert assert_causal(fn, _nq()) is None
+
+
+def test_engine_runs_honest_skew_and_kurt_on_one_minute_like_bars():
+    # Probe p_tol2: 1,500 NQ-like 1-minute bars, rolling(20).kurt moved up to 4.3e-7
+    # relative between a prefix and the full frame. Refused at rtol 1e-9; it runs now.
+    from plutobt.config import BacktestConfig
+    from plutobt.engine import Engine
+    from plutobt.instruments import get_instrument
+    from plutobt.strategy import Strategy
+
+    class Moments(Strategy):
+        def precompute(self, d):
+            return d.assign(sk=d["close"].rolling(20).skew(), ku=d["close"].rolling(20).kurt())
+
+    df = _walk(1500, 20000.0, 5e-4)
+    assert len(Engine(get_instrument("NQ"), BacktestConfig()).run(df, Moments())
+               .equity_curve) == 1500
+    assert len(Engine(get_instrument("NQ"), BacktestConfig()).run(_nq(), Moments())
+               .equity_curve) == len(_nq())
+
+
+@pytest.mark.parametrize("sigma", [1e-4, 3e-5, 1e-5])
+@pytest.mark.filterwarnings("ignore:invalid value:RuntimeWarning")
+def test_a_whole_sample_leak_on_a_tiny_feature_is_caught(sigma):
+    # Probe p_tol: realized variance of 1e-5 returns is about 1e-10, all inside the old
+    # absolute atol of 1e-10, so subtracting its whole-sample mean passed. The tolerance
+    # is now a fraction of the column's own scale.
+    def leak(d):
+        rv = (np.log(d["close"]).diff() ** 2).rolling(20).mean()
+        return d.assign(x=rv - (np.log(d["close"]).diff() ** 2).mean())
+
+    with pytest.raises(AssertionError, match="non-causal column 'x'"):
+        assert_causal(leak, _walk(600, 110.0, sigma))
+
+
+@pytest.mark.parametrize("scale", [1e-20, 1e-10, 1.0, 1e10])
+def test_the_same_leak_is_caught_at_every_magnitude(scale):
+    def leak(d):
+        r = np.log(d["close"]).diff() * scale
+        return d.assign(x=r - r.mean())
+
+    with pytest.raises(AssertionError, match="non-causal column 'x'"):
+        assert_causal(leak, _walk(200, 50.0, 1e-3))
 
 
 @pytest.mark.parametrize("fn", [
     lambda d: d.assign(x=d["close"].shift(-1).rolling(30).skew()),
-    lambda d: d.assign(x=d["close"] * (1 + 1e-6 * (d["close"].shift(-1) > d["close"]))),
-], ids=["shifted-skew", "one-part-per-million"])
+    lambda d: d.assign(x=d["close"] * (1 + 1e-4 * (d["close"].shift(-1) > d["close"]))),
+], ids=["shifted-skew", "one-part-in-ten-thousand"])
 @pytest.mark.filterwarnings("ignore:All-NaN slice:RuntimeWarning")  # 1-bar prefix
 def test_assert_causal_still_catches_a_leak_above_float_noise(fn):
-    from plutobt.data import load_bars
+    with pytest.raises(AssertionError, match="non-causal column 'x'"):
+        assert_causal(fn, _nq())
+
+
+def test_a_change_below_a_part_per_million_is_float_noise_by_the_documented_rule():
+    # The resolution of the float compare: a value that moves by less than RTOL of
+    # itself is treated as noise (pandas' honest moments move this much), so a leak this
+    # small is out of reach. Documented on assert_causal.
+    def fn(d):
+        return d.assign(x=d["close"] * (1 + 1e-8 * (d["close"].shift(-1) > d["close"])))
+
+    assert assert_causal(fn, _nq()) is None
+
+
+def test_integer_and_bool_columns_compare_exactly():
+    # A float compare at rtol 1e-6 would pass a one-in-1e12 change; an int column is
+    # compared exactly, so the leak is caught. Same for bools.
+    def big(d):
+        return d.assign(x=(10**12 + (d["close"].shift(-1) > d["close"])).astype("int64"))
+
+    def flag(d):
+        return d.assign(x=d["close"].shift(-1) > d["close"])
 
     with pytest.raises(AssertionError, match="non-causal column 'x'"):
-        assert_causal(fn, load_bars(str(_SAMPLE)))
+        assert_causal(big, _frame())
+    with pytest.raises(AssertionError, match="non-causal column 'x'"):
+        assert_causal(flag, _frame())
+
+
+def test_a_datetime_column_compares_exactly():
+    def leak(d):
+        stamp = pd.to_datetime(d["ts"], unit="s")
+        return d.assign(x=stamp.shift(-1).fillna(stamp))
+
+    with pytest.raises(AssertionError, match="non-causal column 'x'"):
+        assert_causal(leak, _frame())
+    assert assert_causal(lambda d: d.assign(x=pd.to_datetime(d["ts"], unit="s")),
+                         _frame()) is None
+
+
+def test_the_engine_compares_base_columns_exactly():
+    # The tolerance is for derived columns: a base column the fills read must come back
+    # unchanged, to the bit.
+    from plutobt.broker import FrameError
+    from plutobt.config import BacktestConfig
+    from plutobt.engine import Engine
+    from plutobt.instruments import get_instrument
+    from plutobt.strategy import Strategy
+
+    class Nudge(Strategy):
+        def precompute(self, d):
+            return d.assign(close=d["close"] * (1 + 1e-12))
+
+    with pytest.raises(FrameError, match="changed column 'close'"):
+        Engine(get_instrument("NQ"), BacktestConfig()).run(_nq(), Nudge())
 
 
 def test_the_tolerance_is_documented():
-    assert "1e-9" in assert_causal.__doc__
+    from plutobt import lookahead
+
+    assert lookahead.RTOL == 1e-6 and lookahead.SCALE_TOL == 1e-6
+    doc = assert_causal.__doc__
+    assert "1e-6" in doc and "largest finite" in doc and "exactly" in doc
