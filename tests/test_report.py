@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 import pytest
 
@@ -374,3 +376,107 @@ def test_an_all_scratch_run_has_no_win_rate():
     # A real 0% (losers, no winners) still prints its number.
     res.metrics.update(profit_factor=0.0)
     assert _line(format_report(res, symbol="NQ"), "Win rate").endswith("= 0.000")
+
+
+# ---------------------------------------------------------------------------
+# Final pre-film audit (2026-11-02): labels that say what the numbers are.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sym,days", [("NQ", "20"), ("ES", "20"), ("CL", "20")])
+def test_calmar_is_not_annualized_from_a_month(sym, days):
+    # Calmar annualizes the mean bar return (x periods_per_year): from 20 trading days
+    # that is a 12.6x extrapolation (CL implied -145.8%/yr). Under a year it prints n/a
+    # and says why; the value stays in the metrics dict.
+    from examples.run_demo import run_symbol
+
+    low = sym.lower()
+    res = run_symbol(sym, data_path=f"data/sample/{low}_5m.json",
+                     config_path=f"configs/{low}.toml")
+    assert math.isfinite(res.metrics["calmar"])
+    text = format_report(res, symbol=sym)
+    assert _line(text, "Calmar").split("=", 1)[1].strip() == (
+        f"n/a (needs >= 1 year; this run covers {days} trading days)")
+
+
+def test_calmar_prints_its_number_once_the_run_covers_a_year():
+    res = _fake_result()                     # 4 bars
+    res.metrics["periods_per_year"] = 4.0    # 4 bars is a year here
+    text = format_report(res, symbol="NQ")
+    assert _line(text, "Calmar").split("=", 1)[1].strip() == "0.950"
+    res.metrics["periods_per_year"] = 5.0    # 4 of 5: under a year
+    text = format_report(res, symbol="NQ")
+    assert _line(text, "Calmar").split("=", 1)[1].strip() == (
+        "n/a (needs >= 1 year; this run covers 201.6 trading days)")
+
+
+def _dd_result(values):
+    from plutobt.metrics import compute_metrics
+
+    eq = pd.Series([float(v) for v in values], index=range(0, len(values) * 300, 300))
+    res = BacktestResult(equity_curve=eq, trades=[], metrics={},
+                         manifest={"data_sha256": "deadbeef", "version": "0.1.0"})
+    res.metrics = compute_metrics(res, periods_per_year=20412.0)
+    return res
+
+
+@pytest.mark.parametrize("values,flagged", [
+    ([100, 110, 90, 95], True),             # never regains 110
+    ([100, 110, 90, 111], False),           # recovered on the last bar
+    ([100, 110, 80, 111, 105], False),      # deepest recovered; a later shallow one did not
+    ([100, 101, 102], False),               # no drawdown at all
+])
+def test_an_unrecovered_drawdown_duration_says_so(values, flagged):
+    text = format_report(_dd_result(values), symbol="NQ")
+    dur = _line(text, "Max DD duration")
+    assert ("(not recovered by the last bar)" in dur) is flagged
+
+
+def test_max_drawdown_recovered_helper():
+    from plutobt.metrics import max_drawdown_recovered
+
+    assert max_drawdown_recovered(pd.Series([100.0, 110.0, 90.0, 95.0])) is False
+    assert max_drawdown_recovered(pd.Series([100.0, 110.0, 90.0, 110.0])) is True
+    assert max_drawdown_recovered(pd.Series([100.0, 110.0, 80.0, 111.0, 105.0])) is True
+    assert max_drawdown_recovered(pd.Series([], dtype=float)) is True
+
+
+def test_psr_label_does_not_claim_a_probability_of_the_true_sharpe():
+    psr_line = _line(format_report(_fake_result(), symbol="NQ"), "PSR")
+    assert "P[true Sharpe > 0]" not in psr_line
+    assert ("(Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; "
+            "skew/kurtosis-adjusted, Bailey & Lopez de Prado)") in psr_line
+
+
+def test_expectancy_shows_its_unit():
+    text = format_report(_fake_result(), symbol="NQ")
+    assert _line(text, "Expectancy").split("=", 1)[1].strip() == (
+        "60.000   ($ per closed trade, net of costs)")
+
+
+def test_low_sample_warning_names_every_trade_based_stat():
+    res = _fake_result()
+    res.metrics["n_trades"] = 5
+    warn = _line(format_report(res, symbol="NQ"), "⚠ insufficient sample")
+    for stat in ("profit factor", "expectancy", "win rate", "Avg R"):
+        assert stat in warn, stat
+
+
+def test_the_hash_line_says_what_it_hashes():
+    line = _line(format_report(_fake_result(), symbol="NQ"), "data_sha256")
+    assert "deadbeef" in line
+    assert "(of the loaded bars as CSV, not the file)" in line
+
+
+def test_the_documented_hash_recipe_reproduces_the_manifest():
+    # ONBOARDING's one-liner: sha256 of load_bars(path).to_csv(index=False).
+    import hashlib
+
+    from examples.run_demo import run_symbol
+
+    from plutobt.data import load_bars
+
+    path = "data/sample/nq_5m.json"
+    res = run_symbol("NQ", data_path=path, config_path="configs/nq.toml")
+    recipe = hashlib.sha256(load_bars(path).to_csv(index=False).encode()).hexdigest()
+    assert recipe == res.manifest["data_sha256"]

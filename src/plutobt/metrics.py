@@ -172,15 +172,29 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
     if it never recovers, runs to the last bar. Positional (integer)
     bar distance is used, independent of the index dtype.
     """
+    depth, duration, _ = _deepest_drawdown(equity)
+    return (depth, duration)
+
+
+def max_drawdown_recovered(equity: pd.Series) -> bool:
+    """Whether the deepest drawdown (the one ``max_drawdown`` measures) regained its
+    peak by the last bar. False means its duration runs to the last bar and is a lower
+    bound, not a finished episode. True with no drawdown at all."""
+    return _deepest_drawdown(equity)[2]
+
+
+def _deepest_drawdown(equity: pd.Series) -> tuple[float, int, bool]:
+    """(depth, duration in bars, recovered) of the deepest drawdown episode; the one
+    computation behind ``max_drawdown`` and ``max_drawdown_recovered``."""
     eq = np.asarray(equity, dtype=float)
     n = eq.size
     if n == 0:
-        return (0.0, 0)
+        return (0.0, 0, True)
     running_max = np.maximum.accumulate(eq)
     dd = eq / running_max - 1.0
     depth = float(dd.min())
     if depth == 0.0:
-        return (0.0, 0)
+        return (0.0, 0, True)
     trough_pos = int(dd.argmin())
     # Peak position: last index at/before the trough where equity == running_max.
     peak_val = running_max[trough_pos]
@@ -189,12 +203,14 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
         peak_pos -= 1
     # Recovery: first bar after the trough whose equity regains the peak.
     recovery_pos = n - 1
+    recovered = False
     for j in range(trough_pos + 1, n):
         if eq[j] >= peak_val:
             recovery_pos = j
+            recovered = True
             break
     duration = recovery_pos - peak_pos
-    return (depth, int(duration))
+    return (depth, int(duration), recovered)
 
 
 def trailing_hwm_drawdown(equity: pd.Series) -> float:
@@ -210,6 +226,18 @@ def trailing_hwm_drawdown(equity: pd.Series) -> float:
     running_max = np.maximum.accumulate(eq)
     dd = eq / running_max - 1.0
     return float(-dd.min())
+
+
+# The trading-day basis of periods_per_year (bars per day x 252, see compute_metrics).
+TRADING_DAYS_PER_YEAR = 252
+
+
+def trading_days_covered(n_bars: int, periods_per_year: float) -> float:
+    """How many trading days ``n_bars`` bars span, on the periods_per_year basis
+    (bars per day x 252): ``n_bars * 252 / periods_per_year``. The 20-day NQ sample
+    (1,620 bars at 20412 a year) is 20.0. A run under 252 of them is under a year, so
+    an annualized return (and Calmar) from it is an extrapolation."""
+    return n_bars * TRADING_DAYS_PER_YEAR / periods_per_year
 
 
 def calmar(annual_return: float, max_dd: float) -> float:
