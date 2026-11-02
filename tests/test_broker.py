@@ -905,3 +905,62 @@ def test_no_shorts_flip_trimmed_at_the_open_before_the_stop():
     assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 96.0)]
     assert (order.status, order.contracts) == ("filled", 1)
     assert pf.position.qty == 0
+
+
+# ---------------------------------------------------------------------------
+# Margin and allow_short act only when an order actually fills: a bar a limit order
+# does not reach leaves it exactly as it was (no rejection, no trim, stop kept).
+# ---------------------------------------------------------------------------
+
+def _long_one_at_15000(cash, allow_short=True):
+    broker, inst, pf = make_broker(starting_cash=cash, slippage_ticks=0.0,
+                                   allow_short=allow_short)
+    broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1, 15_000.0))
+    return broker, inst, pf
+
+
+def test_unfilled_limit_scale_in_is_not_rejected_by_margin():
+    # Equity at this bar's open (30,000) is under 2 lots' 46,000, but the 13,000 buy
+    # limit is never reached: nothing happens to the order.
+    broker, inst, pf = _long_one_at_15000(50_000.0)
+    order = broker.buy(contracts=1, limit=13_000.0)
+    assert broker.fill_pending(Bar(2, 14_000.0, 14_100.0, 13_900.0, 14_000.0)) == []
+    assert (order.status, order.contracts) == ("pending", 1)
+    assert broker.pending is order
+
+
+def test_unfilled_limit_flip_is_not_trimmed_by_margin():
+    # The sell limit at 16,500 is not reached on a bar at 14,000 (equity 30,000 there,
+    # under the 46,000 its short 2 needs). It keeps its 3 lots and its stop, and fills
+    # whole on the bar that reaches it.
+    broker, inst, pf = _long_one_at_15000(50_000.0)
+    order = broker.sell(contracts=3, limit=16_500.0, stop=17_000.0)
+    assert broker.fill_pending(Bar(2, 14_000.0, 14_100.0, 13_900.0, 14_000.0)) == []
+    assert (order.status, order.contracts, order.attached_stop) == ("pending", 3, 17_000.0)
+    fills = broker.fill_pending(Bar(3, 16_000.0, 16_600.0, 16_000.0, 16_500.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 3, 16_500.0)]
+    assert pf.position.qty == -2
+    assert broker.resting_stop == 17_000.0
+
+
+def test_unfilled_limit_flip_is_not_trimmed_by_allow_short():
+    broker, inst, pf = _long_one_at_15000(100_000.0, allow_short=False)
+    order = broker.sell(contracts=3, limit=16_500.0, stop=17_000.0)
+    assert broker.fill_pending(Bar(2, 15_000.0, 15_100.0, 14_900.0, 15_000.0)) == []
+    assert (order.status, order.contracts, order.attached_stop) == ("pending", 3, 17_000.0)
+    # On the fill it is trimmed to its closing half: the long is sold, no short opens.
+    fills = broker.fill_pending(Bar(3, 16_000.0, 16_600.0, 16_000.0, 16_500.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 16_500.0)]
+    assert (order.status, order.contracts, order.attached_stop) == ("filled", 1, None)
+    assert pf.position.qty == 0
+
+
+def test_unfilled_limit_short_entry_is_not_rejected_by_allow_short():
+    broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
+    order = broker.sell(contracts=1, limit=16_500.0)
+    assert broker.fill_pending(_flat_bar(1, 15_000.0)) == []
+    assert (order.status, broker.pending) == ("pending", order)
+    broker.fill_pending(Bar(2, 16_000.0, 16_600.0, 16_000.0, 16_500.0))
+    assert order.status == "rejected"
+    assert pf.position.qty == 0

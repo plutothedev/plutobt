@@ -286,6 +286,48 @@ class Broker:
         if prior_side is not None and side is not None and side != prior_side:
             self.resting_stop = None
 
+    def _admit(self, order: Order, mark: float) -> Order | None:
+        """The checks an order meets at the moment it fills: allow_short, then margin.
+
+        Returns the order (possibly trimmed to its closing contracts) or None when it
+        is refused (status "rejected", pending cleared).
+        """
+        if not self.config.allow_short:
+            # allow_short=False: nothing may leave a net short. A sell that only closes
+            # a long goes through; a flip keeps just that closing half (its stop was for
+            # the short); a short entry is refused.
+            qty = self.portfolio.position.qty
+            signed = order.contracts if order.side == "buy" else -order.contracts
+            if qty + signed < 0:
+                if qty > 0:
+                    order.contracts = qty
+                    order.attached_stop = None
+                else:
+                    return self._reject(order)
+        held = abs(self.portfolio.position.qty)
+        reducing = self._is_reducing(order)
+        opening = order.contracts - held if reducing else order.contracts
+        if opening > 0:
+            # Initial margin covers the WHOLE position the fill leaves: a flip's new
+            # side, or the held contracts plus a scale-in's. Equity is marked at
+            # ``mark``, so open P&L counts: a flip's new side opens on what its closing
+            # half leaves, as close() then a new entry would see it. A pure reduction
+            # opens nothing and is never gated.
+            resulting = opening if reducing else held + opening
+            if not self.portfolio.margin_ok(resulting, mark):
+                if not reducing:
+                    return self._reject(order)
+                # A flip whose new side fails margin keeps only its closing
+                # contracts: the exit goes through, the reversal does not.
+                order.contracts = held
+                order.attached_stop = None
+        return order
+
+    def _reject(self, order: Order) -> None:
+        order.status = "rejected"
+        self.pending = None
+        return None
+
     def fill_pending(self, next_bar) -> list[Fill]:
         if self.pending is not None:
             # Checked first, before the stop, the margin check or a trim reads the size.
@@ -320,47 +362,21 @@ class Broker:
                 order.status = "cancelled"
                 self.pending = None
                 order = None
-        if order is not None and not self.config.allow_short:
-            # allow_short=False: nothing may leave a net short. A sell that only closes
-            # a long goes through; a flip keeps just that closing half (its stop was for
-            # the short); a short entry is refused.
-            qty = self.portfolio.position.qty
-            signed = order.contracts if order.side == "buy" else -order.contracts
-            if qty + signed < 0:
-                if qty > 0:
-                    order.contracts = qty
-                    order.attached_stop = None
-                else:
-                    order.status = "rejected"
-                    self.pending = None
-                    order = None
-        if order is not None:
-            held = abs(self.portfolio.position.qty)
-            reducing = self._is_reducing(order)
-            opening = order.contracts - held if reducing else order.contracts
-            if opening > 0:
-                # Initial margin covers the WHOLE position the fill leaves: a flip's new
-                # side, or the held contracts plus a scale-in's. Equity is marked at this
-                # bar's open (before slippage and fees), so open P&L counts: a flip's
-                # new side opens on what its closing half leaves, as close() then a new
-                # entry would see it. A pure reduction opens nothing and is never gated.
-                resulting = opening if reducing else held + opening
-                affordable = self.portfolio.margin_ok(resulting, float(next_bar.open))
-                if not affordable:
-                    if reducing:
-                        # A flip whose new side fails margin keeps only its closing
-                        # contracts: the exit goes through, the reversal does not.
-                        order.contracts = held
-                        order.attached_stop = None
-                    else:
-                        order.status = "rejected"
-                        self.pending = None
-                        order = None
         armed_at: float | None = None     # where an attached stop went live, if one did
         if order is not None:
-            prior_side = self._position_side()
+            # Where the order would fill on this bar, if it does. allow_short and margin
+            # act only on an order that fills: a bar a limit never reaches leaves it
+            # exactly as it was (no rejection, no trim, its stop kept).
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)
+            elif order.kind == "limit":
+                price = self._limit_fill(order, next_bar)
+            else:
+                raise ValueError(f"unknown order kind: {order.kind!r}")
+            if price is not None:
+                order = self._admit(order, float(next_bar.open))
+            if order is not None and price is not None:
+                prior_side = self._position_side()
                 fills.append(
                     self._emit_fill(next_bar.ts, order.side, order.contracts, price,
                                     margin_liquidation=order.margin_liquidation)
@@ -373,32 +389,14 @@ class Broker:
                 # initial_stop (that trade's R would read it).
                 if order.attached_stop is not None and self.portfolio.position.qty != 0:
                     self.resting_stop = order.attached_stop
-                    armed_at = next_bar.open
+                    # live from the fill: the open for a market order, the price for a limit
+                    armed_at = next_bar.open if order.kind == "market" else price
                     # §0.4: set initial_stop on the position opened by this entry.
                     # Only set when the fill actually opened/flipped (not a scale-in
                     # that kept the original direction with an existing initial_stop).
                     pos = self.portfolio.position
                     if pos.initial_stop is None:
                         pos.initial_stop = order.attached_stop
-            elif order.kind == "limit":
-                price = self._limit_fill(order, next_bar)
-                if price is not None:
-                    fills.append(
-                        self._emit_fill(next_bar.ts, order.side, order.contracts, price)
-                    )
-                    order.status = "filled"
-                    self.pending = None
-                    self._drop_stop_on_flip(prior_side)
-                    # As for a market fill: no stop is left behind on a flat position.
-                    if order.attached_stop is not None and self.portfolio.position.qty != 0:
-                        self.resting_stop = order.attached_stop
-                        armed_at = price
-                        # §0.4: set initial_stop on the position opened by this entry.
-                        pos = self.portfolio.position
-                        if pos.initial_stop is None:
-                            pos.initial_stop = order.attached_stop
-            else:
-                raise ValueError(f"unknown order kind: {order.kind!r}")
             if armed_at is not None:
                 # The attached stop is live from the entry fill, so the rest of THIS bar
                 # is checked against it (adverse extreme first, §5.4). Its gap-through
