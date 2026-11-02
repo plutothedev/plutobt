@@ -1,6 +1,8 @@
 from collections import namedtuple
 from dataclasses import fields, is_dataclass
 
+import pytest
+
 from plutobt.broker import Broker, Order
 from plutobt.config import BacktestConfig
 from plutobt.instruments import get_instrument
@@ -442,3 +444,121 @@ def test_broker_public_api_surface():
         assert callable(getattr(broker, name))
     assert hasattr(broker, "pending")
     assert hasattr(broker, "resting_stop")
+
+
+# ---------------------------------------------------------------------------
+# Entry-bar stops: an attached stop is live from the entry fill, so the entry bar's
+# own range is checked against it (adverse extreme first, §5.4).
+# ---------------------------------------------------------------------------
+
+def test_entry_bar_pierce_fires_attached_stop_on_the_entry_bar():
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    broker.buy(contracts=1, stop=14_900.0)
+    # opens 15,000 (entry), trades down to 14,850 through the 14,900 stop
+    bar = Bar(ts=1000, open=15_000.0, high=15_010.0, low=14_850.0, close=14_990.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.price) for f in fills] == [("buy", 15_000.25), ("sell", 14_899.75)]
+    assert pf.position.qty == 0
+    assert broker.resting_stop is None
+    assert broker.pending is None
+    tr = pf.trades[0]
+    assert tr.entry_ts == tr.exit_ts == 1000
+    # R reads the attached stop: (14,899.75 - 15,000.25) / (15,000.25 - 14,900)
+    assert tr.r_multiple == pytest.approx(-100.5 / 100.25)
+    # consumed: nothing fires on the next bar, even one that trades through again
+    again = Bar(ts=2000, open=14_950.0, high=14_960.0, low=14_800.0, close=14_850.0)
+    assert broker.fill_pending(again) == []
+
+
+def test_entry_bar_gap_through_fills_stop_at_the_open():
+    # The entry bar opens already beyond the stop: the stop fills at the open less
+    # slippage, never at the better stop price.
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    broker.buy(contracts=1, stop=14_900.0)
+    bar = Bar(ts=1000, open=14_850.0, high=14_870.0, low=14_840.0, close=14_860.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.price) for f in fills] == [("buy", 14_850.25), ("sell", 14_849.75)]
+    assert pf.position.qty == 0
+
+
+def test_short_entry_bar_pierce_fires_attached_stop():
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    broker.sell(contracts=2, stop=15_100.0)
+    bar = Bar(ts=1000, open=15_000.0, high=15_120.0, low=14_990.0, close=15_010.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.contracts, f.price) for f in fills] == [
+        ("sell", 2, 14_999.75), ("buy", 2, 15_100.25)]
+    assert pf.position.qty == 0
+
+
+def test_entry_bar_stop_not_touched_stays_resting():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    broker.buy(contracts=1, stop=14_900.0)
+    bar = Bar(ts=1000, open=15_000.0, high=15_010.0, low=14_900.25, close=15_005.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.price) for f in fills] == [("buy", 15_000.25)]
+    assert pf.position.qty == 1
+    assert broker.resting_stop == 14_900.0
+    assert pf.position.initial_stop == 14_900.0
+
+
+def test_limit_entry_bar_pierce_fires_attached_stop():
+    # A buy limit fills on the way down, so a low beyond the stop came after the fill.
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    broker.buy(contracts=1, limit=14_950.0, stop=14_900.0)
+    bar = Bar(ts=1000, open=15_000.0, high=15_010.0, low=14_880.0, close=14_920.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.price) for f in fills] == [("buy", 14_950.0), ("sell", 14_899.75)]
+    assert pf.position.qty == 0
+
+
+def test_limit_entry_stop_already_beyond_the_fill_exits_at_the_fill_not_the_open():
+    # A stop above a buy limit's fill is live (and beyond) the moment the limit fills,
+    # with the market at 14,950: it exits there less slippage, never at the 14,960
+    # stop, a price the market had already left when the stop went live.
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    broker.buy(contracts=1, limit=14_950.0, stop=14_960.0)
+    bar = Bar(ts=1000, open=15_000.0, high=15_010.0, low=14_940.0, close=14_945.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.price) for f in fills] == [("buy", 14_950.0), ("sell", 14_949.75)]
+    assert pf.position.qty == 0
+
+
+def test_flip_bar_checks_the_new_sides_stop_once():
+    # Long 1 with stop 14,900 (not touched); sell 2 flips short with stop 15,100,
+    # and the flip bar's high (15,150) takes it out. One fill per order, no more.
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    open_long(broker, entry_open=15_000.0, stop=14_900.0)
+    broker.sell(contracts=2, stop=15_100.0)
+    bar = Bar(ts=2000, open=15_000.0, high=15_150.0, low=14_950.0, close=15_050.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.contracts, f.price) for f in fills] == [
+        ("sell", 2, 14_999.75), ("buy", 1, 15_100.25)]
+    assert pf.position.qty == 0
+    assert broker.resting_stop is None
+    assert [t.side for t in pf.trades] == ["long", "short"]
+
+
+def test_flip_bar_new_stop_not_touched_stays_resting():
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    open_long(broker, entry_open=15_000.0, stop=14_900.0)
+    broker.sell(contracts=2, stop=15_100.0)
+    bar = Bar(ts=2000, open=15_000.0, high=15_050.0, low=14_950.0, close=15_020.0)
+    fills = broker.fill_pending(bar)
+    assert len(fills) == 1
+    assert pf.position.qty == -1
+    assert broker.resting_stop == 15_100.0
+
+
+def test_old_stop_hit_first_cancels_the_entry_no_second_stop_fill():
+    # Adverse first: the held long's stop fires at the top of the bar and flattens it;
+    # the pending flip is then stale and cancelled, so its stop never arms or fires.
+    broker, inst, pf = make_broker(slippage_ticks=1.0)
+    open_long(broker, entry_open=15_000.0, stop=14_900.0)
+    order = broker.sell(contracts=2, stop=15_100.0)
+    bar = Bar(ts=2000, open=14_950.0, high=15_150.0, low=14_850.0, close=15_000.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 14_899.75)]
+    assert order.status == "cancelled"
+    assert pf.position.qty == 0
+    assert broker.resting_stop is None

@@ -340,3 +340,119 @@ def test_r_multiple_and_avg_r_populate_with_attached_stop():
     assert metrics["avg_r"] is not None, "avg_r is None after wiring initial_stop"
     assert isinstance(metrics["avg_r"], float)
     assert not (metrics["avg_r"] != metrics["avg_r"])  # not NaN
+
+
+# ---------------------------------------------------------------------------
+# Equity timing: equity[t] is the book after bar t's own fills, marked at close t.
+# A fill at bar t+1's open first shows at t+1 (no next-bar fill on the decision bar).
+# ---------------------------------------------------------------------------
+
+def _ohlc(rows, ts0=0, step=300):
+    """rows: list of (open, high, low, close), one bar every ``step`` seconds."""
+    a = np.asarray(rows, dtype="float64")
+    n = len(rows)
+    return pd.DataFrame({
+        "ts": np.arange(ts0, ts0 + n * step, step, dtype="int64"),
+        "open": a[:, 0], "high": a[:, 1], "low": a[:, 2], "close": a[:, 3],
+        "volume": np.ones(n, dtype="int64"),
+    })
+
+
+class _Script(Strategy):
+    """Runs ``actions[i](ctx)`` on the bar with row index i; records what it saw."""
+
+    def __init__(self, actions):
+        self.actions = actions
+        self.seen = {}
+
+    def precompute(self, df):
+        df = df.copy()
+        df["i"] = np.arange(len(df))
+        return df
+
+    def on_bar(self, ctx):
+        i = int(ctx.bar.i)
+        self.seen[i] = (ctx.position.qty, ctx.equity)
+        if i in self.actions:
+            self.actions[i](ctx)
+
+
+def test_equity_at_decision_bar_is_not_moved_by_the_next_bars_fill():
+    # Buy decided on bar 1; bar 2 gaps up 10 points and the buy fills at its open.
+    # By hand: flat through bar 1's close -> 100,000 at bars 0 and 1. Bar 2: fill
+    # 110 + 0.25 slip, fee 2.50, close 110 -> 100,000 - 2.50 - 0.25 * 20 = 99,992.50.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=1.0, commission_per_side=2.5))
+    df = _ohlc([(100, 100, 100, 100), (100, 100, 100, 100),
+                (110, 110, 110, 110), (110, 110, 110, 110)])
+    result = eng.run(df, _Script({1: lambda c: c.broker.buy(contracts=1)}))
+    assert list(result.equity_curve.index) == [0, 300, 600, 900]
+    assert list(result.equity_curve) == pytest.approx([100_000.0, 100_000.0,
+                                                       99_992.5, 99_992.5])
+
+
+def test_entry_fee_lands_on_the_fill_bar_not_the_decision_bar():
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=5.0))
+    df = _ohlc([(100, 101, 99, 100)] * 3)
+    result = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1)}))
+    assert result.trades[0].entry_ts == 300
+    # decision bar 0 still flat; the $5 fee first shows at the fill bar (ts 300)
+    assert list(result.equity_curve) == pytest.approx([100_000.0, 99_995.0, 99_995.0])
+
+
+def test_stop_exit_drop_lands_on_exit_bar_not_the_bar_before():
+    # Entry fills at bar 1's open (100), stop 95 rests; bar 3 trades down to 90.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _ohlc([(100, 101, 99, 100), (100, 101, 99, 100), (100, 101, 99, 100),
+                (100, 101, 90, 92), (92, 93, 91, 92)])
+    result = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1, stop=95.0)}))
+    tr = result.trades[0]
+    assert tr.exit_ts == 900 and tr.exit_price == pytest.approx(95.0)
+    eq = result.equity_curve
+    assert eq.loc[600] == pytest.approx(100_000.0)          # before the exit bar
+    assert eq.loc[900] == pytest.approx(100_000.0 - 5 * 20)  # at exit_ts
+    assert list(eq) == pytest.approx([100_000.0, 100_000.0, 100_000.0, 99_900.0, 99_900.0])
+
+
+def test_market_exit_gap_lands_on_exit_bar_not_the_decision_bar():
+    # Long from bar 1's open (100); close() decided on bar 2 (close 100); bar 3 gaps
+    # down to 90 and the exit fills there. The gap is bar 3's loss, not bar 2's.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _ohlc([(100, 100, 100, 100), (100, 100, 100, 100), (100, 100, 100, 100),
+                (90, 90, 90, 90), (90, 90, 90, 90)])
+    result = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1),
+                                  2: lambda c: c.broker.close()}))
+    assert result.trades[0].exit_ts == 900
+    assert list(result.equity_curve) == pytest.approx(
+        [100_000.0, 100_000.0, 100_000.0, 99_800.0, 99_800.0])
+
+
+def test_on_bar_sees_the_fill_at_its_own_bars_open():
+    # Unchanged by the equity-timing fix: on_bar(t) sees the book after t's open fill,
+    # with ctx.equity marked at close t.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _ohlc([(100, 100, 100, 100), (100, 100, 100, 105), (105, 105, 105, 105)])
+    strat = _Script({0: lambda c: c.broker.buy(contracts=1)})
+    eng.run(df, strat)
+    assert strat.seen[0] == (0, pytest.approx(100_000.0))
+    assert strat.seen[1] == (1, pytest.approx(100_000.0 + 5 * 20))
+
+
+def test_entry_bar_stop_pierce_fires_in_the_engine():
+    # Entry fills at bar 1's open 100 with stop 95; bar 1's low (90) trades through it.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _ohlc([(100, 101, 99, 100), (100, 101, 90, 100),
+                (100, 105, 99, 104), (104, 106, 103, 105)])
+    result = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1, stop=95.0)}))
+    assert len(result.trades) == 1
+    tr = result.trades[0]
+    assert tr.entry_ts == 300 and tr.exit_ts == 300
+    assert tr.exit_price == pytest.approx(95.0)
+    assert tr.pnl == pytest.approx(-5 * 20)
+    assert list(result.equity_curve) == pytest.approx(
+        [100_000.0, 99_900.0, 99_900.0, 99_900.0])

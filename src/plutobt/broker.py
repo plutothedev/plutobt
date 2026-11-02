@@ -204,17 +204,19 @@ class Broker:
             return bar.low <= stop      # sell-stop protecting a long
         return bar.high >= stop         # buy-stop protecting a short
 
-    def _stop_fill_price(self, pos_side: str, stop: float, bar) -> float:
+    def _stop_fill_price(self, pos_side: str, stop: float, live_from: float) -> float:
+        # live_from: the first price the stop could see (the bar's open, or for a stop
+        # armed inside the bar, the price it went live at)
         slip = self._slip_amount()
         if pos_side == "long":
             # exit is a SELL; worse = lower of (stop, open), slippage subtracts
-            ref = min(stop, bar.open)
+            ref = min(stop, live_from)
             return ref - slip
         # exit is a BUY; worse = higher of (stop, open), slippage adds
-        ref = max(stop, bar.open)
+        ref = max(stop, live_from)
         return ref + slip
 
-    def _fire_resting_stop(self, bar) -> list[Fill]:
+    def _fire_resting_stop(self, bar, live_from: float | None = None) -> list[Fill]:
         fills: list[Fill] = []
         stop = self.resting_stop
         pos_side = self._position_side()
@@ -224,7 +226,8 @@ class Broker:
             return fills
         exit_side = "sell" if pos_side == "long" else "buy"
         contracts = abs(self.portfolio.position.qty)
-        price = self._stop_fill_price(pos_side, stop, bar)
+        price = self._stop_fill_price(pos_side, stop,
+                                      bar.open if live_from is None else live_from)
         fills.append(self._emit_fill(bar.ts, exit_side, contracts, price))
         self.resting_stop = None        # GTC stop consumed -> auto-cancel
         return fills
@@ -289,6 +292,7 @@ class Broker:
                         self.pending = None
                         order = None
         if order is not None:
+            armed_at: float | None = None     # where an attached stop went live, if one did
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)
                 fills.append(
@@ -301,6 +305,7 @@ class Broker:
                 # initial_stop (that trade's R would read it).
                 if order.attached_stop is not None and self.portfolio.position.qty != 0:
                     self.resting_stop = order.attached_stop
+                    armed_at = next_bar.open
                     # §0.4: set initial_stop on the position opened by this entry.
                     # Only set when the fill actually opened/flipped (not a scale-in
                     # that kept the original direction with an existing initial_stop).
@@ -318,12 +323,20 @@ class Broker:
                     # As for a market fill: no stop is left behind on a flat position.
                     if order.attached_stop is not None and self.portfolio.position.qty != 0:
                         self.resting_stop = order.attached_stop
+                        armed_at = price
                         # §0.4: set initial_stop on the position opened by this entry.
                         pos = self.portfolio.position
                         if pos.initial_stop is None:
                             pos.initial_stop = order.attached_stop
             else:
                 raise ValueError(f"unknown order kind: {order.kind!r}")
+            if armed_at is not None:
+                # The attached stop is live from the entry fill, so the rest of THIS bar
+                # is checked against it (adverse extreme first, §5.4). Its gap-through
+                # reference is the price it went live at (the open for a market entry,
+                # the fill for a limit), not the bar's open. Firing consumes the stop,
+                # so it fills at most once.
+                fills.extend(self._fire_resting_stop(next_bar, live_from=armed_at))
         if self.portfolio.position.qty == 0:
             self.resting_stop = None      # no orphan stop on a flat position
         return fills

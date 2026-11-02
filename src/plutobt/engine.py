@@ -113,6 +113,9 @@ class Engine:
             a copy of the position for the bar: a strategy's writes to it never
             reach the book (stops move with ``ctx.broker.amend_stop``).
         Fill-at-t+1: any order placed in ``on_bar(t)`` is filled at bar t+1's open.
+        Equity at t: the book after bar t's own fills (the open fill, then stops
+            against bar t's range), marked at close t; a fill at bar t+1's open
+            first shows at t+1, never on the bar that decided it.
         Warm-up: ``on_bar`` is skipped while any derived signal column is NaN.
         Breaks: at a break the pending order is cancelled (``carry_overnight=False``,
             the default) or carried to the next bar (``carry_overnight=True``); a
@@ -156,9 +159,34 @@ class Engine:
         equity_vals: list[float] = []
         state: dict = {}
 
+        prev = None
         for t in range(n):
             row = data.iloc[t]
             bar = Row(*[row[c] for c in data.columns])
+
+            # Fill the order placed on bar t-1 against THIS bar's open (and stops
+            # against this bar's range) before anything reads the book for bar t, so
+            # equity[t] holds bar t's own fills and never the next bar's. At a break
+            # (see the docstring) cancel_pending_entry runs first: gap mode cancels
+            # the pending order, exits included; session mode cancels an entry only.
+            if prev is not None:
+                if session_breaks:
+                    # Only a change of trading session is a break: a stretch of
+                    # bars nobody traded in (omitted by the data vendor) is not.
+                    discontinuity = prev.session != bar.session
+                else:
+                    gap = int(bar.ts) - int(prev.ts)
+                    discontinuity = interval > 0 and gap > interval
+                    if has_session:
+                        discontinuity = discontinuity or (prev.session != bar.session)
+                if discontinuity and not self.config.carry_overnight:
+                    # §0: gap mode drops the pending order, exits too (known, kept for
+                    # the golden run); session mode keeps an EXIT, which fills at the
+                    # next session's open as a real exit order would. A resting
+                    # protective stop on a held position is untouched either way.
+                    broker.cancel_pending_entry(keep_exits=session_breaks)
+                broker.fill_pending(bar)
+            prev = bar
 
             # Warm-up: skip on_bar while ANY required signal col is NaN (§5.9).
             warm = any(pd.isna(getattr(bar, c)) for c in signal_cols)
@@ -177,28 +205,8 @@ class Engine:
                 )
                 strategy.on_bar(ctx)
 
-            # Fill the pending order against the next bar's OPEN (t+1). At a break
-            # (see the docstring) cancel_pending_entry runs first: gap mode cancels
-            # the pending order, exits included; session mode cancels an entry only.
-            if t + 1 < n:
-                nxt = data.iloc[t + 1]
-                if session_breaks:
-                    # Only a change of trading session is a break: a stretch of
-                    # bars nobody traded in (omitted by the data vendor) is not.
-                    discontinuity = bar.session != nxt.session
-                else:
-                    gap = int(nxt.ts) - int(bar.ts)
-                    discontinuity = interval > 0 and gap > interval
-                    if has_session:
-                        discontinuity = discontinuity or (bar.session != nxt.session)
-                if discontinuity and not self.config.carry_overnight:
-                    # §0: gap mode drops the pending order, exits too (known, kept for
-                    # the golden run); session mode keeps an EXIT, which fills at the
-                    # next session's open as a real exit order would. A resting
-                    # protective stop on a held position is untouched either way.
-                    broker.cancel_pending_entry(keep_exits=session_breaks)
-                broker.fill_pending(nxt)
-
+            # equity[t]: the book after bar t's fills (above), marked at close t. An
+            # order placed by on_bar(t) fills at the top of t+1, so it shows from t+1.
             portfolio.mark(float(bar.close))
             equity_index.append(int(bar.ts))
             equity_vals.append(portfolio.equity(float(bar.close)))
