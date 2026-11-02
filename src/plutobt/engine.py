@@ -398,8 +398,10 @@ class Engine:
                 "the precompute (check_causality = false skips this guard; use it only to "
                 "study a known leak)")
         try:
+            # stacklevel 4: the sampled-grid warning names the caller of Engine.run
+            # (assert_causal <- _check_causality <- run <- caller).
             assert_causal(lambda d: copy.deepcopy(snapshot).precompute(d), df,
-                          sample=self.config.causality_sample, full=data)
+                          sample=self.config.causality_sample, full=data, stacklevel=4)
         except LookaheadError as leak:
             raise LookaheadError(
                 f"the strategy's precompute looks ahead: {leak}. {hint}") from leak

@@ -221,6 +221,9 @@ def assert_causal(
     A precompute that drops, adds or reorders rows is refused with a FrameError (a
     ValueError) before any compare, since its rows no longer line up with the bars.
 
+    ``stacklevel`` places that warning: 2 (the default) names the line that called
+    assert_causal; Engine.run passes the depth of its own caller's line.
+
     ``full`` is the frame the prefixes are compared with: by default
     ``precompute_fn(df)``; Engine.run passes the frame it trades, so what is checked is
     exactly what is traded. ``precompute_fn`` must start from the same state on every
@@ -237,9 +240,13 @@ def assert_causal(
 
     grid = _grid(n, sample)
     if sample == "auto" and len(grid) < n - 1:   # an explicit k was asked for
-        warnings.warn(f"causality check sampled: {len(grid)} of {n - 1} prefixes on {n} "
-                      "bars (set causality_sample = None to check every prefix)",
-                      UserWarning, stacklevel=stacklevel)
+        warnings.warn(
+            f"causality check sampled: checked {len(grid)} of the {n - 1} prefixes of {n} "
+            f"bars (every prefix is checked up to {AUTO_FULL_MAX} bars), so a leak on rows "
+            "between them can be missed. To check every prefix, set causality_sample = "
+            "None in BacktestConfig (or pass sample=None to assert_causal); the cost "
+            "grows with the square of the bar count",
+            UserWarning, stacklevel=stacklevel)
 
     expected = {}
     for col in full.columns:

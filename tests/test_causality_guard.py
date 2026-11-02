@@ -434,3 +434,34 @@ def test_auto_does_not_warn_on_a_short_frame():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _eng().run(_bars(), Fn(_honest))
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02, second round): the sampled-grid warning points at the user's
+# own call and says how many prefixes were checked and how to check them all.
+# ---------------------------------------------------------------------------
+
+def test_the_sampled_warning_points_at_the_engine_run_call():
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _eng().run(_bars(3000), Fn(_honest))
+    (w,) = (w for w in caught if "causality check sampled" in str(w.message))
+    assert pathlib.Path(w.filename).resolve() == pathlib.Path(__file__).resolve()
+    text = str(w.message)
+    assert "checked 286 of the 2999 prefixes of 3000 bars" in text
+    assert "causality_sample = None" in text and "every prefix" in text
+
+
+def test_the_sampled_warning_points_at_a_direct_assert_causal_call():
+    import warnings
+
+    from plutobt.lookahead import assert_causal
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert_causal(_honest, _bars(2500), sample="auto")
+    (w,) = caught
+    assert pathlib.Path(w.filename).resolve() == pathlib.Path(__file__).resolve()
+    assert "sample=None" in str(w.message)
