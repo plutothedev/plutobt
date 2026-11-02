@@ -65,12 +65,24 @@ def plot_trades(df: pd.DataFrame, result: BacktestResult, ax=None):
         _, ax = plt.subplots()
     ax.plot(df["ts"].to_numpy(), df["close"].to_numpy(), label="close",
             color="C0", linewidth=0.8)
+    # Colour = side (long green, short red); shape = what happened: an entry is a
+    # triangle pointing the way the trade bets (a long buys "^", a short sells "v"),
+    # and an exit is an "x" in its side's colour. All four kinds stay distinct.
+    # Each kind is labelled once for the legend ("_" labels are skipped).
+    labelled: set[str] = set()
+
+    def _mark(ts, price, marker, color, label):
+        ax.scatter([ts], [price], marker=marker, color=color, zorder=3,
+                   label=label if label not in labelled else "_" + label)
+        labelled.add(label)
+
     for tr in result.trades:
-        ax.scatter([tr.entry_ts], [tr.entry_price], marker="^", color="C2",
-                   zorder=3)
+        short = tr.side == "short"
+        color = "C3" if short else "C2"
+        side = "short" if short else "long"
+        _mark(tr.entry_ts, tr.entry_price, "v" if short else "^", color, f"{side} entry")
         if tr.exit_ts is not None and tr.exit_price is not None:
-            ax.scatter([tr.exit_ts], [tr.exit_price], marker="v", color="C3",
-                       zorder=3)
+            _mark(tr.exit_ts, tr.exit_price, "x", color, f"{side} exit")
     ax.set_xlabel("bar ts")
     ax.set_ylabel("price")
     ax.legend(loc="best")

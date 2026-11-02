@@ -58,3 +58,59 @@ def test_plot_can_save_png(tmp_path):
     fig.savefig(png)
     assert png.is_file() and png.stat().st_size > 0
     plt.close(fig)
+
+
+def _marker_of(collection):
+    """The marker name ("^", "v", "x", ...) a scatter PathCollection was drawn with."""
+    import numpy as np
+    from matplotlib.markers import MarkerStyle
+
+    verts = collection.get_paths()[0].vertices
+    for name in ("^", "v", "x", "X", "o", "s", "D"):
+        ms = MarkerStyle(name)
+        ref = ms.get_path().transformed(ms.get_transform()).vertices
+        if ref.shape == verts.shape and np.allclose(ref, verts):
+            return name
+    return None
+
+
+def _colour_of(collection):
+    from matplotlib.colors import to_hex
+
+    fc = collection.get_facecolor()
+    rgba = fc[0] if len(fc) else collection.get_edgecolor()[0]
+    return to_hex(rgba)
+
+
+def test_plot_trades_marks_each_side_and_each_exit_distinctly():
+    # A short entry used to be drawn as the green up-triangle buy marker, the same as a
+    # long entry. Inspect the marker and colour actually drawn at each fill.
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from plutobt.portfolio import Trade
+
+    df = pd.DataFrame({"ts": [0, 1, 2, 3], "close": [10.0, 11.0, 12.0, 9.0]})
+    trades = [
+        Trade(entry_ts=0, exit_ts=1, side="long", contracts=1,
+              entry_price=10.0, exit_price=11.0, pnl=1.0),
+        Trade(entry_ts=2, exit_ts=3, side="short", contracts=1,
+              entry_price=12.0, exit_price=9.0, pnl=3.0),
+    ]
+    fig, ax = plt.subplots()
+    plot_trades(df, SimpleNamespace(trades=trades), ax=ax)
+    drawn = {}
+    for c in ax.collections:
+        x, y = c.get_offsets()[0]
+        drawn[(float(x), float(y))] = (_marker_of(c), _colour_of(c))
+    plt.close(fig)
+
+    long_entry, long_exit = drawn[(0.0, 10.0)], drawn[(1.0, 11.0)]
+    short_entry, short_exit = drawn[(2.0, 12.0)], drawn[(3.0, 9.0)]
+    assert long_entry[0] == "^"
+    assert short_entry[0] == "v"                      # a short is a sell, not the buy marker
+    assert short_entry[1] != long_entry[1]            # and a distinct colour
+    assert long_exit[0] not in ("^", "v") and short_exit[0] not in ("^", "v")
+    assert long_exit != short_exit                    # exits tell the sides apart too
+    assert len({long_entry, long_exit, short_entry, short_exit}) == 4
