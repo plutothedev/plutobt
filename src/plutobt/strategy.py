@@ -42,11 +42,15 @@ class Strategy:
       the first bar (``check_causality``).
     - ``on_bar(ctx)`` may use only what ``ctx`` holds: bar t's row (``ctx.bar``), the
       position, equity and the ``ctx.state`` it wrote on earlier bars.
-    - Neither keeps the frame: ``precompute`` is STATELESS, so it never stores ``df``
-      (or anything built from it) on ``self`` for ``on_bar`` to read later: it could
-      index past bar t. ``Engine.run`` refuses a strategy left holding a DataFrame,
-      Series or array as long as the bars (directly, or in a list, tuple or dict
-      attribute); a frame hidden deeper is still outside what any check can see.
+    - Neither keeps the frame: ``precompute`` never stores ``df`` (or anything built
+      from it) on ``self`` for ``on_bar`` to read later, since it holds the bars after t.
+
+    What the automatic check covers, and what it does not: it catches look-ahead in
+    ``precompute`` (a ``.shift(-1)``, a backfill, a centred window, a whole-sample
+    mean), which is the common honest mistake. It is not a sandbox: Python cannot stop
+    code written to cheat, so a strategy that hides the bars somewhere and reads ahead
+    from ``on_bar`` is not caught. Keeping ``on_bar`` to ``ctx`` is the author's side
+    of the contract.
     """
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:

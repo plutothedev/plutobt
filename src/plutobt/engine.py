@@ -126,25 +126,6 @@ def _session_problem(frame: pd.DataFrame) -> str | None:
     return None
 
 
-def _check_no_kept_frame(strategy: Strategy, n: int) -> None:
-    """Refuse a strategy that kept the bar frame (a DataFrame, Series or array as long
-    as the bars, directly or inside a list, tuple or dict attribute) after precompute:
-    on_bar could index the bars after t in it, and no causality check sees that."""
-    for name, value in vars(strategy).items() if hasattr(strategy, "__dict__") else ():
-        inner = value.values() if isinstance(value, dict) else (
-            value if isinstance(value, list | tuple) else ())
-        for held in (value, *inner):
-            if (isinstance(held, pd.DataFrame | pd.Series)
-                    or (isinstance(held, np.ndarray) and held.ndim >= 1)) and len(held) == n:
-                raise FrameError(
-                    f"strategy attribute {name!r} holds a {type(held).__name__} of {n} "
-                    "rows, as long as the bar frame. on_bar must decide from ctx only "
-                    "(ctx.bar is bar t's row; ctx.state carries what it wrote earlier): "
-                    "a frame kept from precompute holds the bars after t, which no check "
-                    "can stop on_bar reading. Put per-bar values in precompute columns"
-                )
-
-
 def _warm_up_end(df: pd.DataFrame, data: pd.DataFrame, signal_cols: list) -> int:
     """The row of the first bar with every signal column set (len(data) if none is):
     the bars before it are the warm-up, where on_bar is skipped. A NaN after it is
@@ -204,10 +185,9 @@ class Engine:
             above 2,000 bars, with a warning; see BacktestConfig)
             and each bar's values must match the full run's; a leak (a ``.shift(-1)``,
             a whole-sample mean) raises LookaheadError naming the column, before any
-            bar runs. ``on_bar`` sees only bar t's row; a strategy left holding
-            a DataFrame, Series or array as long as the bars (directly, or in a
-            list, tuple or dict attribute) after precompute is refused with a
-            FrameError, since on_bar could read ahead in it (see strategy.py).
+            bar runs. It checks precompute only: ``on_bar`` must decide from ``ctx``
+            alone, and no check can stop strategy code written to read ahead some
+            other way (see strategy.py).
         Decision-at-t: ``on_bar`` is called with bar t's data. ``ctx.position`` is
             a copy of the position for the bar: a strategy's writes to it never
             reach the book (stops move with ``ctx.broker.amend_stop``).
@@ -274,7 +254,6 @@ class Engine:
             # strategy's own state from precompute (against the contract, but common)
             # matches the frame the loop runs. The loop keeps the first call's result.
             strategy.precompute(df.copy())
-        _check_no_kept_frame(strategy, len(df))
         session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
         warm_up_end = _warm_up_end(df, data, signal_cols)

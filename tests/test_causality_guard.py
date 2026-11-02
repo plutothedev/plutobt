@@ -219,34 +219,41 @@ def test_an_object_column_that_cannot_be_compared_is_a_frame_error():
 
 
 # ---------------------------------------------------------------------------
-# Review fix (2026-11-02): a strategy may not keep the bar frame for on_bar.
+# Review decision (2026-11-02, second round): the kept-frame refusal is removed. It was
+# bypassable nine ways (a list, a deque, a dict keyed by ts, a closure, a transposed
+# array...) and refused honest strategies, so the boundary is stated instead: the check
+# covers precompute, on_bar must decide from ctx, and cheating code is not sandboxed.
 # ---------------------------------------------------------------------------
 
 class Keeps(Strategy):
-    """Stores ``keep(df)`` on self as ``name``, then reads ahead from it in on_bar."""
-
-    def __init__(self, name, keep):
-        self.name, self.keep = name, keep
+    """Stores the bar frame on self in precompute, as the refused check looked for."""
 
     def precompute(self, df):
-        setattr(self, self.name, self.keep(df))
+        self.df = df.reset_index(drop=True)
         return df
 
 
-@pytest.mark.parametrize(("name", "keep", "kind"), [
-    ("df", lambda d: d.reset_index(drop=True), "DataFrame"),
-    ("closes", lambda d: d["close"], "Series"),
-    ("raw", lambda d: d["close"].to_numpy(), "ndarray"),
-    ("cache", lambda d: [d], "DataFrame"),
-    ("memo", lambda d: {"frame": d}, "DataFrame"),
-], ids=["frame", "series", "ndarray", "in-list", "in-dict"])
-def test_a_strategy_that_keeps_the_bar_frame_is_refused(name, keep, kind):
-    # Probe p03's Hoard: on_bar indexed self.df[k + 2] and made money from the future,
-    # past every check. A kept frame as long as the bars is now refused up front.
-    with pytest.raises(FrameError, match=f"attribute {name!r} holds a {kind} of 60 rows"):
-        _eng().run(_bars(), Keeps(name, keep))
-    with pytest.raises(FrameError, match="on_bar must decide from ctx"):
-        _eng(check_causality=False).run(_bars(), Keeps(name, keep))
+def test_holding_the_bar_frame_is_not_refused_the_check_is_not_a_sandbox():
+    # The documented boundary: storing the frame is against the contract, but no
+    # Python check can stop code written to read ahead from on_bar.
+    assert len(_eng().run(_bars(), Keeps()).equity_curve) == 60
+    assert "not a sandbox" in Strategy.__doc__
+
+
+def test_former_false_positives_of_the_kept_frame_check_run():
+    # A lookup table as long as the bars, and an equity curve kept for plotting then
+    # re-run (probe p_hoard), were refused by the removed check.
+    class Table(Fn):
+        def __init__(self, n):
+            super().__init__(_honest)
+            self.weights = np.linspace(0.0, 1.0, n)
+
+    assert len(_eng().run(_bars(), Table(60)).equity_curve) == 60
+    s = EMACross()
+    df = load_bars(str(ROOT / "data" / "sample" / "nq_5m.json"))
+    first = _eng().run(df, s)
+    s.curve = first.equity_curve
+    assert list(_eng().run(df, s).equity_curve) == list(first.equity_curve)
 
 
 def test_honest_strategies_with_attributes_still_run():
