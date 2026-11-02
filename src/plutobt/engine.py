@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import collections
 import copy
+import functools
 import hashlib
+import inspect
 import keyword
 import math
 import numbers
@@ -244,14 +246,33 @@ def _refuse_class_changes(saved: list) -> None:
             "precompute")
 
 
-def _warn_set_attributes(before: dict, strategy: Strategy) -> None:
+def _bar_free_cached_property(strategy: Strategy, snapshot: Strategy, name: str,
+                              value: tuple) -> bool:
+    """True when ``name`` is a functools.cached_property that a fresh copy of the
+    strategy, which never saw the bars, computes to the same value: a function of the
+    parameters alone, not of the frame."""
+    if not isinstance(inspect.getattr_static(type(strategy), name, None),
+                      functools.cached_property):
+        return False
+    try:
+        fresh = getattr(copy.deepcopy(snapshot), name)
+    except Exception:       # it needs something precompute set: it may read the bars
+        return False
+    return not _changed(_fingerprint(fresh), value)
+
+
+def _warn_set_attributes(before: dict, strategy: Strategy, snapshot: Strategy) -> None:
     """Warn, at the caller of Engine.run, about each attribute the traded precompute
-    set on ``strategy`` (``before`` is its state just before that call)."""
-    for name in _set_since(before, _state(getattr(strategy, "__dict__", {}))):
+    set on ``strategy`` (``before`` is its state just before that call), but a
+    cached_property computed from the parameters alone."""
+    after = _state(getattr(strategy, "__dict__", {}))
+    for name in _set_since(before, after):
+        if _bar_free_cached_property(strategy, snapshot, name, after[name]):
+            continue
         warnings.warn(
-            f"precompute set self.{name} from the full frame; if on_bar uses it, that "
-            "is look-ahead (the check compares precompute's columns, never a value kept "
-            "on self); compute per-bar values as columns instead",
+            f"precompute set self.{name}; if it was computed from the bars, on_bar using "
+            "it is look-ahead (the check compares precompute's columns, never a value "
+            "kept on self): compute per-bar values as columns instead",
             LookaheadWarning, stacklevel=3)
 
 
@@ -409,7 +430,7 @@ class Engine:
             own = _state(getattr(traded, "__dict__", {}))
             data = traded.precompute(df.copy()).reset_index(drop=True)
             _refuse_class_changes(classes)
-            _warn_set_attributes(own, traded)
+            _warn_set_attributes(own, traded, snapshot)
         else:
             data = strategy.precompute(df.copy()).reset_index(drop=True)
         self._check_frame(data, precomputed=True)      # what the strategy made of it

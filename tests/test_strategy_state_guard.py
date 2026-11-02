@@ -6,6 +6,7 @@ self from the full frame (a quantile threshold) is a look-ahead the frame check 
 see if on_bar reads it: warned, naming it. A precompute that fails on a short prefix
 says the check was running and how to get past it.
 """
+import functools
 import pathlib
 import warnings
 
@@ -199,8 +200,9 @@ def test_an_attribute_set_by_precompute_is_warned_naming_it():
     _, caught = _run_recording(StoredThreshold())
     (w,) = caught
     text = str(w.message)
-    assert "precompute set self.thr from the full frame" in text
-    assert "if on_bar uses it, that is look-ahead" in text
+    assert ("precompute set self.thr; if it was computed from the bars, on_bar using "
+            "it is look-ahead") in text
+    assert "from the full frame" not in text   # it may be a name, not a fit
     assert "compute per-bar values as columns instead" in text
     # at the user's Engine.run line, not inside the engine
     assert pathlib.Path(w.filename).resolve() == pathlib.Path(__file__).resolve()
@@ -226,7 +228,39 @@ def test_each_attribute_gets_its_own_warning():
             return d
 
     _, caught = _run_recording(Two())
-    assert sorted(str(w.message).split()[2] for w in caught) == ["self.a", "self.b"]
+    assert sorted(str(w.message).split()[2] for w in caught) == ["self.a;", "self.b;"]
+
+
+def test_a_cached_property_of_a_parameter_is_not_warned():
+    # Computed during precompute but from a parameter alone: a fresh copy that never
+    # saw the bars computes the same value, so it is no look-ahead.
+    class CP(Strategy):
+        span = 5
+
+        @functools.cached_property
+        def alpha(self):
+            return 2 / (self.span + 1)
+
+        def precompute(self, d):
+            return d.assign(x=d.close.ewm(alpha=self.alpha).mean())
+
+    result, caught = _run_recording(CP())
+    assert len(result.equity_curve) == 60 and caught == []
+
+
+def test_a_cached_property_read_from_the_bars_is_warned():
+    class FromBars(Strategy):
+        @functools.cached_property
+        def level(self):
+            return float(self.frame.close.max())
+
+        def precompute(self, d):
+            self.frame = d
+            _ = self.level                  # cached for on_bar: the full frame's max
+            return d.assign(x=d.close.diff())
+
+    _, caught = _run_recording(FromBars())
+    assert sorted(str(w.message).split()[2] for w in caught) == ["self.frame;", "self.level;"]
 
 
 def test_attributes_set_before_the_run_are_not_warned():  # positive control
