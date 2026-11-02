@@ -20,8 +20,18 @@ whatever); this one is just visible to the eye.
 
 A third line runs the same signal through the real PlutoBT Engine with the NQ demo
 costs (configs/nq.toml): decision at bar t, fill at bar t+1's open, slippage and
-commission on every fill, one NQ contract, pending orders cancelled across the
-overnight gap. Its win rate is the closed-trade win rate, net of costs.
+commission on every fill, one NQ contract. Its win rate is the closed-trade win rate,
+net of costs.
+
+Nobody here is flat overnight. At the overnight gap the engine (carry_overnight =
+false) cancels an ENTRY signalled on a session's last bar, but a position already
+open is held across the gap, and an exit signalled on that bar fills at the next
+session's open: the engine line holds 10 positions overnight. The pandas lines hold a
+position across the gap whenever their signal is on at a session's last bar: the
+truth line on 10 of the 19 overnight gaps (the same 10 as the engine), the lie on 9.
+The truth line is left as plain arithmetic, so it differs from the engine's fills in
+one place: it opens a position at a session's first bar on the previous bar's signal
+5 times, entries the engine cancels.
 
 This script is a teaching prop for the video's cold open, not part of the engine.
 

@@ -108,3 +108,45 @@ def test_the_toggle_is_one_shift():
     # cheat position == signal; honest position == signal shifted one bar
     assert not r_cheat.equals(r_honest)
     assert sr_cheat > sr_honest
+
+
+def test_nobody_is_flat_overnight_and_the_docstring_says_so():
+    # Review finding (2026-11-02): the docstring said pending orders were cancelled
+    # across the overnight gap, read as "flat overnight". Nobody is: the engine keeps
+    # an open position (and its exit) across a break, cancelling only entries, and
+    # each pandas line holds whenever its signal is on at a session's last bar. These
+    # pin the counts the docstring states.
+    import json
+
+    from plutobt.engine import Engine
+    from plutobt.instruments import get_instrument
+
+    rows = json.loads(cold_open.SAMPLE.read_text(encoding="utf-8"))
+    ts = pd.Series([r[0] for r in rows])
+    close = pd.Series([r[4] for r in rows], dtype="float64")
+    signal = (close > close.shift(1)).astype("float64")
+    truth = signal.shift(1).fillna(0.0)
+    last = (ts.shift(-1) - ts) > 300                       # a session's last bar
+    first = last.shift(1, fill_value=False)                # the next session's first
+    assert int(last.sum()) == 19
+    assert int((truth[last] == 1.0).sum()) == 10           # truth holds across 10 gaps
+    assert int((signal[last] == 1.0).sum()) == 9           # the lie across 9
+    opened = (truth == 1.0) & first & (truth.shift(1) == 0.0)
+    assert int(opened.sum()) == 5                          # entries the engine cancels
+
+    df = load_bars(str(cold_open.SAMPLE))
+    cfg = load_config(str(cold_open.NQ_CONFIG))
+    result = Engine(get_instrument("NQ"), cfg).run(df, cold_open.GreenBar())
+    day = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(CT).dt.date
+    day_of = dict(zip(df["ts"], day, strict=True))
+    overnight = [t for t in result.trades
+                 if t.exit_ts is not None and day_of[t.entry_ts] != day_of[t.exit_ts]]
+    assert len(overnight) == 10                            # the engine holds 10 overnight
+    firsts = set(ts[first])
+    assert not any(t.entry_ts in firsts for t in result.trades)   # and opens none there
+
+    doc = " ".join(cold_open.__doc__.split())
+    assert "cancelled across the overnight gap" not in doc
+    for claim in ("holds 10 positions overnight", "on 10 of the 19 overnight gaps",
+                  "the lie on 9", "5 times"):
+        assert claim in doc, claim
