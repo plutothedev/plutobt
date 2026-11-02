@@ -3258,7 +3258,7 @@
     "expectancy": 27.602739726027394,
     "exposure": 0.595679012345679,
     "max_drawdown_depth": -0.027650222233136068,
-    "max_drawdown_duration": 309,
+    "max_drawdown_duration": 511,
     "n_trades": 73,
     "periods_per_year": 20412.0,
     "profit_factor": 1.2693850267379678,

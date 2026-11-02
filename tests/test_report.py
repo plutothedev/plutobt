@@ -425,7 +425,10 @@ def _dd_result(values):
     ([100, 110, 90, 111], False),           # recovered on the last bar
     ([100, 110, 80, 111, 105], False),      # deepest recovered; a later shallow one did not
     ([100, 101, 102], False),               # no drawdown at all
-    ([100, 80, 100, 80], True),             # two equally deep; the later one is still open
+    ([100, 80, 100, 80], False),            # longest stretch (2 bars) recovered; 1 bar open
+    ([100, 90, 90, 100, 95, 95, 95], True),   # the open stretch ties the longest: open wins
+    ([100, 99, 99, 99, 100, 50], False),    # the deepest dip is open but the longest is not
+    ([100, 50, 100, 99, 99, 99], True),     # a shallow open stretch outlasts the deep dip
 ])
 def test_an_unrecovered_drawdown_duration_says_so(values, flagged):
     text = format_report(_dd_result(values), symbol="NQ")
@@ -442,23 +445,33 @@ def test_max_drawdown_recovered_helper():
     assert max_drawdown_recovered(pd.Series([], dtype=float)) is True
 
 
-def test_an_equally_deep_open_drawdown_is_the_one_reported():
-    # Ties used to pick the first (recovered) episode while an equally deep later one
-    # was open. Any deepest episode still open means "not recovered", and the duration
-    # is that open episode's, from its peak to the last bar (a lower bound).
+def test_max_dd_duration_is_the_longest_stretch_below_a_prior_peak():
+    # Duration is the longest time below a prior equity peak, at any depth, from the
+    # peak to the bar that regains it (to the last bar while still below). "Not
+    # recovered" means that longest stretch is still open at the end; an open stretch
+    # as long as the longest recovered one counts as the longest.
     from plutobt.metrics import max_drawdown, max_drawdown_recovered
 
     eq = pd.Series([100.0, 80.0, 100.0, 80.0])
+    assert max_drawdown(eq) == (pytest.approx(-0.2), 2)
+    assert max_drawdown_recovered(eq) is True
+    eq = pd.Series([100.0, 90.0, 90.0, 100.0, 95.0, 95.0, 95.0])
+    assert max_drawdown(eq)[1] == 3
     assert max_drawdown_recovered(eq) is False
-    assert max_drawdown(eq) == (pytest.approx(-0.2), 1)
-    # equal depth (30%) on a different peak: 3.5/5 - 1 rounds a hair deeper than
-    # 4.2/6 - 1, which must not make the open episode count as shallower
-    eq = pd.Series([5.0, 3.5, 5.0, 6.0, 4.2])
-    assert max_drawdown_recovered(eq) is False
-    assert max_drawdown(eq)[1] == 1
-    # control: the deeper episode recovered, the open one is shallower
-    assert max_drawdown_recovered(pd.Series([100.0, 80.0, 100.0, 85.0])) is True
-    assert max_drawdown(pd.Series([100.0, 80.0, 100.0, 85.0])) == (pytest.approx(-0.2), 2)
+    # the deepest dip is still open, but shorter than a recovered shallow stretch
+    eq = pd.Series([100.0, 99.0, 99.0, 99.0, 100.0, 50.0])
+    assert max_drawdown(eq) == (pytest.approx(-0.5), 4)
+    assert max_drawdown_recovered(eq) is True
+
+
+def test_max_dd_duration_label_says_what_it_measures():
+    dur = _line(format_report(_dd_result([100, 110, 90, 111]), symbol="NQ"),
+                "Max DD duration")
+    assert dur == "Max DD duration = 2 bars   (longest time below a prior peak)"
+    dur = _line(format_report(_dd_result([100, 110, 90, 95]), symbol="NQ"),
+                "Max DD duration")
+    assert dur == ("Max DD duration = 2 bars   (longest time below a prior peak)"
+                   "   (not recovered by the last bar)")
 
 
 def test_psr_label_does_not_claim_a_probability_of_the_true_sharpe():

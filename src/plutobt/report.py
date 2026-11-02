@@ -120,8 +120,9 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         calmar_str = f"n/a (needs >= 1 year; this run covers {_days(days)} trading days)"
     else:
         calmar_str = _num(calmar, ".3f", nan=no_vol, inf="inf (no drawdown)")
-    # The deepest drawdown may still be open at the last bar: its duration is then a
-    # lower bound, not a finished episode.
+    # The duration is the longest time below a prior peak, at any depth (not the
+    # deepest drawdown's period). It may still be open at the last bar: it is then a
+    # lower bound, not a finished period.
     dd_open = ("   (not recovered by the last bar)"
                if not max_drawdown_recovered(result.equity_curve) else "")
     expectancy_str = (f"{expectancy:.3f}   ($ per closed trade, net of costs)"
@@ -156,7 +157,7 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"Win rate      = {win_rate_str}",
         f"Avg R         = {avg_r_str}",
         f"Max DD depth  = {dd_depth:.6f}",
-        f"Max DD duration = {dd_dur} bars{dd_open}",
+        f"Max DD duration = {dd_dur} bars   (longest time below a prior peak){dd_open}",
         f"Trades        = {n_trades}   (closed)",
         f"Open at end   = {n_open}"
         + (" (marked to last close, excluded from trade stats)" if n_open else ""),

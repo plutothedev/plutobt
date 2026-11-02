@@ -167,59 +167,54 @@ def sortino(returns: pd.Series, mar: float, periods_per_year: float) -> float:
 def max_drawdown(equity: pd.Series) -> tuple[float, int]:
     """Max drawdown depth (signed fraction, <= 0) and duration in bars.
 
-    Depth = min over t of equity_t / running_peak_t - 1.
-    Duration = duration of the deepest drawdown episode (peak-to-recovery);
-    if it never recovers, runs to the last bar. Of equally deep episodes the first
-    is measured, unless one is still open at the last bar: then that one. Positional
-    (integer) bar distance is used, independent of the index dtype.
+    Depth = min over t of equity_t / running_peak_t - 1: the deepest drawdown.
+    Duration = the longest period spent below a prior equity peak, regardless of
+    depth (the standard max drawdown duration; it need not be the deepest drawdown's
+    period). A period runs from the peak bar to the first bar that regains the peak,
+    or to the last bar while still below it. Positional (integer) bar distance is
+    used, independent of the index dtype.
     """
-    depth, duration, _ = _deepest_drawdown(equity)
-    return (depth, duration)
+    return (_depth(equity), _longest_underwater(equity)[0])
 
 
 def max_drawdown_recovered(equity: pd.Series) -> bool:
-    """Whether the deepest drawdown (the one ``max_drawdown`` measures) regained its
-    peak by the last bar. False when any episode of that depth is still open (even if
-    an earlier, equally deep one recovered): its duration then runs to the last bar and
-    is a lower bound, not a finished episode. True with no drawdown at all."""
-    return _deepest_drawdown(equity)[2]
+    """Whether the longest period below a prior peak (the one ``max_drawdown``'s
+    duration measures) regained its peak by the last bar. False when that period is
+    still open at the end, including an open period exactly as long as the longest
+    recovered one: the duration then runs to the last bar and is a lower bound, not a
+    finished period. True with no drawdown at all."""
+    return _longest_underwater(equity)[1]
 
 
-def _deepest_drawdown(equity: pd.Series) -> tuple[float, int, bool]:
-    """(depth, duration in bars, recovered) of the deepest drawdown episode; the one
-    computation behind ``max_drawdown`` and ``max_drawdown_recovered``."""
+def _depth(equity: pd.Series) -> float:
+    eq = np.asarray(equity, dtype=float)
+    if eq.size == 0:
+        return 0.0
+    return float((eq / np.maximum.accumulate(eq) - 1.0).min())
+
+
+def _longest_underwater(equity: pd.Series) -> tuple[int, bool]:
+    """(duration in bars, recovered) of the longest period below a prior equity peak;
+    the one computation behind ``max_drawdown``'s duration and
+    ``max_drawdown_recovered``."""
     eq = np.asarray(equity, dtype=float)
     n = eq.size
     if n == 0:
-        return (0.0, 0, True)
-    running_max = np.maximum.accumulate(eq)
-    dd = eq / running_max - 1.0
-    depth = float(dd.min())
-    if depth == 0.0:
-        return (0.0, 0, True)
-    trough_pos = int(dd.argmin())
-    # Equally deep episodes (to rounding): an open one at the end wins the tie, so a
-    # drawdown that has not recovered is never reported as recovered.
-    if dd[-1] < 0.0:
-        open_from = int(np.flatnonzero(dd == 0.0)[-1]) + 1 if (dd == 0.0).any() else 0
-        tail = dd[open_from:]
-        if tail.min() <= depth + 1e-12 * abs(depth):
-            trough_pos = open_from + int(tail.argmin())
-    # Peak position: last index at/before the trough where equity == running_max.
-    peak_val = running_max[trough_pos]
-    peak_pos = trough_pos
-    while peak_pos > 0 and eq[peak_pos] < peak_val:
-        peak_pos -= 1
-    # Recovery: first bar after the trough whose equity regains the peak.
-    recovery_pos = n - 1
-    recovered = False
-    for j in range(trough_pos + 1, n):
-        if eq[j] >= peak_val:
-            recovery_pos = j
-            recovered = True
-            break
-    duration = recovery_pos - peak_pos
-    return (depth, int(duration), recovered)
+        return (0, True)
+    at_peak = eq >= np.maximum.accumulate(eq)
+    longest, recovered = 0, True
+    peak_pos = 0
+    for j in range(1, n):
+        if at_peak[j]:
+            # A period below the peak at peak_pos ends here when bars between were below.
+            if j - peak_pos > 1 and j - peak_pos > longest:
+                longest, recovered = j - peak_pos, True
+            peak_pos = j
+    if not at_peak[-1] and (n - 1) - peak_pos >= longest:
+        # Still below at the last bar: an open period at least as long as every
+        # recovered one is the longest, and is reported as not recovered.
+        longest, recovered = (n - 1) - peak_pos, False
+    return (int(longest), recovered)
 
 
 def trailing_hwm_drawdown(equity: pd.Series) -> float:

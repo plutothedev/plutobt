@@ -353,6 +353,28 @@ def test_max_drawdown_unrecovered_runs_to_end():
     assert duration == 3  # idx4 - idx1
 
 
+def test_max_drawdown_duration_is_the_longest_time_under_water_at_any_depth():
+    # A deep, quick dip (0 -> 2: 2 bars) and a shallow, slow one (2 -> 7: 5 bars). Depth
+    # is the deep one's; duration is the longest stretch below a prior peak, the
+    # shallow one's, regardless of depth.
+    eq = pd.Series([100, 50, 100, 99, 99, 99, 99, 100], dtype=float)
+    depth, duration = max_drawdown(eq)
+    assert_allclose(depth, -0.5, rtol=0, atol=1e-12)
+    assert duration == 5
+
+
+def test_max_drawdown_duration_counts_an_open_stretch_to_the_last_bar():
+    # The deepest dip is still open at the end but short (5 -> 6: 1 bar); the longest
+    # stretch under water (0 -> 5: 5 bars) recovered.
+    eq = pd.Series([100, 99, 99, 99, 99, 100, 50], dtype=float)
+    depth, duration = max_drawdown(eq)
+    assert_allclose(depth, -0.5, rtol=0, atol=1e-12)
+    assert duration == 5
+    # An open stretch longer than every recovered one is the duration, to the last bar.
+    eq = pd.Series([100, 90, 100, 99, 99, 99, 99], dtype=float)
+    assert max_drawdown(eq)[1] == 4
+
+
 def test_max_drawdown_monotonic_up_is_zero():
     eq = pd.Series([100, 101, 102, 103], dtype=float)
     depth, duration = max_drawdown(eq)
