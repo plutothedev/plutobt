@@ -23,7 +23,7 @@ class BacktestConfig:
     break_on: str = "gap"
     # What a margin call does (spec §5.2): at a bar's close, equity below the
     # maintenance margin of the held contracts records a MarginCall (the call restores
-    # to INITIAL margin; no deposit is ever invented), then:
+    # to INITIAL margin; no deposit is ever invented), once per breach, then:
     # "liquidate" (default): a forced market exit of the whole position fills at the
     #   next bar's open; its Trade carries margin_liquidation=True.
     # "record": the event only; the position is kept, so the breach can be studied.

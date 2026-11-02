@@ -208,6 +208,9 @@ class Portfolio:
         None when there is no attached stop or the per-contract risk is zero
         (§0.4). ``contracts`` is the unsigned number of contracts the ``pnl``
         is measured over.
+
+        Convention: after a scale-in, risk is |blended avg_price - the FIRST entry's
+        initial_stop|; a scale-in's own attached stop moves the resting stop, not R.
         """
         avg = self.position.avg_price
         initial_stop = self.position.initial_stop
