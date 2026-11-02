@@ -16,7 +16,7 @@ import pandas as pd
 from plutobt import __version__
 from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
-from plutobt.data import assert_positive_prices
+from plutobt.data import assert_positive_prices, ohlcv_problem, ts_unit_problem
 from plutobt.instruments import Instrument
 from plutobt.lookahead import (
     _ROW_RULE,
@@ -62,9 +62,9 @@ _SAMPLE_SHA256 = {
 }
 _ROLL_UNKNOWN = "unknown/user-supplied"
 
-# The time-order rule, quoted by every refusal of a frame's bar order.
-_TIME_RULE = ("bar timestamps (the 'ts' column, in unix seconds) must strictly increase, "
-              "since the engine runs the bars in row order")
+# The time rule, quoted by every refusal of a frame's bar timestamps.
+_TIME_RULE = ("bar timestamps (the 'ts' column, in whole unix seconds) must strictly "
+              "increase, since the engine runs the bars in row order")
 
 # The column-name rule, quoted by every refusal of a frame's column names.
 _COLUMN_RULE = ("every column name must be a Python identifier that does not start with "
@@ -94,6 +94,13 @@ def _time_problem(frame: pd.DataFrame) -> str | None:
                     "of unix seconds")
         if i and not value > ts[i - 1]:      # written so that a NaN ts is refused too
             return f"row {i} (ts {value}) is not after row {i - 1} (ts {ts[i - 1]})"
+    for i, value in enumerate(ts):
+        # Whole seconds, so a Fill's int ts is exact; and seconds, not milliseconds.
+        if not (math.isfinite(value) and float(value).is_integer()):
+            return f"row {i} holds ts {value!r}, not a whole number of unix seconds"
+        unit = ts_unit_problem(value)
+        if unit is not None:
+            return f"row {i} holds {unit}"
     return None
 
 
@@ -194,10 +201,14 @@ class Engine:
 
         Checks first: a bad config (``break_on``; a commission, slippage or
             periods_per_year that is not finite) and a bad ``df`` (bar timestamps
-            that are not numbers of unix seconds or do not strictly increase; a
-            column name that is not a Python identifier; in session mode, a bad
-            ``session`` column; any price <= 0 unless ``allow_nonpositive_prices``)
-            are refused with a ValueError before the strategy's ``precompute`` runs.
+            that are not whole unix seconds (a ts of 1e11 or more is named as the
+            milliseconds, microseconds or nanoseconds it looks like) or do not
+            strictly increase; a column name that is not a Python identifier; in
+            session mode, a bad ``session`` column; an open, high, low, close or
+            volume that is not a finite number, or a bar whose high or low does not
+            hold its open and close; any price <= 0 unless
+            ``allow_nonpositive_prices``) are refused with a ValueError, naming the
+            row and column, before the strategy's ``precompute`` runs.
             The same frame checks run on what ``precompute`` returns, and a frame
             it broke raises FrameError, naming it; so does a
             precompute that drops, adds or reorders rows, or changes a base column
@@ -262,6 +273,14 @@ class Engine:
         """
         self._check_config()
         self._check_frame(df, precomputed=False)       # the caller's own frame
+        problem = ohlcv_problem(df)
+        if problem is not None:
+            raise ValueError(
+                f"{problem}. The fills read these prices, so every bar needs finite "
+                "open, high, low, close (and volume), with low <= min(open, close) and "
+                "high >= max(open, close): a NaN compares false against every stop and "
+                "limit, so it would silently fill nothing. validate_bars(df) lists every "
+                "bad row")
         if not self.config.allow_nonpositive_prices:
             try:
                 assert_positive_prices(df)
@@ -303,6 +322,7 @@ class Engine:
 
         # Build a namedtuple Row type from the (potentially augmented) column list.
         Row = collections.namedtuple("Row", list(data.columns))
+        ts_at = list(data.columns).index("ts")
 
         equity_index: list[int] = []
         equity_vals: list[float] = []
@@ -314,7 +334,11 @@ class Engine:
         prev = None
         for t in range(n):
             row = data.iloc[t]
-            bar = Row(*[row[c] for c in data.columns])
+            values = [row[c] for c in data.columns]
+            # ts as a Python int (a whole number, checked above): iloc reads an
+            # all-numeric row as float64, which made every Fill and Trade ts a float.
+            values[ts_at] = int(values[ts_at])
+            bar = Row(*values)
 
             # Fill the order placed on bar t-1 against THIS bar's open (and stops
             # against this bar's range) before anything reads the book for bar t, so

@@ -435,7 +435,9 @@ def test_on_bar_sees_the_fill_at_its_own_bars_open():
     # with ctx.equity marked at close t.
     nq = get_instrument("NQ")
     eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
-    df = _ohlc([(100, 100, 100, 100), (100, 100, 100, 105), (105, 105, 105, 105)])
+    # (bar 1's high was 100 under a 105 close; bars are now refused unless they hold
+    # their body)
+    df = _ohlc([(100, 100, 100, 100), (100, 105, 100, 105), (105, 105, 105, 105)])
     strat = _Script({0: lambda c: c.broker.buy(contracts=1)})
     eng.run(df, strat)
     assert strat.seen[0] == (0, pytest.approx(100_000.0))
@@ -694,3 +696,93 @@ def test_allow_nonpositive_prices_runs_a_frame_that_traded_below_zero():
                                     commission_per_side=0.0, on_margin_call="record"))
     (t,) = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1)})).trades
     assert t.entry_price == 10.0 and t.pnl == pytest.approx(-15.0 * cl.point_value)
+
+
+# ---------------------------------------------------------------------------
+# Trade timestamps are ints, whatever the frame's dtypes: iloc on an all-numeric frame
+# reads a row as float64, which once made entry_ts/exit_ts 1700000300.0.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("with_label", [False, True], ids=["all-numeric", "mixed"])
+def test_trade_timestamps_are_ints(with_label):
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 4, ts0=1_700_000_000)
+    if with_label:
+        df["session"] = "RTH"          # an object column keeps the row mixed (control)
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0))
+    trades = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1),
+                                  1: lambda c: c.broker.close(),
+                                  2: lambda c: c.broker.buy(contracts=1)})).trades
+    assert [(t.entry_ts, t.exit_ts) for t in trades] == [
+        (1_700_000_300, 1_700_000_600), (1_700_000_900, None)]
+    # a Python int: numpy's int64 and float64 are not int subclasses
+    assert all(isinstance(t.entry_ts, int) for t in trades)
+    assert isinstance(trades[0].exit_ts, int)
+
+
+# ---------------------------------------------------------------------------
+# Base OHLCV must be finite, numeric and self-consistent: NaN <= stop is False, so a NaN
+# low once disabled a stop without a word.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("col", ["open", "high", "low", "close", "volume"])
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf], ids=["nan", "inf", "-inf"])
+def test_a_non_finite_base_value_is_refused_naming_row_and_column(col, bad):
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 4)
+    df["volume"] = df["volume"].astype("float64")
+    df.loc[2, col] = bad
+    with pytest.raises(ValueError, match=rf"column '{col}' at row 2 .*not a finite number"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+def test_a_nan_low_no_longer_disables_a_stop():
+    # The auditor's case: through Engine.run the NaN is refused before any bar runs.
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100), (100, 101, 99, 100), (100, 101, 90, 95)])
+    df.loc[2, "low"] = np.nan
+    with pytest.raises(ValueError, match="column 'low' at row 2"):
+        Engine(nq, BacktestConfig()).run(
+            df, _Script({0: lambda c: c.broker.buy(contracts=1, stop=98.0)}))
+
+
+def test_a_text_price_column_is_refused():
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 3)
+    df["close"] = df["close"].astype(str)
+    with pytest.raises(ValueError, match="column 'close' holds .*not numbers"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+@pytest.mark.parametrize("row, what", [
+    ((100, 99.5, 99, 100), r"high 99\.5 is below max\(open, close\) 100"),
+    ((100, 101, 100.5, 101), r"low 100\.5 is above min\(open, close\) 100"),
+], ids=["high-below-body", "low-above-body"])
+def test_an_inconsistent_bar_is_refused(row, what):
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100), row, (100, 101, 99, 100)])
+    with pytest.raises(ValueError, match=rf"row 1 \(ts 300\): {what}"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+def test_a_bar_that_touches_its_body_is_consistent():  # positive control
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100), (100, 101, 100, 101), (101, 101, 101, 101)])
+    Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+def test_a_millisecond_ts_is_refused_naming_the_unit():
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 3, ts0=1_772_461_800_000, step=300_000)
+    with pytest.raises(ValueError, match=r"row 0 holds ts 1772461800000 looks like "
+                                         r"milliseconds.*divide the ts by 1,000"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+def test_a_fractional_ts_is_refused():
+    # Trade timestamps are ints, so a ts that is not a whole second has no exact one.
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 3)
+    df["ts"] = df["ts"].astype("float64") + 0.5
+    with pytest.raises(ValueError, match=r"row 0 holds ts 0\.5, not a whole number"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
