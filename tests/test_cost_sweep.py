@@ -44,6 +44,39 @@ def test_it_is_a_cost_sweep_not_a_parameter_sweep(table):
     # The demo strategy keeps the parameters it ships with on every row.
     assert (EMACross.fast_span, EMACross.slow_span, EMACross.stop_ticks) == (20, 50, 20.0)
     assert set(table["n_trades"]) == {73}
+    assert set(table["n_open"]) == {1}
+
+
+# Every row as it prints (review, 2026-11-02: only the 1-tick row was pinned, through
+# the demo run): final equity, Sharpe, PF, expectancy, closed trades, open at the end.
+ROWS = {
+    0.0: (102_907.50, 2.374, 1.401, 37.60),
+    1.0: (102_172.50, 1.793, 1.269, 27.60),
+    2.0: (101_437.50, 1.212, 1.158, 17.60),
+    4.0: (99_967.50, 0.055, 0.981, -2.40),
+}
+
+
+@pytest.mark.parametrize("ticks", ROWS)
+def test_every_row_is_pinned(table, ticks):
+    equity, sharpe, pf, expectancy = ROWS[ticks]
+    row = table.loc[ticks]
+    assert row["final_equity"] == pytest.approx(equity, abs=0.005)
+    assert row["sharpe"] == pytest.approx(sharpe, abs=0.0005)
+    assert row["profit_factor"] == pytest.approx(pf, abs=0.0005)
+    assert row["expectancy"] == pytest.approx(expectancy, abs=0.005)
+    assert (row["n_trades"], row["n_open"], row["fills"]) == (73, 1, 147)
+
+
+def test_each_tick_costs_one_tick_value_per_fill(table):
+    # 73 round trips are 146 fills, plus the open position's entry: 147 fills. A tick
+    # of slippage on each is 147 x $5 = $735 of final equity, the step between rows
+    # (68 x 2 x $5 = $680 never matched the $685 step on screen before the fix).
+    eq = table["final_equity"]
+    step = 147 * 5.0
+    assert eq[0.0] - eq[1.0] == pytest.approx(step)
+    assert eq[1.0] - eq[2.0] == pytest.approx(step)
+    assert eq[2.0] - eq[4.0] == pytest.approx(2 * step)
 
 
 def test_the_one_tick_row_is_the_nq_demo_run(table):
@@ -64,3 +97,9 @@ def test_the_printed_table_says_what_it_is(table, monkeypatch):
     assert "IN-SAMPLE" in out
     for ticks in ("0 ticks", "1 ticks", "2 ticks", "4 ticks"):
         assert ticks in out
+    # The open position is on screen, so the fills behind the step can be counted.
+    assert out.count("73 + 1 open") == 4
+    lines = out.splitlines()
+    step = lines.index("Each tick of slippage per side costs $5.00 x 147 fills")
+    assert lines[step + 1] == "  (73 round trips x 2 + 1 open entry) = $735.00 of final equity."
+    assert '"+ 1 open": a position still open at the end' in out
