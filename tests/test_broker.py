@@ -232,7 +232,8 @@ def test_short_stop_gap_through_fills_at_open_above_stop():  # §10.3 symmetric 
 
 
 # ---------------------------------------------------------------------------
-# M5.7 — Limit fills at limit-or-better-at-open with NO slippage
+# M5.7 — A resting limit fills at its limit with NO slippage; one the open trades
+# through is marketable and fills like a market order, capped by its limit
 # ---------------------------------------------------------------------------
 
 def test_buy_limit_fills_at_limit_when_bar_trades_through():
@@ -245,13 +246,13 @@ def test_buy_limit_fills_at_limit_when_bar_trades_through():
     assert pf.position.qty == 1
 
 
-def test_buy_limit_fills_better_at_open_on_favorable_gap():
+def test_buy_limit_marketable_on_a_gap_down_fills_at_the_open_plus_slippage():
     broker, inst, pf = make_broker(slippage_ticks=1.0)
     broker.buy(contracts=1, limit=14_950.0)
-    # bar opens BELOW the limit -> price improves to the open
+    # bar opens BELOW the limit: marketable, so it fills like a market order there
     bar = Bar(ts=1000, open=14_900.0, high=14_960.0, low=14_890.0, close=14_955.0)
     fills = broker.fill_pending(bar)
-    assert fills[0].price == 14_900.0     # better-at-open, NO slippage
+    assert fills[0].price == 14_900.25    # the open + 1 tick, under the 14,950 cap
     assert pf.position.qty == 1
 
 
@@ -265,7 +266,7 @@ def test_buy_limit_does_not_fill_when_price_never_reaches():
     assert broker.pending is not None     # rests for the next bar
 
 
-def test_sell_limit_fills_at_limit_or_better_at_open():
+def test_sell_limit_fills_at_limit_or_at_the_open_less_slippage():
     broker, inst, pf = make_broker(slippage_ticks=1.0)
     broker.sell(contracts=1, limit=15_050.0)
     bar = Bar(ts=1000, open=15_000.0, high=15_060.0, low=14_990.0, close=15_040.0)
@@ -277,7 +278,7 @@ def test_sell_limit_fills_at_limit_or_better_at_open():
     broker2.sell(contracts=1, limit=15_050.0)
     gap = Bar(ts=1000, open=15_100.0, high=15_120.0, low=15_080.0, close=15_110.0)
     fills2 = broker2.fill_pending(gap)
-    assert fills2[0].price == 15_100.0    # better-at-open on favorable gap-up
+    assert fills2[0].price == 15_099.75   # marketable on the gap-up: open - 1 tick
 
 
 # ---------------------------------------------------------------------------
@@ -770,9 +771,9 @@ def test_refused_market_order_still_leaves_the_held_stop_live():
 
 
 def test_limit_flip_keeps_adverse_first():
-    # A limit's fill time inside the bar is unknowable, so the held stop is checked
-    # first (adverse first, section 5.4): stop sells 1 at 95, then the sell limit,
-    # re-sized to its new side, sells 1 at 99 on the bar's high.
+    # The path runs to the long's adverse extreme first (section 5.4): down to 90, so
+    # the stop sells 1 at 95, then up to 100, where the sell limit, re-sized to its new
+    # side, sells 1 at 99.
     broker, inst, pf = make_broker(slippage_ticks=0.0)
     broker.buy(contracts=1, stop=95.0)
     broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))

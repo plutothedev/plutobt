@@ -231,23 +231,6 @@ class Broker:
             return "short"
         return None
 
-    def _stop_triggered(self, pos_side: str, stop: float, bar) -> bool:
-        if pos_side == "long":
-            return bar.low <= stop      # sell-stop protecting a long
-        return bar.high >= stop         # buy-stop protecting a short
-
-    def _stop_fill_price(self, pos_side: str, stop: float, live_from: float) -> float:
-        # live_from: the first price the stop could see (the bar's open, or for a stop
-        # armed inside the bar, the price it went live at)
-        slip = self._slip_amount()
-        if pos_side == "long":
-            # exit is a SELL; worse = lower of (stop, open), slippage subtracts
-            ref = min(stop, live_from)
-            return ref - slip
-        # exit is a BUY; worse = higher of (stop, open), slippage adds
-        ref = max(stop, live_from)
-        return ref + slip
-
     def _open_through_stop(self, open_px: float) -> bool:
         """True when the bar opens at or beyond the held position's resting stop (a
         gap-through: the stop is triggered by the open itself)."""
@@ -257,32 +240,74 @@ class Broker:
             return False
         return open_px <= stop if pos_side == "long" else open_px >= stop
 
-    def _fire_resting_stop(self, bar, live_from: float | None = None) -> list[Fill]:
-        fills: list[Fill] = []
-        stop = self.resting_stop
-        pos_side = self._position_side()
-        if stop is None or pos_side is None:
-            return fills
-        if not self._stop_triggered(pos_side, stop, bar):
-            return fills
-        exit_side = "sell" if pos_side == "long" else "buy"
-        contracts = abs(self.portfolio.position.qty)
-        price = self._stop_fill_price(pos_side, stop,
-                                      bar.open if live_from is None else live_from)
-        fills.append(self._emit_fill(bar.ts, exit_side, contracts, price))
-        self.resting_stop = None        # GTC stop consumed -> auto-cancel
-        return fills
-
-    def _limit_fill(self, order: Order, bar) -> float | None:
-        limit = order.price
+    @staticmethod
+    def _marketable(order: Order, open_px: float) -> bool:
+        """True for a limit already at or through the market at the open: a buy limit
+        at or above the open, a sell limit at or below it."""
         if order.side == "buy":
-            if bar.low <= limit:                 # traded through
-                return min(limit, bar.open)      # better-at-open on gap-down
+            return open_px <= order.price
+        return open_px >= order.price
+
+    def _open_fill_price(self, order: Order, open_px: float) -> float:
+        """An order filled at the open: the open plus slippage against the order, for a
+        market order and a marketable limit alike, the limit capping the latter (a buy
+        never pays above its limit, a sell never takes below it)."""
+        price = self._market_fill_price(order.side, open_px)
+        if order.kind == "limit":
+            price = min(order.price, price) if order.side == "buy" else max(order.price, price)
+        return price
+
+    def _fire_stop(self, ts, at: float) -> Fill:
+        """Fill the held position's resting stop, triggered at ``at`` (its own price, or
+        the price it went live at when that was already beyond it), less slippage
+        against the exit. Firing consumes the stop, so it fills at most once."""
+        long = self._position_side() == "long"
+        slip = self._slip_amount()
+        fill = self._emit_fill(ts, "sell" if long else "buy",
+                               abs(self.portfolio.position.qty),
+                               at - slip if long else at + slip)
+        self.resting_stop = None        # GTC stop consumed -> auto-cancel
+        return fill
+
+    def _after_stop(self, order: Order | None, stopped: Fill) -> Order | None:
+        """The pending order once the stop has flattened the position it was sized
+        against. A flip (same side as the stop's exit, more contracts than it closed)
+        already has its closing half done, so it keeps just its new side: an entry from
+        flat, margin-checked when it fills. Anything else (an exit, a scale-in, a forced
+        liquidation) is stale and cancelled."""
+        if order is None:
             return None
-        # sell limit
-        if bar.high >= limit:
-            return max(limit, bar.open)          # better-at-open on gap-up
+        if order.side == stopped.side and order.contracts > stopped.contracts:
+            order.contracts -= stopped.contracts
+            return order
+        order.status = "cancelled"
+        self.pending = None
         return None
+
+    def _execute(self, order: Order, ts, price: float, mark: float) -> Fill | None:
+        """Fill ``order`` at ``price`` if allow_short and margin (marked at ``mark``)
+        admit it, else it is "rejected" (None). A filled order's attached stop becomes
+        the resting stop, live from this fill."""
+        order = self._admit(order, float(price), mark)
+        if order is None:
+            return None
+        prior_side = self._position_side()
+        fill = self._emit_fill(ts, order.side, order.contracts, price,
+                               margin_liquidation=order.margin_liquidation)
+        order.status = "filled"
+        self.pending = None
+        self._drop_stop_on_flip(prior_side)
+        # An attached stop protects the position the fill leaves. A fill that flattens
+        # leaves none, and its stop must not become the NEXT position's initial_stop
+        # (that trade's R would read it).
+        if order.attached_stop is not None and self.portfolio.position.qty != 0:
+            self.resting_stop = order.attached_stop
+            # §0.4: initial_stop is set on the position this fill opened or flipped; a
+            # scale-in keeps the one it has.
+            pos = self.portfolio.position
+            if pos.initial_stop is None:
+                pos.initial_stop = order.attached_stop
+        return fill
 
     def _is_reducing(self, order: Order) -> bool:
         qty = self.portfolio.position.qty
@@ -350,98 +375,114 @@ class Broker:
         self.pending = None
         return None
 
+    @staticmethod
+    def _touch(cur: float, end: float, level: float, falling: bool) -> float | None:
+        """Where a move from ``cur`` to ``end`` first reaches ``level``, for an order
+        that triggers at or below its price (``falling``: a sell stop, a buy limit) or
+        at or above it (a buy stop, a sell limit): ``cur`` itself when the price is
+        already there, None when the move never gets there."""
+        if falling:
+            if cur <= level:
+                return cur
+            return level if end <= level else None
+        if cur >= level:
+            return cur
+        return level if end >= level else None
+
+    def _next_on_leg(self, cur: float, end: float,
+                     order: Order | None) -> tuple[float, str] | None:
+        """The first resting order the move from ``cur`` to ``end`` triggers, as (the
+        price it triggers at, "stop" or "limit"); None if neither. At the same price
+        the stop goes first (adverse first)."""
+        hits = []
+        side = self._position_side()
+        if self.resting_stop is not None and side is not None:
+            at = self._touch(cur, end, self.resting_stop, falling=side == "long")
+            if at is not None:
+                hits.append((abs(at - cur), 0, at, "stop"))
+        if order is not None:
+            at = self._touch(cur, end, order.price, falling=order.side == "buy")
+            if at is not None:
+                hits.append((abs(at - cur), 1, at, "limit"))
+        if not hits:
+            return None
+        _, _, at, what = min(hits)
+        return at, what
+
     def fill_pending(self, next_bar) -> list[Fill]:
-        if self.pending is not None:
+        """Fill against one bar: the pending order and the resting stop, walked along
+        the bar's prices in time order.
+
+        1. The open. If the open is at or beyond the held position's stop
+           (gap-through), the stop fills at the open first. Then the pending order
+           fills at the open if it is a MARKET order or a marketable LIMIT (a buy limit
+           at or above the open, a sell limit at or below it), both like a market
+           order: the open plus slippage against the order, a marketable limit capped
+           by its limit (a buy at min(limit, open + slip), a sell at
+           max(limit, open - slip)). So a limit through the market is no free market
+           order.
+        2. The path. From the open the price travels to the adverse extreme for the
+           position held after the open (down to the low for a long, up to the high
+           for a short), then to the other extreme. Flat, the first leg runs toward the
+           pending limit (down for a buy limit, up for a sell limit), which is also the
+           adverse direction for the position that limit would open. Along each leg
+           every resting order triggers in the order the path crosses its price: a
+           resting LIMIT fills at its price with no slippage (it waits in the book and
+           the market comes to it; one the open already trades through is marketable,
+           above), the held STOP fills at its price less slippage against the exit. A
+           stop and a limit at the same price: the stop first (adverse first). No
+           order can trigger twice: a fill consumes the order, a stop fills once.
+
+        A fill can arm a stop on the way: an order's attached stop (or one set with
+        amend_stop while flat) is live from that fill (from the open for an order
+        filled at the open) and is checked on the rest of the path. A stop already
+        beyond the price it went live at fills there (the open's gap-through is the
+        same rule), never at its better stop price. A stop that flattens the position
+        leaves the pending order sized against a position that is gone: a flip keeps
+        only its new side (an entry from flat), anything else is cancelled. Every
+        fill meets allow_short and margin when it trades (marked at the open for an
+        order filled there, at its own price for a resting limit); a limit the path
+        never reaches stays pending, exactly as it was.
+        """
+        order = self.pending
+        if order is not None:
             # Checked first, before the stop, the margin check or a trim reads the size.
-            order = self.pending
             _check_size(order.contracts,
                         f"cannot fill the {order.side} order at ts {_ts_text(next_bar.ts)}: "
                         "its size")
-        fills: list[Fill] = []
-        order = self.pending
-        # The held position's stop vs the pending order. A MARKET order fills at the
-        # open, and the open comes before the bar's high and low in real time, so the
-        # stop is checked only against the range AFTER that fill, and only if a
-        # position it protects is still open (a flip or close at the open leaves none).
-        # The exception is an open already at or beyond the stop (gap-through): the
-        # stop fills at the open first, and the order is re-sized below. A LIMIT's fill
-        # time inside the bar is unknowable, so the stop is checked first (adverse
-        # first, §5.4), the conservative convention.
-        defer_stop = (order is not None and order.kind == "market"
-                      and not self._open_through_stop(float(next_bar.open)))
-        stop_fills = [] if defer_stop else self._fire_resting_stop(next_bar)
-        fills.extend(stop_fills)
-        # If the protective stop just flattened us, the pending order was sized against
-        # a position that is gone. A flip (same side as the stop's exit, more contracts
-        # than it closed) already has its closing half done, so it keeps just its new
-        # side: an entry from flat, margin-checked below. Anything else (an exit, a
-        # scale-in, a forced liquidation) is stale and cancelled.
-        if stop_fills and self.portfolio.position.qty == 0 and order is not None:
-            stopped = stop_fills[0]
-            if order.side == stopped.side and order.contracts > stopped.contracts:
-                order.contracts -= stopped.contracts
-            else:
-                order.status = "cancelled"
-                self.pending = None
-                order = None
-        armed_at: float | None = None     # where an attached stop went live, if one did
-        if order is not None:
-            # Where the order would fill on this bar, if it does. allow_short and margin
-            # act only on an order that fills: a bar a limit never reaches leaves it
-            # exactly as it was (no rejection, no trim, its stop kept).
-            if order.kind == "market":
-                price = self._market_fill_price(order.side, next_bar.open)
-            elif order.kind == "limit":
-                price = self._limit_fill(order, next_bar)
-            else:
+            if order.kind not in ("market", "limit"):
                 raise ValueError(f"unknown order kind: {order.kind!r}")
-            if price is not None:
-                # Margin is marked where the order trades: the open for a market order
-                # (its fill moment), the limit's own fill price for a limit, never the
-                # open for a limit that fills deeper in the bar.
-                mark = float(next_bar.open) if order.kind == "market" else float(price)
-                order = self._admit(order, float(price), mark)
-            if order is not None and price is not None:
-                prior_side = self._position_side()
-                fills.append(
-                    self._emit_fill(next_bar.ts, order.side, order.contracts, price,
-                                    margin_liquidation=order.margin_liquidation)
-                )
-                order.status = "filled"
-                self.pending = None
-                self._drop_stop_on_flip(prior_side)
-                # An attached stop protects the position the fill leaves. A fill that
-                # flattens leaves none, and its stop must not become the NEXT position's
-                # initial_stop (that trade's R would read it).
-                if order.attached_stop is not None and self.portfolio.position.qty != 0:
-                    self.resting_stop = order.attached_stop
-                    # live from the fill: the open for a market order, the price for a limit
-                    armed_at = next_bar.open if order.kind == "market" else price
-                    # §0.4: set initial_stop on the position opened by this entry.
-                    # Only set when the fill actually opened/flipped (not a scale-in
-                    # that kept the original direction with an existing initial_stop).
-                    pos = self.portfolio.position
-                    if pos.initial_stop is None:
-                        pos.initial_stop = order.attached_stop
-                elif (prior_side is None and self.resting_stop is not None
-                      and self.portfolio.position.qty != 0):
-                    # A stop set with amend_stop while flat protects an entry filling on
-                    # THIS bar (the next one after it was set): live from the fill and
-                    # checked on the entry bar, as an attached stop is (it does not set
-                    # initial_stop, so R stays None). The flat book drops it after this
-                    # bar, so an entry filling later gets no stop from it.
-                    armed_at = next_bar.open if order.kind == "market" else price
-            if armed_at is not None:
-                # The attached stop is live from the entry fill, so the rest of THIS bar
-                # is checked against it (adverse extreme first, §5.4). Its gap-through
-                # reference is the price it went live at (the open for a market entry,
-                # the fill for a limit), not the bar's open. Firing consumes the stop,
-                # so it fills at most once.
-                fills.extend(self._fire_resting_stop(next_bar, live_from=armed_at))
-        if defer_stop and armed_at is None:
-            # The market order went first (filled, trimmed or refused); whatever stop
-            # still protects an open position now sees the rest of the bar.
-            fills.extend(self._fire_resting_stop(next_bar))
+        fills: list[Fill] = []
+        ts = next_bar.ts
+        open_px = float(next_bar.open)
+        at_open = order is not None and (order.kind == "market"
+                                         or self._marketable(order, open_px))
+        # 1. The open: a gap-through stop, then a market or marketable order.
+        if self._open_through_stop(open_px):
+            stopped = self._fire_stop(ts, open_px)
+            fills.append(stopped)
+            order = self._after_stop(order, stopped)
+        if order is not None and at_open:
+            fill = self._execute(order, ts, self._open_fill_price(order, open_px), open_px)
+            fills.extend([fill] if fill is not None else [])
+            order = None
+        # 2. The path: open -> the adverse extreme -> the other extreme.
+        side = self._position_side()
+        down_first = (side == "long") if side is not None else (
+            order is None or order.side == "buy")
+        low, high = float(next_bar.low), float(next_bar.high)
+        legs = [(open_px, low), (low, high)] if down_first else [(open_px, high), (high, low)]
+        for cur, end in legs:
+            while (hit := self._next_on_leg(cur, end, order)) is not None:
+                cur, what = hit
+                if what == "stop":
+                    stopped = self._fire_stop(ts, cur)
+                    fills.append(stopped)
+                    order = self._after_stop(order, stopped)
+                else:
+                    fill = self._execute(order, ts, cur, cur)
+                    fills.extend([fill] if fill is not None else [])
+                    order = None
         if self.portfolio.position.qty == 0:
             self.resting_stop = None      # no orphan stop on a flat position
         return fills
