@@ -183,12 +183,16 @@ def test_ordinary_exits_are_not_tagged_as_margin_liquidations():  # positive con
 
 
 def test_liquidation_replaces_an_order_the_strategy_placed_on_the_call_bar():
-    # On the call bar the strategy tries to add a contract; the forced exit wins.
+    # On the call bar the strategy tries to add a contract; the forced exit wins, and
+    # the replaced Order reads cancelled.
+    placed = {}
     eng = Engine(CL_TEXTBOOK, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
-    result = eng.run(_ohlc(_CL_ROWS), _Script({0: lambda c: c.broker.buy(contracts=1),
-                                               3: lambda c: c.broker.buy(contracts=1)}))
+    result = eng.run(_ohlc(_CL_ROWS), _Script({
+        0: lambda c: c.broker.buy(contracts=1),
+        3: lambda c: placed.setdefault("add", c.broker.buy(contracts=1))}))
     assert [(t.contracts, t.margin_liquidation, t.exit_ts) for t in result.trades] == [
         (1, True, 1200)]
+    assert placed["add"].status == "cancelled"
 
 
 def test_liquidation_survives_a_gap_break():

@@ -110,8 +110,15 @@ class Broker:
                 price=None,
                 attached_stop=stop,
             )
-        self.pending = order
+        self._queue(order)
         return order
+
+    def _queue(self, order: Order) -> None:
+        """Make ``order`` the one pending order. An order it replaces is cancelled, so
+        no Order object is left reading "pending" after it can no longer fill."""
+        if self.pending is not None and self.pending is not order:
+            self.pending.status = "cancelled"
+        self.pending = order
 
     def buy(
         self,
@@ -135,7 +142,7 @@ class Broker:
             return None
         side = "sell" if qty > 0 else "buy"
         order = Order(side=side, contracts=abs(qty), kind="market")
-        self.pending = order
+        self._queue(order)
         return order
 
     def liquidate(self) -> Order | None:

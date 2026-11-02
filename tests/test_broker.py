@@ -1039,3 +1039,38 @@ def test_scale_in_costs_count_against_initial_margin():
     assert broker.fill_pending(_flat_bar(2, 15_000.0)) == []
     assert order.status == "rejected"
     assert pf.position.qty == 1
+
+
+# ---------------------------------------------------------------------------
+# One pending order at a time: a new one replaces it, and the replaced Order reads
+# "cancelled", never "pending" forever.
+# ---------------------------------------------------------------------------
+
+def test_a_new_order_cancels_the_one_it_replaces():
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    first = broker.buy(contracts=1, limit=90.0)
+    second = broker.sell(contracts=1)
+    assert first.status == "cancelled"
+    assert broker.pending is second and second.status == "pending"
+    broker.fill_pending(_flat_bar(1, 100.0))
+    assert (first.status, second.status) == ("cancelled", "filled")
+
+
+def test_close_and_liquidate_cancel_the_order_they_replace():
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1, 100.0))
+    add = broker.buy(contracts=1)
+    exit_ = broker.close()
+    assert add.status == "cancelled"
+    forced = broker.liquidate()
+    assert exit_.status == "cancelled"
+    assert broker.pending is forced and forced.margin_liquidation
+
+
+def test_a_filled_order_is_not_touched_by_the_next_one():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    first = broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1, 100.0))
+    broker.close()
+    assert first.status == "filled"
