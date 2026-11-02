@@ -398,6 +398,42 @@ def test_compute_metrics_sharpe_raw_vs_annualized():
     assert_allclose(out["sharpe"], sharpe(rets, 20412.0), rtol=1e-12, atol=0)
 
 
+def test_compute_metrics_ci_brackets_the_sharpe_it_sits_beside():
+    """The bundle's own consistency: sharpe_ci and sharpe_se must be in the SAME
+    units as `sharpe` (annualized), because every reader pairs the adjacent keys.
+
+    Found live (2026-08-26): the assembly annualized `sharpe` but left se/ci on
+    the raw per-bar Sharpe, so the chat and format_report both printed
+    "Sharpe 0.640 (95% CI [-0.05, 0.13])" - a point estimate outside its own
+    interval, which no reader can use and some will trust."""
+    eq_vals = [100.0] + list(np.cumprod(1.0 + np.array(REF_RETURNS)) * 100.0)
+    eq = pd.Series(eq_vals)
+    out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
+    lo, hi = out["sharpe_ci"]
+    assert lo <= out["sharpe"] <= hi
+    # The interval IS sharpe +/- 1.96 se, in the same annualized units.
+    assert_allclose(lo, out["sharpe"] - 1.96 * out["sharpe_se"], rtol=1e-9, atol=0)
+    assert_allclose(hi, out["sharpe"] + 1.96 * out["sharpe_se"], rtol=1e-9, atol=0)
+    # And both scale from the raw Lo-2002 quantities by sqrt(ppy), so the pure
+    # functions (pinned above) remain the single source of the statistics.
+    rets = eq.pct_change().dropna()
+    raw_se = sharpe_se(sharpe(rets, 1.0), int(rets.size))
+    assert_allclose(out["sharpe_se"], raw_se * math.sqrt(20412.0), rtol=1e-9, atol=0)
+
+
+def test_compute_metrics_empty_returns_gives_nan_se_and_ci_not_zero():
+    """A one-point equity curve has zero bar returns (t_count == 0). sharpe_se and
+    sharpe_ci must stay NaN, not collapse to a falsely precise 0.0 / (0.0, 0.0):
+    "no data" must never read as "certainty of zero risk" to a downstream reader."""
+    eq = pd.Series([100.0])
+    out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
+    assert out["T"] == 0
+    assert math.isnan(out["sharpe_se"])
+    lo, hi = out["sharpe_ci"]
+    assert math.isnan(lo)
+    assert math.isnan(hi)
+
+
 def test_compute_metrics_sharpe_ci_is_tuple():
     """§0.2: sharpe_ci must be a (low, high) tuple."""
     eq = pd.Series([100.0, 110.0, 105.0, 120.0])

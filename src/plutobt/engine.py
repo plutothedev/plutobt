@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import collections
 import hashlib
-from dataclasses import asdict, dataclass
+import math
+import numbers
+from dataclasses import asdict, dataclass, replace
 
 import pandas as pd
 
 from plutobt import __version__
-from plutobt.broker import Broker
+from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
 from plutobt.instruments import Instrument
 from plutobt.portfolio import Portfolio, Trade
@@ -40,6 +42,52 @@ _STARTING_CASH = 100_000.0
 # is out of v1, §5.6). Stamped into every manifest's roll metadata.
 _ROLL_AS_OF_DEFAULT = "2026-06-07"
 
+# The time-order rule, quoted by every refusal of a frame's bar order.
+_TIME_RULE = ("bar timestamps (the 'ts' column) must strictly increase, since the engine "
+              "runs the bars in row order")
+
+# The session-ID rule for break_on="session", quoted by every refusal of the column.
+_SESSION_RULE = (
+    "break_on='session' needs a 'session' column holding a trading-session ID on every "
+    "bar: a number that never decreases (e.g. the CME trading day as an int YYYYMMDD), "
+    "not RTH/ETH labels"
+)
+
+
+def _time_problem(frame: pd.DataFrame) -> str | None:
+    """The first bar whose ts is not after the one before it, naming both; None if the
+    timestamps strictly increase."""
+    if "ts" not in frame.columns:
+        return "the frame has no 'ts' column"
+    ts = frame["ts"].tolist()
+    for i in range(1, len(ts)):
+        if not ts[i] > ts[i - 1]:      # written so that a NaN ts is refused too
+            return f"row {i} (ts {ts[i]}) is not after row {i - 1} (ts {ts[i - 1]})"
+    return None
+
+
+def _session_problem(frame: pd.DataFrame) -> str | None:
+    """The first break of the session-ID rule in ``frame``, naming its row; None if none.
+
+    A missing ID (NaN, None, pd.NA) is refused, as is anything but a number (RTH/ETH
+    labels need not decrease, across a weekend say, so their type gives them away) and
+    any ID below the one before it.
+    """
+    if "session" not in frame.columns:
+        return "the frame has no 'session' column"
+    ts = frame["ts"].tolist() if "ts" in frame.columns else None
+    prev = None
+    for i, value in enumerate(frame["session"].tolist()):
+        row = f"row {i}" if ts is None else f"row {i} (ts {ts[i]})"
+        if value is None or value is pd.NA or (isinstance(value, float) and math.isnan(value)):
+            return f"{row} has no session ID ({value!r})"
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            return f"{row} holds {value!r} ({type(value).__name__}), not a number"
+        if prev is not None and value < prev:
+            return f"{row} holds {value!r}, below the {prev!r} before it"
+        prev = value
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Engine
@@ -55,15 +103,37 @@ class Engine:
     def run(self, df: pd.DataFrame, strategy: Strategy) -> BacktestResult:
         """Execute the backtest loop over ``df``.
 
-        Decision-at-t: ``on_bar`` is called with bar t's data.
+        Checks first: a bad config (``break_on``; a commission, slippage or
+            periods_per_year that is not finite) and a bad ``df`` (bar timestamps
+            that do not strictly increase; in session mode, a bad ``session``
+            column) are refused with a ValueError before the strategy's
+            ``precompute`` runs. The same frame checks run on what ``precompute``
+            returns, and a frame it broke raises FrameError, naming it.
+        Decision-at-t: ``on_bar`` is called with bar t's data. ``ctx.position`` is
+            a copy of the position for the bar: a strategy's writes to it never
+            reach the book (stops move with ``ctx.broker.amend_stop``).
         Fill-at-t+1: any order placed in ``on_bar(t)`` is filled at bar t+1's open.
         Warm-up: ``on_bar`` is skipped while any derived signal column is NaN.
-        Discontinuity: a gap > the modal bar interval triggers cancel-by-default
-            (``carry_overnight=False``) or carry (``carry_overnight=True``).
+        Breaks: at a break the pending order is cancelled (``carry_overnight=False``,
+            the default) or carried to the next bar (``carry_overnight=True``); a
+            resting protective stop is never touched. ``break_on="gap"`` (default):
+            a gap longer than the modal bar interval, or any change of a ``session``
+            column (RTH/ETH labels work here), is a break, and the pending order is
+            cancelled even when it is an exit (known; the golden run depends on it).
+            ``break_on="session"``: only a change of ``session`` is a break; an entry
+            is cancelled, an exit (an order that reduces the position) survives and
+            fills at the next session's open, and a flip keeps only its closing
+            contracts. ``session`` must then hold a trading-session ID on every bar,
+            a number that never decreases (e.g. the CME trading day as an int
+            YYYYMMDD), not RTH/ETH labels.
         Open-at-end: a position still open on the last bar is marked-to-last via
             ``portfolio.mark_open_at_end`` (§0.6 — single source of truth).
         """
+        self._check_config()
+        self._check_frame(df, precomputed=False)       # the caller's own frame
         data = strategy.precompute(df.copy()).reset_index(drop=True)
+        self._check_frame(data, precomputed=True)      # what the strategy made of it
+        session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
 
         portfolio = Portfolio(starting_cash=_STARTING_CASH, instrument=self.instrument)
@@ -96,7 +166,9 @@ class Engine:
             if not warm:
                 ctx = Context(
                     bar=bar,
-                    position=portfolio.position,
+                    # A copy for this bar: a strategy writing it (qty = 0 to "exit", or
+                    # initial_stop to "trail") must never rewrite the book or its R.
+                    position=replace(portfolio.position),
                     broker=broker,
                     instrument=self.instrument,
                     tick=self.instrument.tick_size,
@@ -105,19 +177,26 @@ class Engine:
                 )
                 strategy.on_bar(ctx)
 
-            # Fill pending order against next bar's OPEN (t+1).
-            # Detect a session discontinuity; on gap+default policy, cancel the
-            # unfilled entry order but leave any resting protective stop intact.
+            # Fill the pending order against the next bar's OPEN (t+1). At a break
+            # (see the docstring) cancel_pending_entry runs first: gap mode cancels
+            # the pending order, exits included; session mode cancels an entry only.
             if t + 1 < n:
                 nxt = data.iloc[t + 1]
-                gap = int(nxt.ts) - int(bar.ts)
-                discontinuity = interval > 0 and gap > interval
-                if has_session:
-                    discontinuity = discontinuity or (bar.session != nxt.session)
+                if session_breaks:
+                    # Only a change of trading session is a break: a stretch of
+                    # bars nobody traded in (omitted by the data vendor) is not.
+                    discontinuity = bar.session != nxt.session
+                else:
+                    gap = int(nxt.ts) - int(bar.ts)
+                    discontinuity = interval > 0 and gap > interval
+                    if has_session:
+                        discontinuity = discontinuity or (bar.session != nxt.session)
                 if discontinuity and not self.config.carry_overnight:
-                    # §0: cancel_pending_entry drops the unfilled entry; resting
-                    # protective stop on a held position is deliberately untouched.
-                    broker.cancel_pending_entry()
+                    # §0: gap mode drops the pending order, exits too (known, kept for
+                    # the golden run); session mode keeps an EXIT, which fills at the
+                    # next session's open as a real exit order would. A resting
+                    # protective stop on a held position is untouched either way.
+                    broker.cancel_pending_entry(keep_exits=session_breaks)
                 broker.fill_pending(nxt)
 
             portfolio.mark(float(bar.close))
@@ -138,6 +217,44 @@ class Engine:
             metrics={},
             manifest=manifest,
         )
+
+    def _check_frame(self, frame: pd.DataFrame, *, precomputed: bool) -> None:
+        """Refuse a frame the loop cannot run: bar timestamps that do not strictly
+        increase (checked first: out-of-order bars also scramble the session IDs) and,
+        in session mode, a broken session column. A problem in the caller's frame is a
+        plain ValueError; one in what the strategy's precompute returned is a FrameError
+        naming it."""
+        rules = [(_time_problem, _TIME_RULE, "the bar timestamps")]
+        if self.config.break_on == "session":
+            rules.append((_session_problem, _SESSION_RULE, "the session column"))
+        for find, rule, what in rules:
+            problem = find(frame)
+            if problem is None:
+                continue
+            if precomputed:
+                raise FrameError(
+                    f"the strategy's precompute removed or broke {what}: {problem}. {rule}"
+                )
+            raise ValueError(f"{rule}; {problem}")
+
+    def _check_config(self) -> None:
+        """Refuse a config the engine cannot honour, before any strategy code runs."""
+        cfg = self.config
+        if cfg.break_on not in ("gap", "session"):
+            raise ValueError(f"break_on must be 'gap' or 'session', got {cfg.break_on!r}")
+        if not math.isfinite(cfg.commission_per_side):
+            # NaN or inf would poison every statistic without an error (TOML can hold
+            # both); a negative fee is a rebate and stays allowed.
+            raise ValueError(
+                "commission_per_side must be a finite number (a negative fee is a rebate), "
+                f"got {cfg.commission_per_side!r}"
+            )
+        for name in ("slippage_ticks", "periods_per_year"):
+            value = getattr(cfg, name)
+            if value is not None and not math.isfinite(value):
+                # None is each one's default: the instrument's slippage, and a
+                # periods_per_year derived from the data (TOML can hold nan and inf).
+                raise ValueError(f"{name} must be a finite number or None, got {value!r}")
 
     def _build_manifest(self, df: pd.DataFrame) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the

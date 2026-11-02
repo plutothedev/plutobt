@@ -29,6 +29,12 @@ IN_SAMPLE_LABEL = (
 # "insufficient sample" warning from the n_trades output key below the threshold.
 MIN_TRADE_SAMPLE = 30
 
+# A trade whose net P&L is within a millionth of a dollar of zero is a scratch: that is
+# float noise from price differences, never money; it is neither a win nor a loss.
+# Public, with trade_net_pnl, so every per-trade statistic (PlutoDesk's included) shares
+# this one tolerance.
+NET_ZERO_TOL_USD = 1e-6
+
 
 def sharpe(returns: pd.Series, periods_per_year: float) -> float:
     """Annualized Sharpe from per-bar returns (risk-free already removed upstream).
@@ -182,9 +188,26 @@ def _closed_trades(trades: list[Trade]) -> list[Trade]:
     return [t for t in trades if not t.open_at_end]
 
 
-def profit_factor(trades: list[Trade]) -> float:
-    """Gross profit / gross loss over closed trades.
+def trade_net_pnl(t: Trade) -> float:
+    """A closed trade's net P&L (price P&L minus its fees), with a float-noise scratch
+    snapped to 0.0. When a price move exactly pays the fees, float noise in the price
+    difference leaves a few 1e-12 of either sign on the trade (more on a large position),
+    and a bare ``> 0`` or ``< 0`` would book that noise as a win or a loss; within
+    ``NET_ZERO_TOL_USD`` (a millionth of a dollar) of zero the trade is a scratch instead,
+    neither. The band is far below any real amount, so it never hides real money: a trade
+    netting +$0.003 still counts. Every trade statistic here reads this, and any per-trade
+    statistic built elsewhere should too, so they all share one tolerance.
+    """
+    net = t.net_pnl
+    return 0.0 if abs(net) < NET_ZERO_TOL_USD else net
 
+
+def profit_factor(trades: list[Trade]) -> float:
+    """Gross profit / gross loss over closed trades, each trade NET of its fees.
+
+    Gross profit and gross loss here are sums of the trades' NET P&L (a scratch, within
+    ``NET_ZERO_TOL_USD`` of zero, is in neither), and 0/0 (no winner and no loser)
+    returns NaN, not +inf.
     inf-guard: returns +inf when there are profits but no losers; returns NaN
     when there are no closed trades at all. Open-at-end trades are excluded.
     Min-sample flagging (n < MIN_TRADE_SAMPLE) is surfaced by ``format_report``
@@ -193,25 +216,26 @@ def profit_factor(trades: list[Trade]) -> float:
     closed = _closed_trades(trades)
     if not closed:
         return float("nan")
-    gross_profit = sum(t.pnl for t in closed if t.pnl > 0.0)
-    gross_loss = -sum(t.pnl for t in closed if t.pnl < 0.0)
+    gross_profit = sum(trade_net_pnl(t) for t in closed if trade_net_pnl(t) > 0.0)
+    gross_loss = -sum(trade_net_pnl(t) for t in closed if trade_net_pnl(t) < 0.0)
     if gross_loss == 0.0:
-        return float("inf")
+        return float("inf") if gross_profit > 0.0 else float("nan")
     return float(gross_profit / gross_loss)
 
 
 def expectancy(trades: list[Trade]) -> float:
     """Per-trade expectancy = WinRate*AvgWin - LossRate*AvgLoss (§5.7).
 
-    Computed over closed trades (open-at-end excluded). AvgLoss is a positive
-    magnitude. Returns NaN with no closed trades.
+    Computed over closed trades (open-at-end excluded), each trade NET of its fees; a
+    scratch (within ``NET_ZERO_TOL_USD`` of zero) counts in n but is neither a win nor
+    a loss. AvgLoss is a positive magnitude. Returns NaN with no closed trades.
     """
     closed = _closed_trades(trades)
     n = len(closed)
     if n == 0:
         return float("nan")
-    wins = [t.pnl for t in closed if t.pnl > 0.0]
-    losses = [t.pnl for t in closed if t.pnl < 0.0]
+    wins = [trade_net_pnl(t) for t in closed if trade_net_pnl(t) > 0.0]
+    losses = [trade_net_pnl(t) for t in closed if trade_net_pnl(t) < 0.0]
     win_rate_val = len(wins) / n
     loss_rate = len(losses) / n
     avg_win = (sum(wins) / len(wins)) if wins else 0.0
@@ -222,6 +246,8 @@ def expectancy(trades: list[Trade]) -> float:
 def avg_r(trades: list[Trade]) -> float | None:
     """Average Van Tharp R-multiple over closed trades that HAVE an initial stop.
 
+    Each R is net of its trade's fees, against a price-risk 1R with no fees in it
+    (``Portfolio._calc_r_multiple``), so a stop-out exactly at the stop is below -1R.
     Stop-less trades carry r_multiple is None and are excluded (count printed by
     ``compute_metrics``). Returns None when no closed trade has an R-multiple.
     """
@@ -237,12 +263,14 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
 
     ``collapses_without_top1`` flags when total P&L would go non-positive once
     the single best trade is removed (operationalizes "succeeding on outliers").
+    Every P&L here is NET of fees: trades are ranked, summed and shared by their net
+    P&L, with a scratch (within ``NET_ZERO_TOL_USD`` of zero) as 0.0.
 
     v1 scope note: Sharpe-recomputed-ex-outlier is OUT of v1 — only profit
     factor + expectancy are recomputed ex-best/ex-worst here.
     """
     closed = _closed_trades(trades)
-    pnls = [t.pnl for t in closed]
+    pnls = [trade_net_pnl(t) for t in closed]
     total = sum(pnls)
     ordered = sorted(pnls, reverse=True)
     top1 = ordered[0] if ordered else 0.0
@@ -250,11 +278,11 @@ def outlier_sensitivity(trades: list[Trade], equity: pd.Series) -> dict:
     pct_top1 = (top1 / total) if total != 0.0 else float("nan")
     pct_top5 = (top5 / total) if total != 0.0 else float("nan")
 
-    best = max(closed, key=lambda t: t.pnl) if closed else None
-    worst = min(closed, key=lambda t: t.pnl) if closed else None
+    best = max(closed, key=lambda t: trade_net_pnl(t)) if closed else None
+    worst = min(closed, key=lambda t: trade_net_pnl(t)) if closed else None
     ex_best = [t for t in closed if t is not best]
     ex_worst = [t for t in closed if t is not worst]
-    total_ex_best = sum(t.pnl for t in ex_best)
+    total_ex_best = sum(trade_net_pnl(t) for t in ex_best)
 
     return {
         "pct_pnl_top1": pct_top1,
@@ -291,10 +319,15 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     """Assemble the full metrics bundle for a BacktestResult, labeled IN-SAMPLE.
 
     §0.2 output keys (SINGLE SOURCE OF TRUTH — M9's format_report reads ONLY these):
-    label, sharpe, sharpe_raw, sharpe_se, sharpe_ci (tuple), psr, sortino,
+    label, sharpe, sharpe_raw, sharpe_se, sharpe_ci (tuple; se and ci are
+    ANNUALIZED, the same units as sharpe), psr, sortino,
     calmar, annual_return, max_drawdown_depth, max_drawdown_duration,
     trailing_hwm_drawdown, win_rate, profit_factor, expectancy, avg_r,
     T, periods_per_year, n_trades, exposure.
+
+    The trade-stat keys (win_rate, profit_factor, expectancy, avg_r) are NET of fees,
+    over closed trades; a scratch (net within ``NET_ZERO_TOL_USD`` of zero) counts in
+    n_trades but is neither a win nor a loss.
 
     ``label`` is always the FIRST key (IN-SAMPLE stamp).
 
@@ -328,8 +361,27 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # Sharpe: sharpe_raw = per-bar, sharpe = annualized (§0.2)
     sr_raw = sharpe(returns, 1.0)
     sr_ann = sharpe(returns, periods_per_year)
-    se = sharpe_se(sr_raw, t_count) if t_count > 0 else float("nan")
-    ci = sharpe_ci(sr_raw, t_count) if t_count > 0 else (float("nan"), float("nan"))
+    # SE and CI are reported in the SAME annualized units as `sharpe`, because
+    # every reader pairs the adjacent keys (format_report prints them in one
+    # sentence; the chat model quotes them together). They used to be left on
+    # the raw per-bar Sharpe, which produced "Sharpe 0.640 (95% CI [-0.05,
+    # 0.13])" - a point estimate outside its own interval - live on pluto's
+    # screen. `sharpe` is exactly sqrt(periods_per_year) times `sharpe_raw`,
+    # and a constant times an estimator has that constant times its standard
+    # error (sharpe_se is Lo 2002's iid-normal result for the per-bar SR), so
+    # the same sqrt(periods_per_year) factor scales sharpe_se and sharpe_ci.
+    # Neither the sqrt(q) annualization nor Lo's SE is exact once returns are
+    # serially correlated or far from normal (Mertens 2002 adds the skew and
+    # kurtosis terms psr uses): Lo's own eta(q) correction is not applied
+    # here. The raw-unit statistics stay available through the
+    # pinned pure functions and sharpe_raw.
+    scale = math.sqrt(periods_per_year)
+    se = sharpe_se(sr_raw, t_count) * scale if t_count > 0 else float("nan")
+    if t_count > 0:
+        raw_lo, raw_hi = sharpe_ci(sr_raw, t_count)
+        ci = (raw_lo * scale, raw_hi * scale)
+    else:
+        ci = (float("nan"), float("nan"))
     psr_val = psr(returns, sr0=0.0) if t_count > 1 else float("nan")
 
     # Sortino: annualized (§0.2 key "sortino")
@@ -343,10 +395,10 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     annual_ret = float(returns.mean() * periods_per_year) if t_count > 0 else 0.0
     calmar_ratio = calmar(annual_ret, dd_depth)
 
-    # Trade stats (closed trades only for win-rate/PF/expectancy/avg_r)
+    # Trade stats, NET of fees (closed trades only for win-rate/PF/expectancy/avg_r)
     closed = _closed_trades(trades)
     n_closed = len(closed)
-    wins = [t for t in closed if t.pnl > 0.0]
+    wins = [t for t in closed if trade_net_pnl(t) > 0.0]
     win_rate_val = (len(wins) / n_closed) if n_closed > 0 else 0.0  # §0.3
     pf = profit_factor(trades)
     exp = expectancy(trades)

@@ -16,6 +16,7 @@ def test_backtestconfig_is_dataclass_with_exact_fields():
         "periods_per_year",
         "carry_overnight",
         "allow_short",
+        "break_on",  # wave 1 (2026-09-26): session-based breaks
     }
 
 
@@ -27,6 +28,7 @@ def test_backtestconfig_defaults():
     assert cfg.periods_per_year is None
     assert cfg.carry_overnight is False
     assert cfg.allow_short is True
+    assert cfg.break_on == "gap"   # the golden run and the plutobt video depend on it
 
 
 def test_backtestconfig_overrides():
