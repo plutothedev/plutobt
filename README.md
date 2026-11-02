@@ -12,7 +12,11 @@ and auditability. Key properties:
   bar t+1's open. No look-ahead by construction, and checked before the first bar
   (see [Look-ahead check](#look-ahead-check)).
 - **Realistic fills**: directional slippage, gap-through stops, GTC protective
-  stops, limit order fill-or-carry.
+  stops, limit order fill-or-carry. Inside a bar the price walks a conservative
+  path: the open, then the held position's adverse extreme (a long's low, a short's
+  high), then the other; stops and resting limits fill in the order it crosses them.
+  A limit already through the market at the open fills there like a market order,
+  slippage included (capped by its limit).
 - **Session breaks**: with `carry_overnight = false` (the default), entries never
   carry across a break (an overnight or weekend gap, or a change of session; `break_on`
   picks which): a pending entry is cancelled there. That is not "flat overnight": a
