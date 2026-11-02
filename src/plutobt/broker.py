@@ -286,8 +286,9 @@ class Broker:
         if prior_side is not None and side is not None and side != prior_side:
             self.resting_stop = None
 
-    def _admit(self, order: Order, mark: float) -> Order | None:
-        """The checks an order meets at the moment it fills: allow_short, then margin.
+    def _admit(self, order: Order, price: float, mark: float) -> Order | None:
+        """The checks an order meets at the moment it fills at ``price``: allow_short,
+        then margin.
 
         Returns the order (possibly trimmed to its closing contracts) or None when it
         is refused (status "rejected", pending cleared).
@@ -309,12 +310,15 @@ class Broker:
         opening = order.contracts - held if reducing else order.contracts
         if opening > 0:
             # Initial margin covers the WHOLE position the fill leaves: a flip's new
-            # side, or the held contracts plus a scale-in's. Equity is marked at
-            # ``mark``, so open P&L counts: a flip's new side opens on what its closing
-            # half leaves, as close() then a new entry would see it. A pure reduction
-            # opens nothing and is never gated.
+            # side, or the held contracts plus a scale-in's. Equity is the account
+            # just after this fill, marked at ``mark``: open P&L counts (a flip's new
+            # side opens on what its closing half leaves, as close() then a new entry
+            # would see it), and so do this fill's own commission and slippage. A pure
+            # reduction opens nothing and is never gated.
             resulting = opening if reducing else held + opening
-            if not self.portfolio.margin_ok(resulting, mark):
+            after = self.portfolio.equity_after_fill(
+                order.side, order.contracts, price, self._commission(order.contracts), mark)
+            if after < self.instrument.initial_margin * resulting:
                 if not reducing:
                     return self._reject(order)
                 # A flip whose new side fails margin keeps only its closing
@@ -378,7 +382,7 @@ class Broker:
                 # (its fill moment), the limit's own fill price for a limit, never the
                 # open for a limit that fills deeper in the bar.
                 mark = float(next_bar.open) if order.kind == "market" else float(price)
-                order = self._admit(order, mark)
+                order = self._admit(order, float(price), mark)
             if order is not None and price is not None:
                 prior_side = self._position_side()
                 fills.append(

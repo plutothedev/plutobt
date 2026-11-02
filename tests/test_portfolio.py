@@ -234,6 +234,22 @@ def test_margin_ok_reads_equity_marked_at_the_given_price():
     assert pf.margin_ok(2, mark_price=65.00) is False    # 15,000 <  15,400
 
 
+def test_equity_after_fill_matches_applying_the_fill():
+    # Long 1 NQ at 100; a sell(2) flip at 99.75 with a $5 fee, marked at 100: the
+    # closing lot realizes -5, the new short is -5 at 100, the fee -5.
+    nq = get_instrument("NQ")
+    pf = Portfolio(starting_cash=50_000.0, instrument=nq)
+    pf.apply_fill(Fill(ts=1, side="buy", contracts=1, price=100.0, commission=0.0))
+    predicted = pf.equity_after_fill("sell", 2, 99.75, 5.0, mark_price=100.0)
+    assert predicted == pytest.approx(50_000.0 - 15.0)
+    pf.apply_fill(Fill(ts=2, side="sell", contracts=2, price=99.75, commission=5.0))
+    assert pf.equity(100.0) == pytest.approx(predicted)
+    # a buy from flat at 100.25 marked at 100: -5 slippage, -2.50 fee
+    flat = Portfolio(starting_cash=50_000.0, instrument=nq)
+    assert flat.equity_after_fill("buy", 1, 100.25, 2.5, mark_price=100.0) == \
+        pytest.approx(50_000.0 - 7.5)
+
+
 def test_margin_call_zero_when_above_maintenance():
     cl = get_instrument("CL")
     pf = Portfolio(starting_cash=10_000.0, instrument=cl)

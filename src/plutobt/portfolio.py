@@ -249,6 +249,19 @@ class Portfolio:
             mark_price = self.position.avg_price
         return self.equity(mark_price) >= self.instrument.initial_margin * contracts
 
+    def equity_after_fill(self, side: str, contracts: int, price: float, commission: float,
+                          mark_price: float) -> float:
+        """Equity just after a fill of ``contracts`` on ``side`` at ``price`` paying
+        ``commission``, everything marked at ``mark_price`` (no state changes).
+
+        Equity is linear in the position, so this is equity(mark) less the fee plus the
+        fill's own P&L at the mark: a buy above the mark (slippage) costs, a sell below
+        it costs. Covers opening, scaling in, reducing and flipping alike.
+        """
+        signed = contracts if side == "buy" else -contracts
+        return (self.equity(mark_price) - commission
+                + pnl_points(price, mark_price, signed, self.instrument))
+
     def margin_call_amount(self) -> float:
         """Variation-margin call on a maintenance breach (spec §5.2).
 

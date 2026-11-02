@@ -999,3 +999,43 @@ def test_limit_flip_margin_counts_the_profit_up_to_its_fill():
     assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 3, 16_000.0)]
     assert (order.status, order.contracts) == ("filled", 3)
     assert pf.position.qty == -2
+
+
+# ---------------------------------------------------------------------------
+# The margin gate reads equity AFTER the order's own commission and slippage.
+# ---------------------------------------------------------------------------
+
+def _broker_with_costs(cash, slippage_ticks, commission):
+    inst = get_instrument("NQ")
+    cfg = BacktestConfig(slippage_ticks=slippage_ticks, commission_per_side=commission)
+    pf = Portfolio(starting_cash=cash, instrument=inst)
+    return Broker(inst, cfg, pf), inst, pf
+
+
+def test_entry_costs_count_against_initial_margin():
+    # 23,000 cash is exactly one NQ lot's initial margin; the $5 fee and the 1-tick
+    # ($5) slippage leave 22,990 just after the fill, so the entry is refused.
+    broker, inst, pf = _broker_with_costs(23_000.0, 1.0, 5.0)
+    order = broker.buy(contracts=1)
+    assert broker.fill_pending(_flat_bar(1, 15_000.0)) == []
+    assert order.status == "rejected"
+
+
+def test_entry_covering_initial_margin_after_costs_is_accepted():  # positive control
+    broker, inst, pf = _broker_with_costs(23_010.0, 1.0, 5.0)   # 23,000 after costs
+    order = broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1, 15_000.0))
+    assert order.status == "filled"
+    assert pf.equity(15_000.0) == pytest.approx(23_000.0)
+
+
+def test_scale_in_costs_count_against_initial_margin():
+    # Long 1 on 46,015: after its 5 fee and 5 slippage, equity is 46,005, enough for
+    # 2 lots (46,000) before the add's own costs; the add's 10 more leave 45,995.
+    broker, inst, pf = _broker_with_costs(46_015.0, 1.0, 5.0)
+    broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1, 15_000.0))
+    order = broker.buy(contracts=1)
+    assert broker.fill_pending(_flat_bar(2, 15_000.0)) == []
+    assert order.status == "rejected"
+    assert pf.position.qty == 1
