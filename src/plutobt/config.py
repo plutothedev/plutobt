@@ -12,14 +12,21 @@ class BacktestConfig:
     slippage_ticks: float | None = None   # None => use instrument default
     risk_free: float = 0.0
     periods_per_year: float | None = None  # None => derived from data/session
+    # False (default): ENTRIES never carry across a break (see break_on): a pending order
+    # that would open or add to a position is cancelled there. It is NOT "flat
+    # overnight": a pending EXIT survives the break and fills at the next session's open
+    # (a flip keeps only its closing contracts; a margin liquidation always survives),
+    # and an open position is never force-flattened, so it is held across the break
+    # unless the strategy exits. True carries every pending order across.
     carry_overnight: bool = False
     allow_short: bool = True   # False: an order that would leave a net short is refused
-    # What is a break, where a pending order is cancelled (unless carry_overnight):
+    # What is a break, where a pending entry is cancelled (unless carry_overnight); both
+    # modes treat a break the same way:
     # "gap" (default): a gap longer than the usual bar interval, or any change of the
-    #   frame's `session` column (RTH/ETH labels work here); exits are cancelled too.
-    # "session": only a change of `session`; an exit survives it and fills at the next
-    #   session's open. `session` must then hold a trading-session ID on every bar that
-    #   never decreases (e.g. the CME trading day as an int YYYYMMDD), not RTH/ETH labels.
+    #   frame's `session` column (RTH/ETH labels work here).
+    # "session": only a change of `session`, which must then hold a trading-session ID
+    #   on every bar that never decreases (e.g. the CME trading day as an int YYYYMMDD),
+    #   not RTH/ETH labels.
     break_on: str = "gap"
     # What a margin call does (spec §5.2): at a bar's close, equity below the
     # maintenance margin of the held contracts records a MarginCall (the call restores
@@ -35,9 +42,10 @@ class BacktestConfig:
     # strategy that cannot be copied (it holds a lock, socket or open file) is refused
     # with a TypeError, and false skips the guard (and the copies).
     check_causality: bool = True
-    # The truncation grid. "auto" (default): every prefix up to 2,000 bars (about 0.3 s on
-    # each 324-bar demo sample); above that 250 evenly spaced prefixes plus the first 20
-    # and last 20, with a warning that the check was sampled. None forces every prefix
+    # The truncation grid. "auto" (default): every prefix up to 2,000 bars (about 1.7 s
+    # for EMACross on the 1,620-bar NQ demo sample, measured 2026-11-02); above that 250
+    # evenly spaced prefixes plus the first 20 and last 20, with a warning that the check
+    # was sampled. None forces every prefix
     # (exhaustive; the cost grows with the square of the bar count). An int k checks k
     # evenly spaced prefixes. A sampled grid CAN MISS a leak on a few rows between them.
     causality_sample: int | str | None = "auto"

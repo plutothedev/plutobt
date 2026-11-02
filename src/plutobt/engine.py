@@ -230,18 +230,23 @@ class Engine:
             them set. A NaN after that bar is refused before any bar runs, naming the
             column and ts (a FrameError when the precompute made it): skipping
             ``on_bar`` there would silently block that bar's exits.
-        Breaks: at a break the pending order is cancelled (``carry_overnight=False``,
-            the default) or carried to the next bar (``carry_overnight=True``); a
-            resting protective stop is never touched. ``break_on="gap"`` (default):
-            a gap longer than the modal bar interval, or any change of a ``session``
-            column (RTH/ETH labels work here), is a break, and the pending order is
-            cancelled even when it is an exit (known; the golden run depends on it).
-            ``break_on="session"``: only a change of ``session`` is a break; an entry
-            is cancelled, an exit (an order that reduces the position) survives and
-            fills at the next session's open, and a flip keeps only its closing
-            contracts. ``session`` must then hold a trading-session ID on every bar,
-            a number that never decreases (e.g. the CME trading day as an int
-            YYYYMMDD), not RTH/ETH labels.
+        Breaks: what is a break depends on ``break_on``. ``"gap"`` (default): a gap
+            longer than the modal bar interval, or any change of a ``session`` column
+            (RTH/ETH labels work here). ``"session"``: only a change of ``session``,
+            which must then hold a trading-session ID on every bar, a number that
+            never decreases (e.g. the CME trading day as an int YYYYMMDD), not RTH/ETH
+            labels. Both modes treat a break the same way.
+            ``carry_overnight=False`` (default) means ENTRIES never carry across a
+            break: a pending order that would open or add to a position is cancelled.
+            It does NOT mean flat overnight: a pending EXIT (an order that reduces
+            the position) survives the break and fills at the next session's open,
+            as a real exit order would; a flip keeps only its closing contracts (the
+            new position's half is an entry); a margin liquidation always survives.
+            An open position is never force-flattened at a break: it is held across
+            it unless the strategy exits, and an exit decided on a session's last
+            bar fills at the next session's open, so that position is held overnight.
+            ``carry_overnight=True`` carries every pending order to the next bar. A
+            resting protective stop is never touched either way.
         Margin calls (§5.2): after bar t's mark, equity below the maintenance margin of
             the held contracts records a MarginCall in ``margin_calls`` (the call
             restores to INITIAL: amount = initial - equity; no deposit is invented).
@@ -314,8 +319,8 @@ class Engine:
             # Fill the order placed on bar t-1 against THIS bar's open (and stops
             # against this bar's range) before anything reads the book for bar t, so
             # equity[t] holds bar t's own fills and never the next bar's. At a break
-            # (see the docstring) cancel_pending_entry runs first: gap mode cancels
-            # the pending order, exits included; session mode cancels an entry only.
+            # (see the docstring) cancel_pending_entry runs first and cancels an entry
+            # only, in either break_on mode.
             if prev is not None:
                 if session_breaks:
                     # Only a change of trading session is a break: a stretch of
@@ -327,11 +332,11 @@ class Engine:
                     if has_session:
                         discontinuity = discontinuity or (prev.session != bar.session)
                 if discontinuity and not self.config.carry_overnight:
-                    # §0: gap mode drops the pending order, exits too (known, kept for
-                    # the golden run); session mode keeps an EXIT, which fills at the
-                    # next session's open as a real exit order would. A resting
-                    # protective stop on a held position is untouched either way.
-                    broker.cancel_pending_entry(keep_exits=session_breaks)
+                    # §0: an ENTRY never crosses a break; an EXIT does, and fills at
+                    # the next session's open as a real exit order would (gap mode
+                    # used to drop it too, holding the position overnight and on;
+                    # fixed 2026-11-02). A resting protective stop is untouched.
+                    broker.cancel_pending_entry(keep_exits=True)
                 broker.fill_pending(bar)
             prev = bar
 

@@ -13,6 +13,13 @@ and auditability. Key properties:
   (see [Look-ahead check](#look-ahead-check)).
 - **Realistic fills**: directional slippage, gap-through stops, GTC protective
   stops, limit order fill-or-carry.
+- **Session breaks**: with `carry_overnight = false` (the default), entries never
+  carry across a break (an overnight or weekend gap, or a change of session; `break_on`
+  picks which): a pending entry is cancelled there. That is not "flat overnight": a
+  pending exit survives the break and fills at the next session's open, a flip keeps
+  only its closing contracts, a margin liquidation always goes through, and an open
+  position is never force-flattened, so it is held across the break unless the
+  strategy exits.
 - **Performance-bond accounting**: MTM equity, initial/maintenance margin, open-at-end
   marking — the way futures actually work.
 - **Van Tharp R-multiples**: attach a stop on entry and every trade's r_multiple

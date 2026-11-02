@@ -9,7 +9,7 @@ the metrics or the engine shows up here before it shows up on camera.
 
 The truth line's Sharpe is +4.81 on this seed, not negative: 20 days of a random walk,
 about 1.4 standard errors (sqrt(20412/1620) = 3.5) from zero. Nothing was tuned to move
-it; the engine line, after costs, nets exactly $0.00.
+it; the engine line, after costs, nets -$150.00.
 """
 
 from __future__ import annotations
@@ -65,16 +65,16 @@ def test_the_truth_is_a_fraction_of_the_lie(res, printed):
 def test_the_engine_line_runs_the_same_signal_with_nq_costs(res, printed):
     eng = res["engine"]
     assert eng["commission_per_side"] == 2.5 and eng["slippage_ticks"] == 1.0
-    assert eng["n_trades"] == 387
-    assert eng["win_rate"] == pytest.approx(130 / 387)          # 130 winners
-    assert eng["sharpe"] == pytest.approx(0.07, abs=0.01)
-    # 387 round trips: 774 fills x 1 tick ($5) of slippage and 387 x $5 commission.
-    assert eng["slippage_usd"] == 3870.0 and eng["commission_usd"] == 1935.0
-    assert eng["gross_pnl"] == 5805.0 and eng["net_pnl"] == 0.0
+    assert eng["n_trades"] == 391
+    assert eng["win_rate"] == pytest.approx(133 / 391)          # 133 winners
+    assert eng["sharpe"] == pytest.approx(-0.07, abs=0.01)
+    # 391 round trips: 782 fills x 1 tick ($5) of slippage and 391 x $5 commission.
+    assert eng["slippage_usd"] == 3910.0 and eng["commission_usd"] == 1955.0
+    assert eng["gross_pnl"] == 5715.0 and eng["net_pnl"] == -150.0
     assert "=== THE ENGINE: same signal through PlutoBT, NQ costs" in printed
-    assert f"annualized Sharpe = {eng['sharpe']:>8.2f}    trades = 387" in printed
+    assert f"annualized Sharpe = {eng['sharpe']:>8.2f}    trades = 391" in printed
     assert "win rate = 34% (closed trades, net of costs)" in printed
-    assert "= net $0.00" in printed
+    assert "= net -$150.00" in printed                  # a loss reads -$, never $-
 
 
 def test_the_labels_say_what_the_math_does(printed):

@@ -164,6 +164,11 @@ def run(sample_path: str | None = None):
     }
 
 
+def _usd(x: float) -> str:
+    """Dollars with the sign in front of the $ (-$150.00, never $-150.00)."""
+    return f"-${-x:,.2f}" if x < 0 else f"${x:,.2f}"
+
+
 def main() -> None:
     res = run()
     eng = res["engine"]
@@ -187,8 +192,8 @@ def main() -> None:
         f"win rate = {eng['win_rate']:.0%} (closed trades, net of costs)"
     )
     print(
-        f"  1 NQ: gross ${eng['gross_pnl']:,.2f}  - slippage ${eng['slippage_usd']:,.2f}"
-        f"  - commission ${eng['commission_usd']:,.2f}  = net ${eng['net_pnl']:,.2f}"
+        f"  1 NQ: gross {_usd(eng['gross_pnl'])}  - slippage {_usd(eng['slippage_usd'])}"
+        f"  - commission {_usd(eng['commission_usd'])}  = net {_usd(eng['net_pnl'])}"
     )
     print("\nThe only thing I changed:")
     print("    position = signal           # the lie   (trade bar t on bar t's own close)")

@@ -43,7 +43,7 @@ def test_it_is_a_cost_sweep_not_a_parameter_sweep(table):
     assert "NOT a parameter sweep" in demo.__doc__
     # The demo strategy keeps the parameters it ships with on every row.
     assert (EMACross.fast_span, EMACross.slow_span, EMACross.stop_ticks) == (20, 50, 20.0)
-    assert set(table["n_trades"]) == {68}
+    assert set(table["n_trades"]) == {73}
 
 
 def test_the_one_tick_row_is_the_nq_demo_run(table):

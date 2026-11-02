@@ -69,27 +69,52 @@ def test_a_session_change_cancels_a_pending_entry():
     assert _run(df, {2: "buy"}, break_on="session").trades == []
 
 
-def test_a_pending_close_survives_a_session_break_in_session_mode():
-    df = _frame(BREAK, sessions=[1, 1, 1, 2, 2])
-    (t,) = _run(df, {0: "buy", 2: "close"}, break_on="session").trades
-    assert t.exit_ts == T0 + 180 and not t.open_at_end
+# The same break, as each mode sees it: session mode reads the session change after
+# bar 2; gap mode (the default) reads the 480 s gap after bar 2 (the bars are 60 s).
+MODES = {
+    "session": (lambda: _frame(BREAK, sessions=[1, 1, 1, 2, 2]), {"break_on": "session"}),
+    "gap": (lambda: _frame([0, 60, 120, 600, 660]), {}),
+}
+AFTER_BREAK = {"session": T0 + 180, "gap": T0 + 600}   # the next session's first bar
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_a_pending_close_survives_a_break_in_either_mode(mode):
+    # gap mode used to cancel the exit too (fixed 2026-11-02), so a close decided on a
+    # session's last bar was dropped and the position was held overnight and beyond.
+    make, cfg = MODES[mode]
+    (t,) = _run(make(), {0: "buy", 2: "close"}, **cfg).trades
+    assert t.exit_ts == AFTER_BREAK[mode] and not t.open_at_end
+
+
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("entry,exit_", [("buy", ("sell", 1)), (("sell", 1), ("buy", 1))])
-def test_a_plain_exit_order_survives_a_session_break(entry, exit_):
+def test_a_plain_exit_order_survives_a_break(mode, entry, exit_):
     # sell(1) exiting a long and buy(1) covering a short are exits too, not
     # only close() (money re-audit, 2026-09-26).
-    df = _frame(BREAK, sessions=[1, 1, 1, 2, 2])
-    (t,) = _run(df, {0: entry, 2: exit_}, break_on="session").trades
-    assert t.exit_ts == T0 + 180 and not t.open_at_end
+    make, cfg = MODES[mode]
+    (t,) = _run(make(), {0: entry, 2: exit_}, **cfg).trades
+    assert t.exit_ts == AFTER_BREAK[mode] and not t.open_at_end
 
 
-def test_a_flip_at_a_session_break_keeps_only_its_closing_contracts():
+@pytest.mark.parametrize("mode", MODES)
+def test_a_pending_entry_is_cancelled_at_a_break_in_either_mode(mode):
+    make, cfg = MODES[mode]
+    assert _run(make(), {2: "buy"}, **cfg).trades == []
+    # carry_overnight=True carries it to the next session's open instead.
+    (t,) = _run(make(), {2: "buy"}, carry_overnight=True, **cfg).trades
+    assert t.entry_ts == AFTER_BREAK[mode]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_flip_at_a_break_keeps_only_its_closing_contracts(mode):
     flip = {0: "buy", 2: ("sell", 2)}
     same = _run(_frame(BREAK, sessions=[1] * 5), flip, break_on="session").trades
     assert [t.side for t in same] == ["long", "short"]          # no break: a real flip
-    (t,) = _run(_frame(BREAK, sessions=[1, 1, 1, 2, 2]), flip, break_on="session").trades
-    assert t.side == "long" and t.exit_ts == T0 + 180 and not t.open_at_end   # flat, no short
+    make, cfg = MODES[mode]
+    (t,) = _run(make(), flip, **cfg).trades
+    assert t.side == "long" and t.exit_ts == AFTER_BREAK[mode] and not t.open_at_end
+    # flat after the break, no short opened across it
 
 
 def test_a_flip_whose_new_side_fails_margin_keeps_only_its_exit():
@@ -100,15 +125,6 @@ def test_a_flip_whose_new_side_fails_margin_keeps_only_its_exit():
     flip = {0: "buy", 2: ("sell", 50)}
     (t,) = _run(_frame(BREAK, sessions=[1] * 5), flip, break_on="session").trades
     assert t.side == "long" and not t.open_at_end
-
-
-def test_known_default_gap_mode_drops_a_pending_exit_at_a_gap():
-    # CHARACTERIZATION PIN (passes before this task; mutation-proved in Step 6).
-    # KNOWN, reported to pluto 2026-09-26, deliberately unchanged here: the
-    # golden run and the plutobt video numbers depend on the default mode.
-    df = _frame([0, 60, 120, 600, 660])
-    (t,) = _run(df, {0: "buy", 2: "close"}).trades
-    assert t.open_at_end
 
 
 def test_session_mode_needs_a_session_column():

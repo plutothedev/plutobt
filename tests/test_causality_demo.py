@@ -48,8 +48,8 @@ def test_the_refusal_is_the_guard_not_something_else():
 def test_the_honest_twin_runs_and_reports_as_it_comes_out():
     result = demo.run_honest()
     m = result.metrics
-    assert m["n_trades"] == 387
-    assert m["sharpe"] == pytest.approx(0.07, abs=0.01)
+    assert m["n_trades"] == 391
+    assert m["sharpe"] == pytest.approx(-0.07, abs=0.01)
     lo, hi = m["sharpe_ci"]
     assert lo < 0.0 < hi
 
@@ -59,4 +59,4 @@ def test_the_printed_demo_shows_the_refusal_then_the_report(printed):
     assert "LookaheadError:" in printed and "'tomorrow_up'" in printed
     assert printed.index("LookaheadError") < printed.index("=== PlutoBT report: NQ ===")
     assert "IN-SAMPLE" in printed
-    assert "Trades        = 387   (closed)" in printed
+    assert "Trades        = 391   (closed)" in printed
