@@ -67,5 +67,8 @@ class Strategy:
         ``ctx.position`` is a read-only snapshot: stops move with
         ``ctx.broker.amend_stop(...)`` and exits go through ``ctx.broker.close()``
         (or an order), never through writes to the position.
+        Protect an entry by attaching its stop to the order (``buy(1, stop=...)``),
+        above all a limit entry: a stop set with ``amend_stop`` while flat lasts only
+        for the next bar, so a limit that fills later would be unprotected.
         """
         return None

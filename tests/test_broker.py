@@ -1140,3 +1140,25 @@ def test_margin_boundary_is_exact_to_the_cent(symbol, open_px):
         order = broker.buy(contracts=1)
         broker.fill_pending(_flat_bar(1, open_px))
         assert order.status == status, (symbol, cash)
+
+
+def test_stop_set_while_flat_lasts_one_bar_a_later_limit_fill_is_unprotected():
+    # PIN (documented behaviour, not a goal): the flat book drops the stop after the
+    # bar it was meant for. The limit fills a bar later, through 14,900, unprotected.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.amend_stop(14_900.0)
+    broker.buy(contracts=1, limit=14_950.0)
+    assert broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_980.0, 15_000.0)) == []
+    assert broker.resting_stop is None
+    fills = broker.fill_pending(Bar(2, 15_000.0, 15_010.0, 14_800.0, 14_850.0))
+    assert [(f.side, f.price) for f in fills] == [("buy", 14_950.0)]
+    assert pf.position.qty == 1
+
+
+def test_attached_stop_protects_a_limit_that_fills_later():  # the supported way
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1, limit=14_950.0, stop=14_900.0)
+    assert broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_980.0, 15_000.0)) == []
+    fills = broker.fill_pending(Bar(2, 15_000.0, 15_010.0, 14_800.0, 14_850.0))
+    assert [(f.side, f.price) for f in fills] == [("buy", 14_950.0), ("sell", 14_900.0)]
+    assert pf.position.qty == 0
