@@ -117,6 +117,9 @@ def assert_causal(
     precompute_fn: Callable[[pd.DataFrame], pd.DataFrame],
     df: pd.DataFrame,
     sample: int | str | None = None,
+    *,
+    full: pd.DataFrame | None = None,
+    stacklevel: int = 2,
 ) -> None:
     """Raise LookaheadError if ``precompute_fn`` reads bars after the one it fills.
 
@@ -140,8 +143,16 @@ def assert_causal(
 
     A precompute that drops, adds or reorders rows is refused with a FrameError (a
     ValueError) before any compare, since its rows no longer line up with the bars.
+
+    ``full`` is the frame the prefixes are compared with: by default
+    ``precompute_fn(df)``; Engine.run passes the frame it trades, so what is checked is
+    exactly what is traded. ``precompute_fn`` must start from the same state on every
+    call: Engine.run gives each call its own deepcopy of the strategy as it was passed
+    in, so nothing one call saves on the strategy reaches the next.
     """
-    full = precompute_fn(df.copy()).reset_index(drop=True)
+    if full is None:
+        full = precompute_fn(df.copy())
+    full = full.reset_index(drop=True)
     n = len(df)
     _check_rows(full, df, "precompute(df)")
     if n < 2:
@@ -151,7 +162,7 @@ def assert_causal(
     if sample == "auto" and len(grid) < n - 1:   # an explicit k was asked for
         warnings.warn(f"causality check sampled: {len(grid)} of {n - 1} prefixes on {n} "
                       "bars (set causality_sample = None to check every prefix)",
-                      UserWarning, stacklevel=2)
+                      UserWarning, stacklevel=stacklevel)
 
     expected = {col: _values(full[col]) for col in full.columns}
     for t in grid:
@@ -171,6 +182,20 @@ def assert_causal(
                     f"prefix={prefix[col].iloc[bad]!r} != full={full[col].iloc[bad]!r} "
                     f"(the value changed when the bars after t={t} were removed)"
                 )
+    return None
+
+
+def first_difference(got: pd.DataFrame, expected: pd.DataFrame) -> tuple | None:
+    """(column, row) of the first value of ``expected`` that ``got`` does not match, by
+    the same rule as the causality check (a missing column is row None); None if all
+    match. Both frames must have the same number of rows."""
+    got, expected = got.reset_index(drop=True), expected.reset_index(drop=True)
+    for col in expected.columns:
+        if col not in got.columns:
+            return col, None
+        bad = _mismatch_at(_values(got[col]), _values(expected[col]), col)
+        if bad is not None:
+            return col, bad
     return None
 
 

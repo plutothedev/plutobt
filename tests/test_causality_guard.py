@@ -161,9 +161,10 @@ def test_demo_runs_identically_with_the_check_on_and_off(sym):
         (t.entry_ts, t.exit_ts, t.pnl) for t in off.trades]
 
 
-def test_the_engine_trades_on_its_own_full_frame_precompute():
-    # The check calls precompute on prefixes too; the loop runs the frame the engine's
-    # own first call made, and the strategy's last call is the full frame again.
+def test_the_engine_trades_the_frame_it_checked():
+    # The traded frame comes from a copy of the strategy on the full frame; each prefix
+    # runs on its own copy; the strategy passed in runs the full frame last, so the
+    # state on_bar sees is the traded call's.
     seen = []
 
     def record(df):
@@ -171,7 +172,132 @@ def test_the_engine_trades_on_its_own_full_frame_precompute():
         return _honest(df)
 
     _eng().run(_bars(), Fn(record))
-    assert seen[0] == 60 and seen[-1] == 60
+    assert seen == [60, *range(1, 60), 60]
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02, second round): state saved by precompute cannot leak into the
+# check. Every call starts from a deepcopy of the strategy as it was passed in.
+# ---------------------------------------------------------------------------
+
+class FitOnce(Strategy):
+    """Fits a z-score's mean and std on the first frame it sees, then reuses them: the
+    engine's first call is the full frame, so the fit is the whole sample's."""
+
+    def __init__(self):
+        self.mu = self.sd = None
+
+    def precompute(self, df):
+        if self.mu is None:
+            self.mu, self.sd = df["close"].mean(), df["close"].std()
+        return df.assign(z=(df["close"] - self.mu) / self.sd)
+
+
+def test_a_fit_once_whole_sample_state_is_refused():
+    # Unchecked (probe p_state), every check reused the full-sample fit and ran clean.
+    with pytest.raises(LookaheadError, match="non-causal column 'z'"):
+        _eng().run(_bars(), FitOnce())
+
+
+def test_a_refused_strategy_is_left_as_passed_and_refused_again():
+    # Only copies ran, so the strategy keeps no whole-sample fit for a second run to
+    # reuse; the same object is refused again.
+    s = FitOnce()
+    for _ in range(2):
+        with pytest.raises(LookaheadError, match="non-causal column 'z'"):
+            _eng().run(_bars(), s)
+        assert s.mu is None
+
+
+def test_a_leak_only_in_the_first_call_is_refused():
+    # Probe p_state's Counting: it leaked on the engine's first (traded) call only.
+    class FirstCall(Strategy):
+        def __init__(self):
+            self.k = 0
+
+        def precompute(self, df):
+            self.k += 1
+            x = df["close"].shift(-1).ffill() if self.k == 1 else df["close"]
+            return df.assign(x=x)
+
+    with pytest.raises(LookaheadError, match="non-causal column 'x'"):
+        _eng().run(_bars(), FirstCall())
+
+
+def test_a_leak_in_the_traded_call_through_class_state_is_refused():
+    # Class attributes are shared by the copies, so this leaks on the first call ever
+    # and never again; the check compares the prefixes with the frame that is traded.
+    class Shared(Strategy):
+        calls = 0
+
+        def precompute(self, df):
+            type(self).calls += 1
+            x = df["close"].shift(-1).ffill() if type(self).calls == 1 else df["close"]
+            return df.assign(x=x)
+
+    with pytest.raises(LookaheadError, match="non-causal column 'x'"):
+        _eng().run(_bars(), Shared())
+
+
+def test_a_seeded_rng_made_in_init_runs():
+    # Probe p_state: each call drew fresh numbers from one RNG and was refused. Every
+    # copy now starts from the same RNG state, as the traded call did.
+    class Coin(Fn):
+        def __init__(self):
+            super().__init__(None)
+            self.rng = np.random.default_rng(7)
+
+        def precompute(self, df):
+            return df.assign(go=self.rng.random(len(df)) < 0.3)
+
+    on = _eng().run(_bars(), Coin())
+    off = _eng(check_causality=False).run(_bars(), Coin())
+    assert list(on.equity_curve) == list(off.equity_curve) and on.trades
+
+
+def test_on_bar_runs_on_the_strategy_passed_in_with_the_traded_calls_state():
+    class Remembers(Strategy):
+        def __init__(self):
+            self.fitted_on, self.seen = None, []
+
+        def precompute(self, df):
+            self.fitted_on = len(df)
+            return df
+
+        def on_bar(self, ctx):
+            self.seen.append(self.fitted_on)
+
+    s = Remembers()
+    _eng().run(_bars(), s)
+    assert s.seen == [60] * 60 and s.fitted_on == 60
+
+
+def test_a_precompute_that_differs_on_the_strategy_passed_in_is_refused():
+    # The traded frame came from a copy; on_bar runs on the strategy passed in, so its
+    # own full-frame call must give the same frame, or on_bar's state is not the
+    # traded one.
+    class Drifts(Strategy):
+        calls = 0
+
+        def precompute(self, df):
+            type(self).calls += 1
+            return df.assign(x=float(type(self).calls > 60))   # call 61 = the last one
+
+    with pytest.raises(LookaheadError, match="column 'x'.*same starting state"):
+        _eng().run(_bars(), Drifts())
+
+
+def test_a_strategy_that_cannot_be_copied_is_refused_with_the_switch_named():
+    import threading
+
+    class Locked(Fn):
+        def __init__(self):
+            super().__init__(_honest)
+            self.lock = threading.Lock()
+
+    with pytest.raises(TypeError, match="deepcopy.*check_causality = false"):
+        _eng().run(_bars(), Locked())
+    assert len(_eng(check_causality=False).run(_bars(), Locked()).equity_curve) == 60
 
 
 def test_engine_refuses_a_backfilled_first_return():

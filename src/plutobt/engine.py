@@ -3,6 +3,7 @@ manifest build (§2, §5.1, §5.5, §5.9, §5.10)."""
 from __future__ import annotations
 
 import collections
+import copy
 import hashlib
 import keyword
 import math
@@ -17,7 +18,13 @@ from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
 from plutobt.data import assert_positive_prices
 from plutobt.instruments import Instrument
-from plutobt.lookahead import _ROW_RULE, LookaheadError, _first_mismatch, assert_causal
+from plutobt.lookahead import (
+    _ROW_RULE,
+    LookaheadError,
+    _first_mismatch,
+    assert_causal,
+    first_difference,
+)
 from plutobt.portfolio import MarginCall, Portfolio, Trade
 from plutobt.strategy import Context, Strategy
 
@@ -126,6 +133,22 @@ def _session_problem(frame: pd.DataFrame) -> str | None:
     return None
 
 
+def _snapshot(strategy: Strategy) -> Strategy:
+    """A deepcopy of the strategy as passed in, which every precompute call of the
+    look-ahead check starts from; a strategy that cannot be copied is refused, naming
+    the switch that skips the check."""
+    try:
+        return copy.deepcopy(strategy)
+    except Exception as e:  # deepcopy surfaces TypeError, PicklingError, RecursionError...
+        raise TypeError(
+            "the look-ahead check runs precompute on copies of the strategy "
+            f"(copy.deepcopy), and this one cannot be copied: {type(e).__name__}: {e}. "
+            "Keep plain data on the strategy (numbers, arrays, frames, a seeded RNG) and "
+            "open connections, locks or files inside on_bar, or set check_causality = "
+            "false to skip the check"
+        ) from e
+
+
 def _warm_up_end(df: pd.DataFrame, data: pd.DataFrame, signal_cols: list) -> int:
     """The row of the first bar with every signal column set (len(data) if none is):
     the bars before it are the warm-up, where on_bar is skipped. A NaN after it is
@@ -180,14 +203,21 @@ class Engine:
             precompute that drops, adds or reorders rows, or changes a base column
             (ts, open, high, low, close, volume, session) the caller's frame holds,
             since the fills read those columns.
-        Look-ahead guard (``check_causality``, on by default): the precompute is run
-            on every prefix ``df[:t+1]`` (``causality_sample="auto"`` samples
-            above 2,000 bars, with a warning; see BacktestConfig)
-            and each bar's values must match the full run's; a leak (a ``.shift(-1)``,
-            a whole-sample mean) raises LookaheadError naming the column, before any
-            bar runs. It checks precompute only: ``on_bar`` must decide from ``ctx``
-            alone, and no check can stop strategy code written to read ahead some
-            other way (see strategy.py).
+        Look-ahead guard (``check_causality``, on by default): the strategy is
+            snapshotted with ``copy.deepcopy`` before any precompute runs. The traded
+            frame is precompute on a fresh copy, on the full frame; each prefix
+            ``df[:t+1]`` (``causality_sample="auto"`` samples above 2,000 bars, with a
+            warning; see BacktestConfig) runs on its own fresh copy and must match the
+            traded frame's first t+1 rows, so what is checked is what is traded and no
+            state one call saves (a fit-once mean) reaches another. A leak (a
+            ``.shift(-1)``, a whole-sample mean) raises LookaheadError naming the
+            column, before any bar runs. ``on_bar`` runs on the strategy passed in,
+            which then runs the full frame itself so its state is the traded call's
+            (its frame must match the traded one); a refused strategy is left as it
+            was passed in. A strategy that cannot be deep-copied is refused with a
+            TypeError naming the switch. The guard checks precompute only: ``on_bar``
+            must decide from ``ctx`` alone, and no check can stop strategy code written
+            to read ahead some other way (see strategy.py).
         Decision-at-t: ``on_bar`` is called with bar t's data. ``ctx.position`` is
             a copy of the position for the bar: a strategy's writes to it never
             reach the book (stops move with ``ctx.broker.amend_stop``).
@@ -237,23 +267,18 @@ class Engine:
                     "allow_nonpositive_prices = true only for an instrument that really "
                     "traded there (CL settled at -37.63 on 2020-04-20)"
                 ) from refused
-        data = strategy.precompute(df.copy()).reset_index(drop=True)
+        if self.config.check_causality:
+            # Snapshot first: the traded call and every prefix call start from their own
+            # deepcopy of the strategy as passed in, so state one call saves (a fit-once
+            # mean, an RNG's position) never reaches another.
+            snapshot = _snapshot(strategy)
+            data = copy.deepcopy(snapshot).precompute(df.copy()).reset_index(drop=True)
+        else:
+            data = strategy.precompute(df.copy()).reset_index(drop=True)
         self._check_frame(data, precomputed=True)      # what the strategy made of it
         self._check_precompute_kept_the_bars(df, data)
         if self.config.check_causality:
-            try:
-                assert_causal(strategy.precompute, df, sample=self.config.causality_sample)
-            except LookaheadError as leak:
-                raise LookaheadError(
-                    f"the strategy's precompute looks ahead: {leak}. Each bar's values "
-                    "must come from that bar and the ones before it. Fix the precompute "
-                    "(check_causality = false skips this guard; use it only to study a "
-                    "known leak)"
-                ) from leak
-            # The check's last call was a prefix: call the full frame once more, so a
-            # strategy's own state from precompute (against the contract, but common)
-            # matches the frame the loop runs. The loop keeps the first call's result.
-            strategy.precompute(df.copy())
+            self._check_causality(df, strategy, snapshot, data)
         session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
         warm_up_end = _warm_up_end(df, data, signal_cols)
@@ -359,6 +384,41 @@ class Engine:
             manifest=manifest,
             margin_calls=margin_calls,
         )
+
+    def _check_causality(self, df: pd.DataFrame, strategy: Strategy, snapshot: Strategy,
+                         data: pd.DataFrame) -> None:
+        """The look-ahead guard. ``data`` is the frame the loop will trade, made by a copy
+        of ``snapshot`` (the strategy as passed in). Each prefix df[:t+1] runs on its own
+        fresh copy of ``snapshot`` and must match ``data``'s first t+1 rows, so what is
+        checked is exactly what is traded. Then the strategy passed in, still in the
+        snapshot's state (only copies have run), runs the full frame itself: on_bar runs
+        on it, so its state must be the traded call's, and its frame must match ``data``.
+        A refused strategy is left as it was passed in."""
+        hint = ("Each bar's values must come from that bar and the ones before it. Fix "
+                "the precompute (check_causality = false skips this guard; use it only to "
+                "study a known leak)")
+        try:
+            assert_causal(lambda d: copy.deepcopy(snapshot).precompute(d), df,
+                          sample=self.config.causality_sample, full=data)
+        except LookaheadError as leak:
+            raise LookaheadError(
+                f"the strategy's precompute looks ahead: {leak}. {hint}") from leak
+        again = strategy.precompute(df.copy()).reset_index(drop=True)
+        if len(again) != len(data):
+            raise FrameError(f"the strategy's precompute returned {len(again)} rows for "
+                             f"{len(df)} input bars on its second full-frame call: "
+                             f"{_ROW_RULE}")
+        differs = first_difference(again, data)
+        if differs is not None:
+            col, row = differs
+            where = "is missing" if row is None else f"differs at row {row}"
+            raise LookaheadError(
+                f"the strategy's precompute gave a different frame on the strategy passed "
+                f"in than on its copy (column {col!r} {where}), though both ran the full "
+                "frame from the same starting state: it depends on something outside the "
+                "strategy and the bars (a class attribute, a global random state, the "
+                "clock), so the frame on_bar's state comes from is not the one checked. "
+                f"{hint}")
 
     def _check_frame(self, frame: pd.DataFrame, *, precomputed: bool) -> None:
         """Refuse a frame the loop cannot run: bar timestamps that do not strictly

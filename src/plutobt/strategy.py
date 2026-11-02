@@ -54,12 +54,20 @@ class Strategy:
     """
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Vectorized, CAUSAL, STATELESS indicator/signal computation.
+        """Vectorized, CAUSAL indicator/signal computation.
 
         Add columns to ``df`` and return it (see the class docstring for the rules).
-        The engine calls it more than once: on the full frame, then on prefixes
-        ``df[:t+1]`` for the causality check. Base implementation is identity
-        passthrough; subclasses override.
+        With ``check_causality`` on, the engine calls it more than once, each check
+        call on its own deepcopy of the strategy as it was passed to ``Engine.run``:
+        on the full frame (the frame that is traded), on each prefix ``df[:t+1]``, then
+        once more on the strategy itself, so ``on_bar`` sees the traded call's state.
+        So nothing one call saves on ``self`` reaches another: a mean fitted "once" on the
+        first frame seen is refitted on each prefix, and is caught if it used the whole
+        sample. State the strategy already holds when ``Engine.run`` is called is a
+        parameter (fit a model on training data before the run, never inside
+        ``precompute`` on the bars being tested). A function held on ``self`` is shared
+        by the copies, not copied, so state it captures is outside the snapshot. Base
+        implementation is identity passthrough; subclasses override.
         """
         return df
 
