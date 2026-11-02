@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -114,14 +115,19 @@ def get_instrument(symbol: str) -> Instrument:
         raise KeyError(f"unknown symbol {symbol!r}; known symbols: {known}") from None
 
 
+_DIGITS = re.compile(r"[0-9]+")   # plain ASCII digits; re's \d takes any Unicode digit
+
+
 def parse_price(raw: str | float, instrument: Instrument) -> float:
     """Convert a raw quote to decimal points.
 
     Decimal instruments pass through. For ``thirty_seconds`` (Treasury 32nds),
     a string ``"<handle>'<32nds>[half]"`` like ``"110'085"`` parses to
-    ``110 + 8.5/32`` (the 3rd digit is the half-32nd: 0 or 5). Only prices the
-    contract can trade at parse: whole 32nds 00..31 and a 3rd digit of 0 or 5, so the
-    fractional part runs 000..315 on ZN's 1/64 grid; anything else raises ValueError.
+    ``110 + 8.5/32`` (the 3rd digit is the half-32nd: 0 or 5). The handle is a
+    non-negative whole number in plain digits 0-9 (no sign, space or exponent). Only
+    prices the contract can trade at parse: whole 32nds 00..31 and a 3rd digit of 0 or
+    5, so the fractional part runs 000..315 on ZN's 1/64 grid; anything else raises
+    ValueError.
     Numeric input on a 32nds instrument is treated as already-decimal points (spec §5.3).
     """
     if instrument.price_format != "thirty_seconds":
@@ -134,7 +140,15 @@ def parse_price(raw: str | float, instrument: Instrument) -> float:
         raise ValueError(f"malformed 32nds quote {raw!r}: expected \"<handle>'<32nds>\"")
 
     handle_str, _, frac_str = raw.partition("'")
-    if not handle_str or len(frac_str) != 3 or not frac_str.isdigit():
+    # ASCII digits only (str.isdigit also takes Arabic-Indic and other digits), and
+    # never float() on the handle: it took "-110", "nan", "inf" and "1e2", so
+    # "-110'085" parsed as -109.734375 and "-0'160" as +0.5.
+    if _DIGITS.fullmatch(handle_str) is None:
+        raise ValueError(
+            f"malformed 32nds quote {raw!r}: the handle before the ' must be a whole "
+            "number of points in digits 0-9, with no sign, space or exponent"
+        )
+    if len(frac_str) != 3 or _DIGITS.fullmatch(frac_str) is None:
         raise ValueError(
             f"malformed 32nds quote {raw!r}: fractional part must be exactly 3 digits"
         )
@@ -148,7 +162,7 @@ def parse_price(raw: str | float, instrument: Instrument) -> float:
             f"(e.g. 110'085 = 110 + 8.5/32)"
         )
 
-    handle = float(handle_str)
+    handle = float(int(handle_str))
     thirty_seconds = float(frac_str[:2])
     thirty_seconds += int(frac_str[2]) / 10.0   # e.g. '5' -> +0.5 of a 32nd, '0' -> +0.0
     return handle + thirty_seconds / 32.0

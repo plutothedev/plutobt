@@ -307,3 +307,24 @@ def test_parse_price_zn_accepts_every_half_32nd_on_the_grid():
             got = parse_price(f"110'{whole:02d}{half}", zn)
             assert got == 110 + (whole + half / 10.0) / 32.0
             assert (got - 110) / zn.tick_size == pytest.approx(round((got - 110) / zn.tick_size))
+
+
+@pytest.mark.parametrize("quote", [
+    "-110'085",    # parsed as -109.734375: the minus only reached the handle
+    "-0'160",      # parsed as +0.5: float("-0") is -0.0, plus 16/32
+    "nan'000", "inf'000", "1e2'000",      # float() accepted all three
+    "+110'085", " 110'085", "110 '085", "1_10'085", "110.0'085",
+    "١١٠'085",    # Arabic-Indic digits: str.isdigit() accepts them
+    "110'٠٨٥",
+])
+def test_parse_price_zn_refuses_a_handle_that_is_not_a_plain_whole_number(quote):
+    # Review finding (2026-11-02): the handle went straight to float(), unchecked.
+    zn = get_instrument("ZN")
+    with pytest.raises(ValueError, match="32nds quote"):
+        parse_price(quote, zn)
+
+
+def test_parse_price_zn_still_parses_a_zero_and_a_leading_zero_handle():
+    zn = get_instrument("ZN")
+    assert parse_price("0'160", zn) == 0.5
+    assert parse_price("0110'085", zn) == 110 + 8.5 / 32
