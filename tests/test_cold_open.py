@@ -142,6 +142,8 @@ def test_nobody_is_flat_overnight_and_the_docstring_says_so():
     overnight = [t for t in result.trades
                  if t.exit_ts is not None and day_of[t.entry_ts] != day_of[t.exit_ts]]
     assert len(overnight) == 10                            # the engine holds 10 overnight
+    engine_gaps = {x for x in ts[last] for t in overnight if t.entry_ts <= x < t.exit_ts}
+    assert engine_gaps == set(ts[last & (truth == 1.0)])  # over the truth line's 10
     firsts = set(ts[first])
     assert not any(t.entry_ts in firsts for t in result.trades)   # and opens none there
 
