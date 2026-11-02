@@ -21,7 +21,7 @@ Everything is **futures-accurate, not stock-approximate**:
 ```
 plutobt/
 ├─ src/plutobt/          ← the engine (12 modules, ~1700 LOC)
-├─ tests/                ← 258 tests, one file per module
+├─ tests/                ← the test suite, one file per module (plus property and sample-data tests)
 ├─ examples/run_demo.py  ← the end-to-end demo (the "video payoff")
 ├─ scripts/              ← gen_sample.py (synthetic data), freeze_golden.py
 ├─ configs/              ← per-symbol cost configs (nq/es/cl.toml) + golden
@@ -87,7 +87,7 @@ class EMACross(Strategy):
 ```bash
 pip install -e ".[dev]"           # Python 3.11+
 python examples/run_demo.py       # runs EMACross on NQ, ES, CL → 3 reports
-pytest -q                         # 258 tests + golden-run regression
+pytest -q                         # full suite + golden-run regression (pytest --slow adds the look-ahead property sweep)
 python scripts/freeze_golden.py   # re-freeze golden after a deliberate change
 ```
 The demo is the thesis in code: **same engine + strategy, swap symbol & cost config → costs do NOT auto-carry.** Proves generalization without pretending costs are universal.
@@ -97,9 +97,9 @@ The demo is the thesis in code: **same engine + strategy, swap symbol & cost con
 2. **`parse_price` requires exactly-3-digit 32nds** (`"110'085"` works, `"110'08"` raises). Resolves a contradiction in the build plan. Harmless in practice — the real data path is decimal floats; 32nds strings are a display/edge case.
 
 ## 10. Status
-**v1 is complete.** All 9 milestones built, PR #1 merged to `master`, **258 tests green**, working tree clean. Built via subagent-driven TDD (a final whole-pipeline review caught 3 cross-module bugs unit tests missed — notably R-multiples were silently always-None from an M4↔M5 seam gap; fixed + golden re-frozen).
+**v1 is complete; pre-film audit fixes landed 2026-11-02** on branch `film/ready`. A pre-film audit found and fixed look-ahead in the equity curve, entry-bar stops, margin calls that never ran, scale-in margin, stale stops after flips, allow_short, overnight exits, the look-ahead check itself (now run by `Engine.run`, verified by a randomized property sweep), off-session sample data, and report honesty (CI and PSR on the same skew/kurtosis-adjusted basis). Every fix was reviewed by an independent agent with executable probes.
 
-**What's left** (none is engine code): record the YouTube video (9-segment plan in `docs/`); keep the data/no-sweep discipline; optional beyond-v1 (MinTRL, full continuous-contract back-adjustment — both deliberately cut from v1).
+**What's left** (none is engine code): record the YouTube video (script in `docs/`); keep the data/no-sweep discipline; optional beyond-v1 (MinTRL, full continuous-contract back-adjustment — both deliberately cut from v1).
 
 ## Where to go deeper
 - Design spec: `docs/superpowers/specs/2026-06-07-plutobt-engine-design.md`

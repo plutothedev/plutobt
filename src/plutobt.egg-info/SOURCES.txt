@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-src/plutobt/__init__.py
-src/plutobt.egg-info/PKG-INFO
-src/plutobt.egg-info/SOURCES.txt
-src/plutobt.egg-info/dependency_links.txt
-src/plutobt.egg-info/requires.txt
-src/plutobt.egg-info/top_level.txt
-tests/test_smoke.py
