@@ -189,6 +189,18 @@ def test_sortino_no_downside_returns_inf():
     assert math.isinf(sortino(r, mar=0.0, periods_per_year=1.0))
 
 
+def test_sortino_flat_returns_is_nan_not_inf():
+    # 0/0: no excess return over no downside. A zero-variance curve has no defined
+    # Sortino, the same convention as profit_factor's 0/0 (NaN), never +inf.
+    r = pd.Series([0.0, 0.0, 0.0])
+    assert math.isnan(sortino(r, mar=0.0, periods_per_year=20412.0))
+
+
+def test_sortino_no_returns_is_nan_not_zero():
+    # No data must never read as a measured 0.0.
+    assert math.isnan(sortino(pd.Series([], dtype=float), mar=0.0, periods_per_year=1.0))
+
+
 # ---------------------------------------------------------------------------
 # M7.5 — max_drawdown (depth + duration)
 # ---------------------------------------------------------------------------
@@ -242,6 +254,11 @@ def test_calmar_annual_return_over_abs_max_dd():
 
 def test_calmar_zero_drawdown_returns_inf():
     assert math.isinf(calmar(0.20, 0.0))
+
+
+def test_calmar_zero_return_over_zero_drawdown_is_nan_not_inf():
+    # 0/0 on a flat curve: undefined, NaN (as profit_factor's 0/0), never +inf.
+    assert math.isnan(calmar(0.0, 0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -463,11 +480,26 @@ def test_compute_metrics_win_rate_per_s03():
     assert_allclose(out["win_rate"], 2.0 / 3.0, rtol=0, atol=1e-12)
 
 
-def test_compute_metrics_win_rate_zero_when_no_closed_trades():
-    """§0.3: win_rate = 0.0 when n_closed == 0."""
+def test_compute_metrics_win_rate_nan_when_no_closed_trades():
+    """win_rate is NaN when n_closed == 0 (was 0.0 under §0.3). 0 wins of 0 trades is
+    no measurement, and 0.000 on screen reads as "lost every trade"; NaN matches
+    profit_factor and expectancy, which were already NaN with no closed trades."""
     eq = pd.Series([100.0, 110.0])
     out = compute_metrics(_result_with(eq, []), periods_per_year=1.0)
-    assert out["win_rate"] == 0.0
+    assert math.isnan(out["win_rate"])
+
+
+def test_compute_metrics_flat_curve_has_no_defined_ratios():
+    """A flat, zero-trade curve: every ratio is 0/0, so NaN, consistently. The Sharpe
+    SE/CI are NaN too: Lo's SE at zero volatility is a fake +/-1.96*sqrt(ppy/T)
+    interval around a Sharpe that is itself 0/0."""
+    eq = pd.Series([100_000.0] * 50)
+    out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
+    assert out["T"] == 49
+    for key in ("sortino", "calmar", "profit_factor", "expectancy", "win_rate", "sharpe_se"):
+        assert math.isnan(out[key]), key
+    lo, hi = out["sharpe_ci"]
+    assert math.isnan(lo) and math.isnan(hi)
 
 
 def test_compute_metrics_derives_periods_per_year_from_manifest():

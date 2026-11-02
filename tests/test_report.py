@@ -234,3 +234,39 @@ def test_real_demo_report_shows_factor_se_and_the_zero_flag():
     assert f"{m['sharpe_se']:.3f}" in _line(text, "Sharpe SE")
     assert f"{m['psr']:.3f}" in _line(text, "PSR")
     assert f"{m['sharpe_raw']:.5f}" in _line(text, "Sharpe/bar")
+
+
+def _flat_result():
+    from plutobt.metrics import compute_metrics
+
+    eq = pd.Series([100_000.0] * 50, index=range(0, 50 * 300, 300))
+    res = BacktestResult(equity_curve=eq, trades=[], metrics={},
+                         manifest={"data_sha256": "deadbeef", "version": "0.1.0"})
+    res.metrics = compute_metrics(res, periods_per_year=20412.0)
+    return res
+
+
+def test_flat_zero_trade_report_prints_na_never_a_fake_number():
+    # A flat curve used to print Sortino/Calmar = inf, Win rate = 0.000 and a
+    # fake 95% CI [-15.58, 15.58] built from Lo's SE at zero volatility.
+    text = format_report(_flat_result(), symbol="NQ")
+    assert "inf" not in text and "nan" not in text
+    assert "15.58" not in text
+    se = _line(text, "Sharpe SE")
+    assert "n/a" in se and "95% CI n/a" in se and "zero return volatility" in se
+    assert "CI includes 0" not in text  # no interval, so no claim about it
+    assert _line(text, "Sortino").split("=", 1)[1].strip().startswith("n/a")
+    assert _line(text, "Calmar").split("=", 1)[1].strip().startswith("n/a")
+    assert _line(text, "Win rate").split("=", 1)[1].strip() == "n/a (no trades)"
+    assert _line(text, "Profit factor").split("=", 1)[1].strip() == "n/a (no trades)"
+
+
+@pytest.mark.parametrize(
+    "key,expected",
+    [("sortino", "inf (no downside)"), ("calmar", "inf (no drawdown)")],
+)
+def test_report_labels_an_infinite_sortino_or_calmar(key, expected):
+    res = _fake_result()
+    res.metrics[key] = float("inf")
+    text = format_report(res, symbol="NQ")
+    assert _line(text, key.capitalize()).split("=", 1)[1].strip() == expected

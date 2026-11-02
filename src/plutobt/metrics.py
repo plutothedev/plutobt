@@ -113,17 +113,19 @@ def sortino(returns: pd.Series, mar: float, periods_per_year: float) -> float:
     DR = sqrt((1/N) * sum(min(R_t - MAR, 0)^2)) -- positive excursions zeroed
     but ALL N periods in the denominator, NOT divided by the downside count.
     MAR is at the same frequency as ``returns``; DR is annualized by
-    sqrt(periods_per_year). Returns +inf when there is no downside.
+    sqrt(periods_per_year). Returns +inf when there is no downside and a positive
+    mean excess; NaN for 0/0 (a flat curve: no downside and no excess) and for no
+    returns at all, the same convention as ``profit_factor``.
     """
     r = np.asarray(returns, dtype=float)
     n = r.size
     if n == 0:
-        return 0.0
+        return float("nan")
     excess = r - mar
     downside = np.minimum(excess, 0.0)
     dr = math.sqrt((downside**2).sum() / n)
     if dr == 0.0:
-        return float("inf")
+        return float("inf") if excess.mean() > 0.0 else float("nan")
     return float((excess.mean() / dr) * math.sqrt(periods_per_year))
 
 
@@ -176,9 +178,10 @@ def trailing_hwm_drawdown(equity: pd.Series) -> float:
 
 
 def calmar(annual_return: float, max_dd: float) -> float:
-    """Calmar/MAR ratio = AnnualizedReturn / |MaxDD|; +inf when MaxDD is 0."""
+    """Calmar/MAR ratio = AnnualizedReturn / |MaxDD|; +inf when MaxDD is 0 and the
+    return is positive, NaN for 0/0 (a flat curve), as ``profit_factor``'s 0/0."""
     if max_dd == 0.0:
-        return float("inf")
+        return float("inf") if annual_return > 0.0 else float("nan")
     return float(annual_return / abs(max_dd))
 
 
@@ -376,8 +379,12 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # here. The raw-unit statistics stay available through the
     # pinned pure functions and sharpe_raw.
     scale = math.sqrt(periods_per_year)
-    se = sharpe_se(sr_raw, t_count) * scale if t_count > 0 else float("nan")
-    if t_count > 0:
+    # Zero return volatility: the Sharpe is 0/0 (sharpe() reports it as 0.0), and Lo's
+    # SE at sr = 0 is a fixed sqrt(1/T) that would print a fake interval around it
+    # ([-15.58, 15.58] at T = 323, ppy = 20412). NaN, like the T = 0 case.
+    has_vol = t_count > 0 and float(np.asarray(returns, dtype=float).std(ddof=0)) > 0.0
+    se = sharpe_se(sr_raw, t_count) * scale if has_vol else float("nan")
+    if has_vol:
         raw_lo, raw_hi = sharpe_ci(sr_raw, t_count)
         ci = (raw_lo * scale, raw_hi * scale)
     else:
@@ -399,7 +406,9 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     closed = _closed_trades(trades)
     n_closed = len(closed)
     wins = [t for t in closed if trade_net_pnl(t) > 0.0]
-    win_rate_val = (len(wins) / n_closed) if n_closed > 0 else 0.0  # §0.3
+    # NaN with no closed trades (§0.3 said 0.0): 0 of 0 is no measurement, and it
+    # matches profit_factor / expectancy, which are NaN there too.
+    win_rate_val = (len(wins) / n_closed) if n_closed > 0 else float("nan")
     pf = profit_factor(trades)
     exp = expectancy(trades)
     a_r = avg_r(trades)
