@@ -442,6 +442,19 @@ def test_on_bar_sees_the_fill_at_its_own_bars_open():
     assert strat.seen[1] == (1, pytest.approx(100_000.0 + 5 * 20))
 
 
+def test_flip_without_a_new_stop_leaves_no_stale_stop_in_the_engine():
+    # Long 1 from bar 1's open (100) with stop 95; sell(2) on bar 1 flips short at bar
+    # 2's open (100). The 95 sell-stop belonged to the long: as a buy-stop on the short
+    # it would fire at once on bar 3 (high 101 >= 95). The short must ride to the end.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _ohlc([(100, 101, 99, 100)] * 5)
+    result = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1, stop=95.0),
+                                  1: lambda c: c.broker.sell(contracts=2)}))
+    assert [(t.side, t.exit_ts, t.open_at_end) for t in result.trades] == [
+        ("long", 600, False), ("short", None, True)]
+
+
 def test_entry_bar_stop_pierce_fires_in_the_engine():
     # Entry fills at bar 1's open 100 with stop 95; bar 1's low (90) trades through it.
     nq = get_instrument("NQ")

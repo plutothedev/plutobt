@@ -269,6 +269,14 @@ class Broker:
             return True
         return False
 
+    def _drop_stop_on_flip(self, prior_side: str | None) -> None:
+        """A fill that flipped the position clears the old side's stop: a sell-stop
+        under a long is no protective stop for the short that replaced it (it would
+        fire at once as a buy-stop). An attached stop on the flip re-arms after this."""
+        side = self._position_side()
+        if prior_side is not None and side is not None and side != prior_side:
+            self.resting_stop = None
+
     def fill_pending(self, next_bar) -> list[Fill]:
         if self.pending is not None:
             # Checked first, before the stop, the margin check or a trim reads the size.
@@ -280,12 +288,19 @@ class Broker:
         stop_fills = self._fire_resting_stop(next_bar)    # adverse fills first
         fills.extend(stop_fills)
         order = self.pending
-        # If the protective stop just flattened us, a same-bar exit order is stale.
-        if stop_fills and self.portfolio.position.qty == 0:
-            if order is not None:
+        # If the protective stop just flattened us, the pending order was sized against
+        # a position that is gone. A flip (same side as the stop's exit, more contracts
+        # than it closed) already has its closing half done, so it keeps just its new
+        # side: an entry from flat, margin-checked below. Anything else (an exit, a
+        # scale-in, a forced liquidation) is stale and cancelled.
+        if stop_fills and self.portfolio.position.qty == 0 and order is not None:
+            stopped = stop_fills[0]
+            if order.side == stopped.side and order.contracts > stopped.contracts:
+                order.contracts -= stopped.contracts
+            else:
                 order.status = "cancelled"
                 self.pending = None
-            order = None
+                order = None
         if order is not None:
             held = abs(self.portfolio.position.qty)
             reducing = self._is_reducing(order)
@@ -310,6 +325,7 @@ class Broker:
                         order = None
         if order is not None:
             armed_at: float | None = None     # where an attached stop went live, if one did
+            prior_side = self._position_side()
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)
                 fills.append(
@@ -318,6 +334,7 @@ class Broker:
                 )
                 order.status = "filled"
                 self.pending = None
+                self._drop_stop_on_flip(prior_side)
                 # An attached stop protects the position the fill leaves. A fill that
                 # flattens leaves none, and its stop must not become the NEXT position's
                 # initial_stop (that trade's R would read it).
@@ -338,6 +355,7 @@ class Broker:
                     )
                     order.status = "filled"
                     self.pending = None
+                    self._drop_stop_on_flip(prior_side)
                     # As for a market fill: no stop is left behind on a flat position.
                     if order.attached_stop is not None and self.portfolio.position.qty != 0:
                         self.resting_stop = order.attached_stop
