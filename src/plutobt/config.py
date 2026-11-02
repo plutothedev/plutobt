@@ -13,7 +13,7 @@ class BacktestConfig:
     risk_free: float = 0.0
     periods_per_year: float | None = None  # None => derived from data/session
     carry_overnight: bool = False
-    allow_short: bool = True
+    allow_short: bool = True   # False: an order that would leave a net short is refused
     # What is a break, where a pending order is cancelled (unless carry_overnight):
     # "gap" (default): a gap longer than the usual bar interval, or any change of the
     #   frame's `session` column (RTH/ETH labels work here); exits are cancelled too.

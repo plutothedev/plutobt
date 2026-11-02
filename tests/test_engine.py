@@ -469,3 +469,34 @@ def test_entry_bar_stop_pierce_fires_in_the_engine():
     assert tr.pnl == pytest.approx(-5 * 20)
     assert list(result.equity_curve) == pytest.approx(
         [100_000.0, 99_900.0, 99_900.0, 99_900.0])
+
+
+def test_demo_configs_refuse_shorts_in_the_engine():
+    # configs/nq.toml sets allow_short = false: a strategy's sell from flat opens nothing.
+    from plutobt.config import load_config
+    cfg = load_config(str(_REPO_ROOT / "configs" / "nq.toml"))
+    assert cfg.allow_short is False
+    df = _ohlc([(100, 101, 99, 100)] * 4)
+    result = Engine(get_instrument("NQ"), cfg).run(
+        df, _Script({1: lambda c: c.broker.sell(contracts=1)}))
+    assert result.trades == []
+    assert list(result.equity_curve) == pytest.approx([100_000.0] * 4)
+
+
+def test_demo_strategy_is_long_only_on_every_demo_config():
+    # allow_short changes nothing in the demo: run with shorts allowed, EMACross
+    # never opens one, so the demo's numbers do not depend on the new refusal.
+    from dataclasses import replace as dc_replace
+
+    from plutobt.config import load_config
+    from plutobt.strategies.ema_cross import EMACross
+    for sym in ("nq", "es", "cl"):
+        cfg = load_config(str(_REPO_ROOT / "configs" / f"{sym}.toml"))
+        df = load_bars(str(_REPO_ROOT / "data" / "sample" / f"{sym}_5m.json"))
+        inst = get_instrument(sym.upper())
+        refused = Engine(inst, cfg).run(df, EMACross())
+        allowed = Engine(inst, dc_replace(cfg, allow_short=True)).run(df, EMACross())
+        assert not any(t.side == "short" for t in allowed.trades)
+        assert [(t.entry_ts, t.exit_ts, t.pnl) for t in refused.trades] == [
+            (t.entry_ts, t.exit_ts, t.pnl) for t in allowed.trades]
+        assert list(refused.equity_curve) == list(allowed.equity_curve)

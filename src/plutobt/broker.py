@@ -301,6 +301,20 @@ class Broker:
                 order.status = "cancelled"
                 self.pending = None
                 order = None
+        if order is not None and not self.config.allow_short:
+            # allow_short=False: nothing may leave a net short. A sell that only closes
+            # a long goes through; a flip keeps just that closing half (its stop was for
+            # the short); a short entry is refused.
+            qty = self.portfolio.position.qty
+            signed = order.contracts if order.side == "buy" else -order.contracts
+            if qty + signed < 0:
+                if qty > 0:
+                    order.contracts = qty
+                    order.attached_stop = None
+                else:
+                    order.status = "rejected"
+                    self.pending = None
+                    order = None
         if order is not None:
             held = abs(self.portfolio.position.qty)
             reducing = self._is_reducing(order)

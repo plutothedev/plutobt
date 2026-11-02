@@ -744,3 +744,62 @@ def test_partial_close_keeps_the_stop():  # positive control
     broker.fill_pending(Bar(2, 100.0, 101.0, 99.0, 100.0))
     assert pf.position.qty == 1
     assert broker.resting_stop == 95.0
+
+
+# ---------------------------------------------------------------------------
+# allow_short=False: an order that would leave a net short is refused; a sell that only
+# closes a long goes through, and a flip keeps just that closing half.
+# ---------------------------------------------------------------------------
+
+def test_no_shorts_refuses_a_sell_from_flat():
+    broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
+    order = broker.sell(contracts=1, stop=110.0)
+    assert broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0)) == []
+    assert order.status == "rejected"
+    assert broker.pending is None
+    assert pf.position.qty == 0
+    assert broker.resting_stop is None
+
+
+def test_shorts_allowed_by_default_sell_from_flat_fills():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    order = broker.sell(contracts=1)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    assert order.status == "filled"
+    assert pf.position.qty == -1
+
+
+def test_no_shorts_still_closes_a_long():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
+    broker.buy(contracts=2, stop=90.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    partial = broker.sell(contracts=1)
+    broker.fill_pending(Bar(2, 100.0, 101.0, 99.0, 100.0))
+    assert partial.status == "filled" and pf.position.qty == 1
+    exit_ = broker.close()
+    broker.fill_pending(Bar(3, 100.0, 101.0, 99.0, 100.0))
+    assert exit_.status == "filled" and pf.position.qty == 0
+
+
+def test_no_shorts_trims_a_flip_to_its_closing_half():
+    broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
+    broker.buy(contracts=1, stop=90.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.sell(contracts=3, stop=110.0)
+    fills = broker.fill_pending(Bar(2, 100.0, 101.0, 99.0, 100.0))
+    assert [(f.side, f.contracts) for f in fills] == [("sell", 1)]
+    assert (order.status, order.contracts, order.attached_stop) == ("filled", 1, None)
+    assert pf.position.qty == 0
+    assert broker.resting_stop is None
+
+
+def test_no_shorts_refuses_a_flip_resized_by_a_stop_out():
+    # The long's stop closes it; what is left of the pending sell(2) is a short entry.
+    broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.sell(contracts=2)
+    fills = broker.fill_pending(Bar(2, 96.0, 96.0, 94.0, 94.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 95.0)]
+    assert order.status == "rejected"
+    assert pf.position.qty == 0
