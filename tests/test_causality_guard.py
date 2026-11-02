@@ -181,3 +181,38 @@ def test_engine_refuses_a_backfilled_first_return():
 
     with pytest.raises(LookaheadError, match="non-causal column 'r' at t=0"):
         _eng().run(_bars(), Fn(bfill))
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02): object columns holding arrays are compared, not crashed on.
+# ---------------------------------------------------------------------------
+
+def _windows(lookahead):
+    def fn(df):
+        df = df.copy()
+        c = df["close"].to_numpy()
+        df["win"] = [c[max(0, i - 2):i + 1 + lookahead] for i in range(len(df))]
+        return df
+    return fn
+
+
+def test_an_honest_column_of_array_windows_runs():
+    # Unchecked: "The truth value of an array with more than one element is ambiguous".
+    assert len(_eng().run(_bars(), Fn(_windows(0))).equity_curve) == 60
+
+
+def test_a_column_of_array_windows_that_reach_ahead_is_caught():
+    with pytest.raises(LookaheadError, match="non-causal column 'win'"):
+        _eng().run(_bars(), Fn(_windows(1)))
+
+
+def test_an_object_column_that_cannot_be_compared_is_a_frame_error():
+    class Vague:
+        def __eq__(self, other):
+            return np.array([True, False])   # neither true nor false
+
+    def vague(df):
+        return df.assign(v=[Vague() for _ in range(len(df))])
+
+    with pytest.raises(FrameError, match="column 'v' holds Vague values"):
+        _eng().run(_bars(), Fn(vague))

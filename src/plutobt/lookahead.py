@@ -43,15 +43,43 @@ def _values(s: pd.Series) -> tuple[bool, np.ndarray]:
     return False, s.to_numpy(dtype=object)
 
 
-def _mismatch_at(a: tuple[bool, np.ndarray], b: tuple[bool, np.ndarray]) -> int | None:
+_SEQUENCES = (np.ndarray, list, tuple, pd.Series, pd.DataFrame)
+
+
+def _same_object(u, v, col) -> bool:
+    """Whether two cells of an object column match: arrays (or lists) elementwise within
+    RTOL/ATOL, anything else by ==. A cell whose == is neither true nor false is refused
+    with a FrameError naming the column."""
+    if isinstance(u, _SEQUENCES) or isinstance(v, _SEQUENCES):
+        try:
+            x, y = np.asarray(u, dtype="float64"), np.asarray(v, dtype="float64")
+            return x.shape == y.shape and bool(
+                np.isclose(x, y, rtol=RTOL, atol=ATOL, equal_nan=True).all())
+        except (TypeError, ValueError):
+            x, y = np.asarray(u, dtype=object), np.asarray(v, dtype=object)
+            return x.shape == y.shape and all(
+                _same_object(p, q, col) for p, q in zip(x.ravel(), y.ravel(), strict=True))
+    try:
+        return bool(u == v)
+    except (TypeError, ValueError) as e:
+        raise FrameError(
+            f"column {col!r} holds {type(u).__name__} values that cannot be compared "
+            f"(== gave neither true nor false: {e}), so the causality check cannot test "
+            "it; store numbers, text or arrays of numbers per bar"
+        ) from e
+
+
+def _mismatch_at(a: tuple[bool, np.ndarray], b: tuple[bool, np.ndarray],
+                 col=None) -> int | None:
     """Position of the first value that differs between two ``_values`` of one length,
-    NaN matching NaN; numbers within RTOL/ATOL, anything else by equality. None if none."""
+    NaN matching NaN; numbers within RTOL/ATOL, anything else per _same_object. None if
+    none."""
     (num_a, x), (num_b, y) = a, b
     if num_a and num_b:
         same = np.isclose(x, y, rtol=RTOL, atol=ATOL, equal_nan=True)
     else:
         na_x, na_y = pd.isna(x), pd.isna(y)
-        same = np.array([(p and q) or (not p and not q and bool(u == v))
+        same = np.array([(p and q) or (not p and not q and _same_object(u, v, col))
                          for u, v, p, q in zip(x, y, na_x, na_y, strict=True)], dtype=bool)
     bad = np.flatnonzero(~same)
     return int(bad[0]) if bad.size else None
@@ -59,7 +87,7 @@ def _mismatch_at(a: tuple[bool, np.ndarray], b: tuple[bool, np.ndarray]) -> int 
 
 def _first_mismatch(a: pd.Series, b: pd.Series) -> int | None:
     """``_mismatch_at`` for two Series of one length."""
-    return _mismatch_at(_values(a), _values(b))
+    return _mismatch_at(_values(a), _values(b), a.name)
 
 
 def assert_causal(
@@ -110,7 +138,7 @@ def assert_causal(
                     f"non-causal column {col!r} at t={t}: it is missing from "
                     f"precompute(df[:{t + 1}]), so it depends on how many bars follow"
                 )
-            bad = _mismatch_at(_values(prefix[col]), (numeric, values[: t + 1]))
+            bad = _mismatch_at(_values(prefix[col]), (numeric, values[: t + 1]), col)
             if bad is not None:
                 raise LookaheadError(
                     f"non-causal column {col!r} at t={bad}: "
