@@ -48,6 +48,17 @@ checks it before the first bar (`check_causality`, on by default):
   traded call's; a leak found in the prefixes leaves it as you passed it. A strategy
   that cannot be deep-copied (it holds a lock or a socket) is refused, naming the
   switch.
+- **State the copies share is watched.** Class attributes are shared by every copy,
+  so a `precompute` that changes one (a mean fitted "once" and stored on the class,
+  a cache) is refused with a `LookaheadError` naming it, and the attribute is put
+  back. An attribute `precompute` sets on `self` (a full-sample quantile kept for
+  `on_bar`) draws a `LookaheadWarning` naming it at your `Engine.run` line: the check
+  compares columns, so if `on_bar` reads that value it is look-ahead nobody checked.
+  Compute per-bar values as columns instead.
+- **A short prefix is part of the check.** The prefixes start one bar long, so a
+  `precompute` that raises on a short frame is re-raised naming the prefix, with the
+  way past it: guard the indicator's warm-up (NaN until it has enough bars), or set
+  `check_causality = false`.
 - **Float noise is not a leak.** A float column matches when
   `|prefix - full| <= 1e-6 * |full| + 1e-6 * scale`, where `scale` is that column's
   largest finite value in the traded frame, so the floor follows the column: a leak in
@@ -74,7 +85,8 @@ What it does not do, stated plainly:
 - **State held before the run is a parameter.** Whatever the strategy holds when
   `Engine.run` is called is trusted: fit models on training data before the run,
   never inside `precompute` on the bars being tested. A function stored on the
-  strategy is shared by the copies, so state it captures is outside the snapshot.
+  strategy is shared by the copies, and module-level globals are not copied at all,
+  so state either one holds is outside the snapshot and out of the check's reach.
 - **pandas' skew and kurtosis of raw price levels** subtract the whole input's rounded
   mean first, so on a series that wanders far from its mean they can move by more than
   a part per million between a prefix and the full frame (up to about 1% of the column

@@ -226,7 +226,8 @@ def test_a_leak_only_in_the_first_call_is_refused():
 
 def test_a_leak_in_the_traded_call_through_class_state_is_refused():
     # Class attributes are shared by the copies, so this leaks on the first call ever
-    # and never again; the check compares the prefixes with the frame that is traded.
+    # and never again. A precompute that changes a class attribute is now refused
+    # outright (final audit B), naming it, and the attribute is put back.
     class Shared(Strategy):
         calls = 0
 
@@ -235,8 +236,24 @@ def test_a_leak_in_the_traded_call_through_class_state_is_refused():
             x = df["close"].shift(-1).ffill() if type(self).calls == 1 else df["close"]
             return df.assign(x=x)
 
-    with pytest.raises(LookaheadError, match="non-causal column 'x'"):
+    with pytest.raises(LookaheadError, match=r"class attribute Shared\.calls"):
         _eng().run(_bars(), Shared())
+    assert Shared.calls == 0
+
+
+def test_a_leak_in_the_traded_call_through_outside_state_is_refused():
+    # The same leak through state outside the strategy (a closure, a module global),
+    # which no snapshot holds: the check compares the prefixes with the traded frame.
+    calls = {"n": 0}
+
+    class Outside(Strategy):
+        def precompute(self, df):
+            calls["n"] += 1
+            x = df["close"].shift(-1).ffill() if calls["n"] == 1 else df["close"]
+            return df.assign(x=x)
+
+    with pytest.raises(LookaheadError, match="non-causal column 'x'"):
+        _eng().run(_bars(), Outside())
 
 
 def test_a_seeded_rng_made_in_init_runs():
@@ -276,12 +293,12 @@ def test_a_precompute_that_differs_on_the_strategy_passed_in_is_refused():
     # The traded frame came from a copy; on_bar runs on the strategy passed in, so its
     # own full-frame call must give the same frame, or on_bar's state is not the
     # traded one.
-    class Drifts(Strategy):
-        calls = 0
+    calls = {"n": 0}      # outside the strategy: a class attribute is refused first
 
+    class Drifts(Strategy):
         def precompute(self, df):
-            type(self).calls += 1
-            return df.assign(x=float(type(self).calls > 60))   # call 61 = the last one
+            calls["n"] += 1
+            return df.assign(x=float(calls["n"] > 60))   # call 61 = the last one
 
     with pytest.raises(LookaheadError, match="column 'x'.*same starting state"):
         _eng().run(_bars(), Drifts())

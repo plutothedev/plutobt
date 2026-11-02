@@ -8,6 +8,8 @@ import hashlib
 import keyword
 import math
 import numbers
+import pickle
+import warnings
 from dataclasses import asdict, dataclass, field, replace
 
 import numpy as np
@@ -21,6 +23,7 @@ from plutobt.instruments import Instrument
 from plutobt.lookahead import (
     _ROW_RULE,
     LookaheadError,
+    LookaheadWarning,
     _first_mismatch,
     assert_causal,
     first_difference,
@@ -156,6 +159,77 @@ def _snapshot(strategy: Strategy) -> Strategy:
         ) from e
 
 
+def _fingerprint(value) -> tuple:
+    """(value, its pickle, or None when it has none): what _changed compares."""
+    try:
+        return value, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:  # a lock, a local function, a property: compared by identity
+        return value, None
+
+
+def _changed(before: tuple, after: tuple) -> bool:
+    """Whether an attribute changed: by its pickle when both have one (an in-place
+    edit keeps the object but not its pickle), else by identity."""
+    (u, pu), (v, pv) = before, after
+    if pu is not None and pv is not None:
+        return pu != pv
+    return u is not v
+
+
+def _state(namespace) -> dict:
+    """The fingerprint of each attribute in ``namespace`` but the dunders."""
+    return {k: _fingerprint(v) for k, v in dict(namespace).items()
+            if not (k.startswith("__") and k.endswith("__"))}
+
+
+def _set_since(before: dict, after: dict) -> list:
+    """The attributes in ``after`` that are new or changed since ``before``."""
+    return [k for k in after if k not in before or _changed(before[k], after[k])]
+
+
+def _class_state(strategy: Strategy) -> list:
+    """The attributes of each class the strategy is built from (its MRO but Strategy
+    and object): shared by every copy the look-ahead check runs, so none may change."""
+    return [(cls, _state(vars(cls))) for cls in type(strategy).__mro__
+            if cls not in (Strategy, object)]
+
+
+def _refuse_class_changes(saved: list) -> None:
+    """Refuse a precompute that changed a class attribute since ``saved`` (set, added,
+    removed or edited in place), after putting every one back as it was."""
+    changed = []
+    for cls, before in saved:
+        after = _state(vars(cls))
+        for name in _set_since(before, after) + [k for k in before if k not in after]:
+            changed.append(f"{cls.__name__}.{name}")
+            if name not in before:
+                delattr(cls, name)
+                continue
+            value, raw = before[name]
+            if name in after and after[name][0] is value and raw is not None:
+                value = pickle.loads(raw)      # edited in place: its old contents
+            setattr(cls, name, value)
+    if changed:
+        raise LookaheadError(
+            f"the strategy's precompute changed class attribute {', '.join(changed)}. "
+            "A class attribute is shared by every copy the look-ahead check runs, so a "
+            "value fitted on the full frame (the first call) would reach every prefix "
+            "and pass unseen. Keep fitted state on self (each call gets its own copy) "
+            "or compute it as a column. Restored to its value before the run. Module-"
+            "level globals are out of the check's reach: keep them out of precompute")
+
+
+def _warn_set_attributes(before: dict, strategy: Strategy) -> None:
+    """Warn, at the caller of Engine.run, about each attribute the traded precompute
+    set on ``strategy`` (``before`` is its state just before that call)."""
+    for name in _set_since(before, _state(getattr(strategy, "__dict__", {}))):
+        warnings.warn(
+            f"precompute set self.{name} from the full frame; if on_bar uses it, that "
+            "is look-ahead (the check compares precompute's columns, never a value kept "
+            "on self); compute per-bar values as columns instead",
+            LookaheadWarning, stacklevel=3)
+
+
 def _warm_up_end(df: pd.DataFrame, data: pd.DataFrame, signal_cols: list) -> int:
     """The row of the first bar with every signal column set (len(data) if none is):
     the bars before it are the warm-up, where on_bar is skipped. A NaN after it is
@@ -226,9 +300,17 @@ class Engine:
             which then runs the full frame itself so its state is the traded call's
             (its frame must match the traded one); a leak found in the prefixes
             leaves it as it was passed in. A strategy that cannot be deep-copied is refused with a
-            TypeError naming the switch. The guard checks precompute only: ``on_bar``
-            must decide from ``ctx`` alone, and no check can stop strategy code written
-            to read ahead some other way (see strategy.py).
+            TypeError naming the switch. Class attributes are shared by every copy,
+            so a precompute that changes one (a fit-once mean stored on the class) is
+            refused with a LookaheadError naming it, and it is put back as it was;
+            module-level globals are out of reach. Each attribute the traded
+            precompute sets on ``self`` (a full-sample quantile kept for ``on_bar``)
+            draws a LookaheadWarning naming it, at the line that called Engine.run: the
+            check compares columns, never a value on self. A precompute that raises
+            on a short prefix is re-raised as a FrameError naming the prefix and the
+            way past it (a warm-up guard, or the switch). The guard checks precompute
+            only: ``on_bar`` must decide from ``ctx`` alone, and no check can stop
+            strategy code written to read ahead some other way (see strategy.py).
         Decision-at-t: ``on_bar`` is called with bar t's data. ``ctx.position`` is
             a copy of the position for the bar: a strategy's writes to it never
             reach the book (stops move with ``ctx.broker.amend_stop``).
@@ -294,15 +376,24 @@ class Engine:
         if self.config.check_causality:
             # Snapshot first: the traded call and every prefix call start from their own
             # deepcopy of the strategy as passed in, so state one call saves (a fit-once
-            # mean, an RNG's position) never reaches another.
+            # mean, an RNG's position) never reaches another. Class attributes are
+            # shared by the copies, so they must not change at all.
             snapshot = _snapshot(strategy)
-            data = copy.deepcopy(snapshot).precompute(df.copy()).reset_index(drop=True)
+            classes = _class_state(strategy)
+            traded = copy.deepcopy(snapshot)
+            own = _state(getattr(traded, "__dict__", {}))
+            data = traded.precompute(df.copy()).reset_index(drop=True)
+            _refuse_class_changes(classes)
+            _warn_set_attributes(own, traded)
         else:
             data = strategy.precompute(df.copy()).reset_index(drop=True)
         self._check_frame(data, precomputed=True)      # what the strategy made of it
         self._check_precompute_kept_the_bars(df, data)
         if self.config.check_causality:
-            self._check_causality(df, strategy, snapshot, data)
+            try:
+                self._check_causality(df, strategy, snapshot, data)
+            finally:
+                _refuse_class_changes(classes)  # by a prefix call, or the last one
         session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
         warm_up_end = _warm_up_end(df, data, signal_cols)
@@ -426,10 +517,25 @@ class Engine:
         hint = ("Each bar's values must come from that bar and the ones before it. Fix "
                 "the precompute (check_causality = false skips this guard; use it only to "
                 "study a known leak)")
+        def prefix_call(d: pd.DataFrame) -> pd.DataFrame:
+            try:
+                return copy.deepcopy(snapshot).precompute(d)
+            except Exception as e:
+                k = len(d)
+                raise FrameError(
+                    f"the strategy's precompute raised {type(e).__name__}: {e} on the "
+                    f"prefix df[:{k}] (its first {k} bar{'' if k == 1 else 's'}), while "
+                    "the look-ahead check was running: it reruns precompute on prefixes "
+                    "of the bars, the shortest 1 bar long, to prove no bar's values "
+                    "depend on later bars. Make the indicator safe on a short frame (a "
+                    "warm-up guard: NaN until it has enough bars, say by checking "
+                    "len(df) first), or set check_causality = false to skip the check"
+                ) from e
+
         try:
             # stacklevel 4: the sampled-grid warning names the caller of Engine.run
             # (assert_causal <- _check_causality <- run <- caller).
-            assert_causal(lambda d: copy.deepcopy(snapshot).precompute(d), df,
+            assert_causal(prefix_call, df,
                           sample=self.config.causality_sample, full=data, stacklevel=4)
         except LookaheadError as leak:
             raise LookaheadError(

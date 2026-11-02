@@ -26,6 +26,11 @@ class LookaheadError(FrameError, AssertionError):
     """
 
 
+class LookaheadWarning(UserWarning):
+    """Something the check cannot judge may carry the future: an attribute the
+    strategy's precompute set on ``self`` from the full frame, which on_bar may read."""
+
+
 # How two numbers of a float column match (the full frame's value b, a prefix's a):
 #     |a - b| <= RTOL * |b| + SCALE_TOL * scale
 # where scale is that column's largest finite |value| in the full frame. Why both terms:

@@ -65,9 +65,15 @@ class Strategy:
         first frame seen is refitted on each prefix, and is caught if it used the whole
         sample. State the strategy already holds when ``Engine.run`` is called is a
         parameter (fit a model on training data before the run, never inside
-        ``precompute`` on the bars being tested). A function held on ``self`` is shared
-        by the copies, not copied, so state it captures is outside the snapshot. Base
-        implementation is identity passthrough; subclasses override.
+        ``precompute`` on the bars being tested). Class attributes are shared by every
+        copy, so a precompute that changes one is refused (and it is put back); an
+        attribute it sets on ``self`` is warned about by name, since the check
+        compares columns and ``on_bar`` reading a full-frame value from ``self`` is
+        look-ahead: compute per-bar values as columns. A function held on ``self`` is
+        shared by the copies, not copied, and module-level globals are not copied
+        either, so state either one holds is outside the snapshot and out of the
+        check's reach. Base implementation is identity passthrough; subclasses
+        override.
         """
         return df
 
