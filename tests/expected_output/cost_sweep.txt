@@ -1,0 +1,17 @@
+COST SWEEP (not a parameter sweep): EMACross 20/50, parameters unchanged
+NQ synthetic sample, commission fixed at $2.50/side, slippage varied per side
+IN-SAMPLE, single pre-specified strategy; not predictive of live results.
+
+    slippage    final equity   Sharpe      SE      PF   expectancy        trades
+     0 ticks      102,907.50    2.374   3.522   1.401        37.60   73 + 1 open
+     1 ticks      102,172.50    1.793   3.529   1.269        27.60   73 + 1 open
+     2 ticks      101,437.50    1.212   3.536   1.158        17.60   73 + 1 open
+     4 ticks       99,967.50    0.055   3.550   0.981        -2.40   73 + 1 open
+
+SE: the Sharpe's standard error (iid, skew/kurtosis-adjusted), from compute_metrics.
+Every Sharpe above has a 95% CI that includes 0: none is distinguishable from zero.
+
+Starting equity $100,000.00, 1 NQ contract ($5.00 a tick).
+"+ 1 open": a position still open at the end, marked to the last close.
+Each tick of slippage per side costs $5.00 x 147 fills
+  (73 round trips x 2 + 1 open entry) = $735.00 of final equity.

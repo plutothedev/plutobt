@@ -134,6 +134,12 @@ To re-freeze after a deliberate engine/data/config change:
 python scripts/freeze_golden.py
 ```
 
+The full printed output of every example above is pinned too
+(`tests/test_example_snapshots.py` against `tests/expected_output/`), so a drift in
+any on-camera number fails the suite. After a deliberate change to what an example
+prints, regenerate with `python scripts/freeze_examples.py`, review the diff, and say
+why in the commit; never to silence a failure.
+
 ## Sample data
 
 All files in `data/sample/` are **synthetic** (seeded numpy random walks) and

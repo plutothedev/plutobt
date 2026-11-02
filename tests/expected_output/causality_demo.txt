@@ -1,0 +1,32 @@
+==============================================================================
+1) LEAKY:  tomorrow_up = close.shift(-1) > close   (reads the NEXT bar)
+==============================================================================
+Engine.run REFUSED it before the first bar:
+  LookaheadError: the strategy's precompute looks ahead: non-causal column 'tomorrow_up' at t=0: prefix=False != full=True (the value changed when the bars after t=0 were removed). Each bar's values must come from that bar and the ones before it. Fix the precompute (check_causality = false skips this guard; use it only to study a known leak)
+
+==============================================================================
+2) HONEST: up = close > close.shift(1)             (this bar and the last)
+==============================================================================
+Engine.run accepted it. The result, as it comes out:
+
+=== PlutoBT report: NQ ===
+IN-SAMPLE, single pre-specified strategy; not predictive of live results.
+Observations T = 1619   (periods_per_year = 20412.0)
+Annualization = sqrt(periods_per_year) = sqrt(20412) = 142.871
+Sharpe/bar    = -0.000475170   (raw, per bar)
+Sharpe        = -0.068   (annualized: Sharpe/bar x 142.871)
+Sharpe SE     = 3.550   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-7.027, +6.891]
+⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+PSR           = 0.492   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
+Sortino       = -0.096
+Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)
+Profit factor = 0.995
+Expectancy    = -0.384   ($ per closed trade, net of costs)
+Win rate      = 0.340
+Avg R         = n/a
+Max DD depth  = -0.056230
+Max DD duration = 803 bars   (not recovered by the last bar)
+Trades        = 391   (closed)
+Open at end   = 0
+data_sha256   = 6b6e0227d4c6cd6de39a3cd71f7c062a859001d6668e168e939f51019dc8d3b1   (of the loaded bars as CSV, not the file)
+engine version = 0.2.0
