@@ -49,9 +49,9 @@ _STARTING_CASH = 100_000.0
 # shipped sample file, recognized by its data_sha256 (load_bars of data/sample/*).
 _ROLL_AS_OF_DEFAULT = "2026-06-07"
 _SAMPLE_SHA256 = {
-    "9d70cc5b6882c1342d54be9c84f5f871324027d6201679142cb7a90cec82f100": "nq_5m.json",
-    "9c8bbe386a3e4ed9868beae594a67fe86d7fc9ef486576e5abb865ec39ae1699": "es_5m.json",
-    "b47f1c8b0c9784e2c98f8db8998889ac54a38d84ab9157f2af53367945e6bc42": "cl_5m.json",
+    "6b6e0227d4c6cd6de39a3cd71f7c062a859001d6668e168e939f51019dc8d3b1": "nq_5m.json",
+    "47b1add21432e3980ca2bcd40d32695aed6494a603a17f067218b4befa409b15": "es_5m.json",
+    "187a2f7097b399d966ad5c653fb1abba91074de43d0d778e0a4f392c3fcc42f1": "cl_5m.json",
 }
 _ROLL_UNKNOWN = "unknown/user-supplied"
 
