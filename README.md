@@ -112,9 +112,9 @@ package installed, or with `PYTHONPATH=src`):
 | Script | What it shows |
 |--------|---------------|
 | `examples/run_demo.py` | The EMA(20/50) demo on NQ, ES and CL with per-instrument costs. |
-| `examples/cold_open_lookahead.py` | One changed line (`position = signal` vs `signal.shift(1)`): trading a bar on its own close (impossible) against acting at the next bar's open (frictionless pandas, "bar hit rate", unlevered), then the same signal through the real engine with NQ costs (closed-trade win rate, gross - slippage - commission = net). Saves a chart to `examples/output/`. |
+| `examples/cold_open_lookahead.py` | One changed line (`position = signal` vs `signal.shift(1)`): trading a bar on its own close (impossible) against acting at the next bar's open (frictionless pandas, "bar hit rate", unlevered), then the same signal through the real engine with NQ costs (closed-trade win rate, gross - slippage - commission = net). Each Sharpe prints with the engine's standard error. Saves a chart to `examples/output/`. |
 | `examples/causality_demo.py` | A strategy built on `close.shift(-1) > close` is refused by `Engine.run` with a `LookaheadError` naming the column; its honest twin (`close > close.shift(1)`) runs and prints its report. |
-| `examples/cost_sweep.py` | A COST sweep, not a parameter sweep: the demo strategy, parameters unchanged, at 0, 1, 2 and 4 ticks of slippage per side with commission fixed. Final equity, Sharpe, PF and expectancy per level. |
+| `examples/cost_sweep.py` | A COST sweep, not a parameter sweep: the demo strategy, parameters unchanged, at 0, 1, 2 and 4 ticks of slippage per side with commission fixed. Final equity, Sharpe with its standard error, PF and expectancy per level, and whether any Sharpe's 95% CI excludes zero. |
 
 ## Reproducible golden run
 

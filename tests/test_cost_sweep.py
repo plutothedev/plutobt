@@ -103,3 +103,41 @@ def test_the_printed_table_says_what_it_is(table, monkeypatch):
     step = lines.index("Each tick of slippage per side costs $5.00 x 147 fills")
     assert lines[step + 1] == "  (73 round trips x 2 + 1 open entry) = $735.00 of final equity."
     assert '"+ 1 open": a position still open at the end' in out
+
+
+def test_each_sharpe_carries_the_engines_standard_error(table):
+    # Final pre-film audit, item 6: the Sharpes printed bare, with an SE of about 3.5.
+    # The SE is compute_metrics' own (the 1-tick row is the NQ demo run).
+    from examples.run_demo import run_symbol
+
+    res = run_symbol("NQ", data_path="data/sample/nq_5m.json", config_path="configs/nq.toml")
+    assert table.loc[1.0, "sharpe_se"] == res.metrics["sharpe_se"]
+    assert table.loc[1.0, "sharpe_ci"] == res.metrics["sharpe_ci"]
+
+
+def _print(table, monkeypatch):
+    monkeypatch.setattr(demo, "run", lambda: table)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        demo.main()
+    return buf.getvalue()
+
+
+def test_the_printed_table_shows_the_se_and_a_computed_verdict(table, monkeypatch):
+    out = _print(table, monkeypatch)
+    header = next(ln for ln in out.splitlines() if "slippage" in ln and "Sharpe" in ln)
+    assert header.index("Sharpe") < header.index("SE") < header.index("PF")
+    for _, row in table.iterrows():
+        assert f"{row['sharpe']:.3f}  {row['sharpe_se']:>6.3f}" in out
+    # Every CI on this sample straddles zero, and the footer says so from the CIs.
+    assert all(lo <= 0.0 <= hi for lo, hi in table["sharpe_ci"])
+    assert ("Every Sharpe above has a 95% CI that includes 0: none is "
+            "distinguishable from zero.") in out
+
+
+def test_the_verdict_is_computed_not_hardcoded(table, monkeypatch):
+    t = table.copy()
+    t["sharpe_ci"] = [(0.5, 4.0), (-1.0, 3.0), (-2.0, 2.0), (-3.0, 1.0)]
+    out = _print(t, monkeypatch)
+    assert "none is distinguishable from zero" not in out
+    assert "95% CI excludes 0 at: 0 ticks" in out

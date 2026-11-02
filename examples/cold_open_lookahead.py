@@ -49,7 +49,7 @@ from plutobt.config import load_config
 from plutobt.data import load_bars
 from plutobt.engine import Engine
 from plutobt.instruments import get_instrument
-from plutobt.metrics import compute_metrics, sharpe
+from plutobt.metrics import compute_metrics, sharpe, sharpe_stats
 from plutobt.strategy import Strategy
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -113,6 +113,8 @@ def run_engine(sample_path: str | None = None) -> dict:
     net = end - start
     return {
         "sharpe": m["sharpe"],
+        "sharpe_se": m["sharpe_se"],
+        "sharpe_ci": m["sharpe_ci"],
         "n_trades": m["n_trades"],
         "win_rate": m["win_rate"],
         "start_equity": start,
@@ -147,8 +149,9 @@ def _save_plot(eq_cheat: pd.Series, eq_honest: pd.Series) -> None:
     plt.close(fig)
 
 
-def run(sample_path: str | None = None):
-    """Run both pandas simulations and the engine line; return the headline numbers."""
+def inputs(sample_path: str | None = None) -> tuple[pd.Series, pd.Series]:
+    """(signal, bar_returns) from the sample: the green-bar signal and each bar's
+    open-to-next-open return."""
     rows = json.loads(pathlib.Path(sample_path or SAMPLE).read_text(encoding="utf-8"))
     opens = pd.Series([r[1] for r in rows], dtype="float64")
     close = pd.Series([r[4] for r in rows], dtype="float64")
@@ -157,15 +160,29 @@ def run(sample_path: str | None = None):
 
     # The signal you only know AFTER the bar closes: "did this bar close green?"
     signal = (close > close.shift(1)).astype("float64")
+    return signal, bar_returns
+
+
+def run(sample_path: str | None = None):
+    """Run both pandas simulations and the engine line; return the headline numbers."""
+    signal, bar_returns = inputs(sample_path)
 
     eq_cheat, sr_cheat, r_cheat = simulate(signal, bar_returns, cheat=True)
     eq_honest, sr_honest, r_honest = simulate(signal, bar_returns, cheat=False)
+    # The error bar on each pandas Sharpe: the engine's own SE and CI (sharpe_stats is
+    # what compute_metrics uses), on the very returns the Sharpe is computed from.
+    st_cheat = sharpe_stats(r_cheat, PPY)
+    st_honest = sharpe_stats(r_honest, PPY)
 
     return {
         "cheat_sharpe": sr_cheat,
+        "cheat_se": st_cheat["sharpe_se"],
+        "cheat_ci": st_cheat["sharpe_ci"],
         "cheat_hit": bar_hit_rate(r_cheat),
         "cheat_final": float(eq_cheat.iloc[-1]),
         "honest_sharpe": sr_honest,
+        "honest_se": st_honest["sharpe_se"],
+        "honest_ci": st_honest["sharpe_ci"],
         "honest_hit": bar_hit_rate(r_honest),
         "honest_final": float(eq_honest.iloc[-1]),
         "engine": run_engine(sample_path),
@@ -179,25 +196,37 @@ def _usd(x: float) -> str:
     return f"-${-x:,.2f}" if x < 0 else f"${x:,.2f}"
 
 
+def _ci_verdict(lines: list[tuple[str, tuple[float, float]]]) -> list[str]:
+    """Which Sharpes' 95% CIs exclude zero and which include it, from the CIs."""
+    out = []
+    excl = [name for name, (lo, hi) in lines if lo > 0.0 or hi < 0.0]
+    incl = [name for name, (lo, hi) in lines if lo <= 0.0 <= hi]
+    if excl:
+        out.append(f"  95% CI excludes 0: {', '.join(excl)}")
+    if incl:
+        out.append(f"  95% CI includes 0 (not distinguishable from zero): {', '.join(incl)}")
+    return out
+
+
 def main() -> None:
     res = run()
     eng = res["engine"]
     print("=== THE LIE: bar t traded on bar t's own close (impossible in real life) ===")
     print(
-        f"  annualized Sharpe = {res['cheat_sharpe']:>8.2f}    "
+        f"  annualized Sharpe = {res['cheat_sharpe']:>8.2f} (SE {res['cheat_se']:.2f})    "
         f"bar hit rate = {res['cheat_hit']:.0%}    "
         f"growth = x{res['cheat_final']:.2f} (unlevered, no costs)"
     )
     print("\n=== THE TRUTH: the signal acts at the next bar's open (before costs) ===")
     print(
-        f"  annualized Sharpe = {res['honest_sharpe']:>8.2f}    "
+        f"  annualized Sharpe = {res['honest_sharpe']:>8.2f} (SE {res['honest_se']:.2f})    "
         f"bar hit rate = {res['honest_hit']:.0%}    "
         f"growth = x{res['honest_final']:.2f} (unlevered, no costs)"
     )
     print("\n=== THE ENGINE: same signal through PlutoBT, NQ costs "
           f"(${eng['commission_per_side']:.2f}/side, {eng['slippage_ticks']:g} tick/side) ===")
     print(
-        f"  annualized Sharpe = {eng['sharpe']:>8.2f}    "
+        f"  annualized Sharpe = {eng['sharpe']:>8.2f} (SE {eng['sharpe_se']:.2f})    "
         f"trades = {eng['n_trades']}    "
         f"win rate = {eng['win_rate']:.0%} (closed trades, net of costs)"
     )
@@ -205,11 +234,16 @@ def main() -> None:
         f"  1 NQ: gross {_usd(eng['gross_pnl'])}  - slippage {_usd(eng['slippage_usd'])}"
         f"  - commission {_usd(eng['commission_usd'])}  = net {_usd(eng['net_pnl'])}"
     )
+    print("\nSE: the Sharpe's standard error (iid, skew/kurtosis-adjusted), as the engine "
+          "reports it.")
+    for line in _ci_verdict([("the lie", res["cheat_ci"]), ("the truth", res["honest_ci"]),
+                             ("the engine", eng["sharpe_ci"])]):
+        print(line)
     print("\nThe only thing I changed:")
     print("    position = signal           # the lie   (trade bar t on bar t's own close)")
     print("    position = signal.shift(1)  # the truth (act at the next bar's open)")
     _save_plot(res["_eq_cheat"], res["_eq_honest"])
-    print(f"\nSaved before/after chart -> {OUT_PNG}")
+    print(f"\nSaved before/after chart -> {OUT_PNG.relative_to(_ROOT).as_posix()}")
 
 
 if __name__ == "__main__":
