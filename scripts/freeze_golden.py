@@ -33,10 +33,10 @@ def main() -> None:
     cfg = load_config(str(GOLDEN_CFG))
     result = Engine(inst, cfg).run(df, GoldenStrategy())
     metrics = compute_metrics(result, periods_per_year=cfg.periods_per_year)
-    # Freeze only scalar numeric metrics. This intentionally drops the
-    # non-scalar keys: sharpe_ci (a (low, high) tuple) and avg_r (None until a
-    # stop-protected trade exists). M9's format_report must handle those two
-    # keys directly, not from this frozen numeric set.
+    # Freeze only scalar numeric metrics. This drops the string label, the
+    # sharpe_ci (low, high) tuple, and avg_r only when it is None (no closed
+    # trade has an initial stop). The golden run's trades carry stops, so avg_r
+    # IS a float here and is frozen with the rest.
     numeric = {
         k: v for k, v in metrics.items()
         if isinstance(v, int | float) and not isinstance(v, bool)
