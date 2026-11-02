@@ -1,119 +1,120 @@
-"""Deterministically generate frozen synthetic 5m sample bars (§12).
+"""Deterministically generate the frozen SYNTHETIC 5-minute sample bars (§12).
 
-Synthetic so it is unambiguously redistributable. Seeded GBM-style walk on the
-RTH grid (08:30-15:15 CT, 81 bars/day) over 4 sessions. ts marks the bar OPEN
-in unix seconds (§5.5 convention). Run once; the JSON is committed and frozen.
+Synthetic so it is unambiguously redistributable: no exchange or vendor data. A seeded
+random walk laid on each instrument's real REGULAR TRADING HOURS session, taken from the
+registry in src/plutobt/instruments.py (America/Chicago wall clock):
 
-Symbols generated
+    NQ, ES  08:30-15:15 CT  -> 81 bars/day x 20 days = 1,620 bars
+    CL      08:00-13:30 CT  -> 66 bars/day x 20 days = 1,320 bars
+
+The 20 trading days run Monday 2026-03-02 to Friday 2026-03-27: four weekends, and the
+US DST change on Sunday 2026-03-08 (CT goes from UTC-6 to UTC-5, so the same 08:30 CT
+open lands an hour earlier in UTC). No bars outside RTH: each session ends at its close
+and the next opens the following trading day, with an overnight gap in price as well as
+time. ts is unix seconds marking the bar OPEN (§5.5). Under 2,000 bars per file, so the
+engine's default causality check runs every prefix.
+
+Per bar: close = open + N(0, sigma); high/low add |N(0, wick_sigma)| beyond the body;
+volume |N(1500, 400)| + 1. Between sessions the price jumps by N(0, overnight_sigma).
+Prices snap to the instrument tick and stay strictly positive.
+
+Symbols generated (each with its own seed; re-running is fully deterministic)
 -----------------
-nq_5m.json  — NQ E-mini Nasdaq-100,  base ~18 000, seed 20260607 (original, unchanged)
-es_5m.json  — ES E-mini S&P 500,     base ~5 000,  seed 20260608
-cl_5m.json  — CL WTI Crude Oil,      base ~70,     seed 20260609
+nq_5m.json  NQ E-mini Nasdaq-100, base 18 000, seed 20260607
+es_5m.json  ES E-mini S&P 500,    base 5 000,  seed 20260608
+cl_5m.json  CL WTI Crude Oil,     base 70,     seed 20260609
 
-Each file uses its own independent seed; re-running is fully deterministic.
-The NQ file is byte-for-byte identical to the original (same seed/params/snap).
+Files are written with LF line endings (data/sample/.gitattributes keeps them LF on
+every checkout), so tests/test_sample_data.py can pin them byte for byte.
+
+Run:  PYTHONPATH=src python scripts/gen_sample.py
 """
+from __future__ import annotations
+
 import json
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Shared grid parameters
-# ---------------------------------------------------------------------------
+from plutobt.instruments import get_instrument
 
-BARS_PER_DAY = 81          # 405 min / 5, RTH 08:30-15:15 CT (§5.7)
-N_DAYS = 4
+CT = ZoneInfo("America/Chicago")
 BAR_SECONDS = 300
-START_TS = 1717503000      # 2024-06-04 08:30:00 CT in unix seconds
+FIRST_DAY = date(2026, 3, 2)   # Monday; the US DST change is Sunday 2026-03-08
+N_DAYS = 20
 
-
-def _snap2(x: float) -> float:
-    """Round to 2 decimal places (NQ/ES 0.25-tick grid)."""
-    return round(round(x / 0.25) * 0.25, 2)
-
-
-def _snap_cl(x: float) -> float:
-    """Round to CL 0.01-tick grid, 2 decimal places."""
-    return round(round(x / 0.01) * 0.01, 2)
-
-
-# ---------------------------------------------------------------------------
-# Per-symbol parameters
-# ---------------------------------------------------------------------------
-
-_SYMBOLS = [
-    dict(
-        name="nq",
-        seed=20260607,
-        start_price=18000.0,
-        snap=_snap2,
-        sigma=6.0,       # ~6 pt per-bar sigma for NQ
-        wick_sigma=3.0,
-    ),
-    dict(
-        name="es",
-        seed=20260608,
-        start_price=5000.0,
-        snap=_snap2,
-        sigma=2.0,       # ~2 pt per-bar sigma for ES
-        wick_sigma=1.0,
-    ),
-    dict(
-        name="cl",
-        seed=20260609,
-        start_price=70.0,
-        snap=_snap_cl,
-        sigma=0.25,      # ~0.25 pt per-bar sigma for CL
-        wick_sigma=0.12,
-    ),
+SYMBOLS = [
+    dict(name="nq", symbol="NQ", seed=20260607, start_price=18000.0,
+         sigma=6.0, wick_sigma=3.0, overnight_sigma=36.0),
+    dict(name="es", symbol="ES", seed=20260608, start_price=5000.0,
+         sigma=2.0, wick_sigma=1.0, overnight_sigma=12.0),
+    dict(name="cl", symbol="CL", seed=20260609, start_price=70.0,
+         sigma=0.25, wick_sigma=0.12, overnight_sigma=1.5),
 ]
 
 
-def generate(seed: int, start_price: float, snap,
-             sigma: float, wick_sigma: float) -> list[list]:
-    rng = np.random.default_rng(seed)
+def trading_days(first: date = FIRST_DAY, n: int = N_DAYS) -> list[date]:
+    """The first ``n`` weekdays from ``first`` (no exchange holiday falls in the range)."""
+    days: list[date] = []
+    d = first
+    while len(days) < n:
+        if d.weekday() < 5:
+            days.append(d)
+        d += timedelta(days=1)
+    return days
+
+
+def session_opens(day: date, open_ct: str, close_ct: str) -> list[int]:
+    """Unix-second bar OPENS on ``day`` from ``open_ct`` up to the bar that closes at
+    ``close_ct`` (CT wall clock; zoneinfo applies that day's own UTC offset)."""
+    def at(hhmm: str) -> int:
+        hh, mm = (int(x) for x in hhmm.split(":"))
+        return int(datetime(day.year, day.month, day.day, hh, mm, tzinfo=CT).timestamp())
+
+    return list(range(at(open_ct), at(close_ct), BAR_SECONDS))
+
+
+def _snap(x: float, tick: float) -> float:
+    return round(round(x / tick) * tick, 2)
+
+
+def generate(spec: dict) -> list[list]:
+    """The bars for one symbol: ``[ts, open, high, low, close, volume]`` rows."""
+    inst = get_instrument(spec["symbol"])
+    tick = inst.tick_size
+    rng = np.random.default_rng(spec["seed"])
     rows: list[list] = []
-    price = start_price
-    ts = START_TS
-    tick = 0.25 if snap is _snap2 else 0.01
-    for _ in range(N_DAYS * BARS_PER_DAY):
-        ret = rng.normal(0.0, sigma)
-        o = price
-        c = max(tick, o + ret)              # never non-positive
-        hi = max(o, c) + abs(rng.normal(0.0, wick_sigma))
-        lo = min(o, c) - abs(rng.normal(0.0, wick_sigma))
-        lo = max(tick, lo)
-        vol = int(abs(rng.normal(1500, 400))) + 1
-        rows.append([
-            int(ts),
-            snap(o),
-            snap(hi),
-            snap(lo),
-            snap(c),
-            vol,
-        ])
-        price = c
-        ts += BAR_SECONDS
+    price = spec["start_price"]
+    for i, day in enumerate(trading_days()):
+        if i:   # the overnight move between one session's close and the next open
+            price = max(tick, price + rng.normal(0.0, spec["overnight_sigma"]))
+        for ts in session_opens(day, inst.session_open_ct, inst.session_close_ct):
+            o = price
+            c = max(tick, o + rng.normal(0.0, spec["sigma"]))
+            hi = max(o, c) + abs(rng.normal(0.0, spec["wick_sigma"]))
+            lo = max(tick, min(o, c) - abs(rng.normal(0.0, spec["wick_sigma"])))
+            vol = int(abs(rng.normal(1500, 400))) + 1
+            rows.append([ts, _snap(o, tick), _snap(hi, tick), _snap(lo, tick),
+                         _snap(c, tick), vol])
+            price = c
     return rows
+
+
+def render(spec: dict) -> bytes:
+    """The exact bytes of ``<name>_5m.json``: one bar per line, LF endings."""
+    body = ",\n".join(json.dumps(r, separators=(",", ":")) for r in generate(spec))
+    return ("[\n" + body + "\n]\n").encode("utf-8")
 
 
 def main() -> None:
     sample_dir = Path(__file__).resolve().parents[1] / "data" / "sample"
     sample_dir.mkdir(parents=True, exist_ok=True)
-
-    for spec in _SYMBOLS:
-        rows = generate(
-            seed=spec["seed"],
-            start_price=spec["start_price"],
-            snap=spec["snap"],
-            sigma=spec["sigma"],
-            wick_sigma=spec["wick_sigma"],
-        )
+    for spec in SYMBOLS:
         out = sample_dir / f"{spec['name']}_5m.json"
-        body = ",\n".join(json.dumps(r, separators=(",", ":")) for r in rows)
-        out.write_text("[\n" + body + "\n]\n", encoding="utf-8")
-        print(f"wrote {len(rows)} bars -> {out}")
+        out.write_bytes(render(spec))
+        print(f"wrote {len(generate(spec))} bars -> {out}")
 
 
 if __name__ == "__main__":
