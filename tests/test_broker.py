@@ -14,7 +14,8 @@ Bar = namedtuple("Bar", "ts open high low close")
 def test_order_is_dataclass_with_exact_fields():
     assert is_dataclass(Order)
     names = {f.name for f in fields(Order)}
-    assert names == {"side", "contracts", "kind", "price", "attached_stop", "status"}
+    assert names == {"side", "contracts", "kind", "price", "attached_stop", "status",
+                     "margin_liquidation"}
 
 
 def test_order_defaults():
@@ -25,6 +26,7 @@ def test_order_defaults():
     assert o.price is None
     assert o.attached_stop is None
     assert o.status == "pending"
+    assert o.margin_liquidation is False
 
 
 # ---------------------------------------------------------------------------

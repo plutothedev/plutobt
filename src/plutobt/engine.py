@@ -6,7 +6,7 @@ import collections
 import hashlib
 import math
 import numbers
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 
 import pandas as pd
 
@@ -14,7 +14,7 @@ from plutobt import __version__
 from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
 from plutobt.instruments import Instrument
-from plutobt.portfolio import Portfolio, Trade
+from plutobt.portfolio import MarginCall, Portfolio, Trade
 from plutobt.strategy import Context, Strategy
 
 # ---------------------------------------------------------------------------
@@ -23,11 +23,13 @@ from plutobt.strategy import Context, Strategy
 
 @dataclass
 class BacktestResult:
-    """Backtest output: equity curve, closed/open-at-end trades, metrics, manifest."""
+    """Backtest output: equity curve, closed/open-at-end trades, metrics, manifest, and
+    every margin call the run hit (spec §5.2), in bar order."""
     equity_curve: pd.Series
     trades: list[Trade]
     metrics: dict
     manifest: dict
+    margin_calls: list[MarginCall] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +131,13 @@ class Engine:
             contracts. ``session`` must then hold a trading-session ID on every bar,
             a number that never decreases (e.g. the CME trading day as an int
             YYYYMMDD), not RTH/ETH labels.
+        Margin calls (§5.2): after bar t's mark, equity below the maintenance margin of
+            the held contracts records a MarginCall in ``margin_calls`` (the call
+            restores to INITIAL: amount = initial - equity; no deposit is invented).
+            ``on_margin_call="liquidate"`` (default) then queues a forced market exit
+            of the whole position, replacing any order placed on bar t; it fills at
+            bar t+1's open (no break cancels it) and its Trade has
+            ``margin_liquidation=True``. ``"record"`` keeps the position.
         Open-at-end: a position still open on the last bar is marked-to-last via
             ``portfolio.mark_open_at_end`` (§0.6 — single source of truth).
         """
@@ -157,6 +166,8 @@ class Engine:
 
         equity_index: list[int] = []
         equity_vals: list[float] = []
+        margin_calls: list[MarginCall] = []
+        liquidate = self.config.on_margin_call == "liquidate"
         state: dict = {}
 
         prev = None
@@ -211,6 +222,13 @@ class Engine:
             equity_index.append(int(bar.ts))
             equity_vals.append(portfolio.equity(float(bar.close)))
 
+            # §5.2: maintenance is the floor, checked on the book marked at close t.
+            call = portfolio.margin_call(ts=int(bar.ts))
+            if call is not None:
+                margin_calls.append(call)
+                if liquidate:
+                    broker.liquidate()
+
         # §0.6: mark any open position to last close; no broker call — portfolio only.
         if portfolio.position.qty != 0:
             portfolio.mark_open_at_end(ts=int(data.iloc[-1].ts))
@@ -224,6 +242,7 @@ class Engine:
             trades=portfolio.trades,
             metrics={},
             manifest=manifest,
+            margin_calls=margin_calls,
         )
 
     def _check_frame(self, frame: pd.DataFrame, *, precomputed: bool) -> None:
@@ -250,6 +269,9 @@ class Engine:
         cfg = self.config
         if cfg.break_on not in ("gap", "session"):
             raise ValueError(f"break_on must be 'gap' or 'session', got {cfg.break_on!r}")
+        if cfg.on_margin_call not in ("liquidate", "record"):
+            raise ValueError("on_margin_call must be 'liquidate' or 'record', "
+                             f"got {cfg.on_margin_call!r}")
         if not math.isfinite(cfg.commission_per_side):
             # NaN or inf would poison every statistic without an error (TOML can hold
             # both); a negative fee is a rebate and stays allowed.

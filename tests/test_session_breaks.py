@@ -285,9 +285,11 @@ def test_a_partial_exit_stays_partial_on_an_account_below_initial_margin():
     # 1,000: selling 1 realizes -$80,000, so cash ($20,000) is below one contract's
     # initial margin. The next sell(1) still exits exactly one contract; it opens
     # nothing, so margin does not apply to it. Mutation-proved: opening = the whole order.
+    # on_margin_call="record": the account is far below maintenance, and the default
+    # forced liquidation would close all three before the partial exits are tested.
     df = _closes([5000.0, 5000.0, 1000.0, 1000.0, 1000.0, 1000.0])
     trades, _ = _run_plan(df, {0: lambda b: b.buy(3), 2: lambda b: b.sell(1),
-                               3: lambda b: b.sell(1)})
+                               3: lambda b: b.sell(1)}, on_margin_call="record")
     closed = [t.contracts for t in trades if not t.open_at_end]
     held = [t.contracts for t in trades if t.open_at_end]
     assert closed == [1, 1] and held == [1]

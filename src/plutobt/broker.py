@@ -19,6 +19,7 @@ class Order:
     price: float | None = None   # trigger for stop/limit
     attached_stop: float | None = None
     status: str = "pending"      # "pending"|"filled"|"cancelled"|"rejected"
+    margin_liquidation: bool = False   # the engine's forced exit on a margin call
 
 
 class OrderError(ValueError):
@@ -137,6 +138,17 @@ class Broker:
         self.pending = order
         return order
 
+    def liquidate(self) -> Order | None:
+        """Queue the engine's forced exit on a margin call (spec §5.2).
+
+        A market order for the whole position, replacing any pending order: it fills
+        at the next bar's open and no break cancels it. Flat => None.
+        """
+        order = self.close()
+        if order is not None:
+            order.margin_liquidation = True
+        return order
+
     def amend_stop(self, price: float) -> None:
         self.resting_stop = price
 
@@ -148,6 +160,10 @@ class Broker:
         # Order changed after it was placed, or queued straight into `pending`, never
         # met placement's check.
         _check_size(order.contracts, f"at a break, the pending {order.side} order's size")
+        if order.margin_liquidation:
+            # A forced liquidation is the engine's, not the strategy's: no break stops
+            # it, and it fills at the next session's open.
+            return
         if keep_exits and self._is_reducing(order):
             # An order that reduces the position is an EXIT: it survives the break
             # and fills at the next session's open, as a resting exit would. A flip
@@ -176,7 +192,8 @@ class Broker:
         slip = self._slip_amount()
         return open_px + slip if side == "buy" else open_px - slip
 
-    def _emit_fill(self, ts: int, side: str, contracts: int, price: float) -> Fill:
+    def _emit_fill(self, ts: int, side: str, contracts: int, price: float,
+                   margin_liquidation: bool = False) -> Fill:
         # The backstop every fill passes. An order is checked where it is first touched,
         # with the clearer message, but the resting stop and the margin trim size a fill
         # from the POSITION, which no order check sees.
@@ -187,6 +204,7 @@ class Broker:
             contracts=contracts,
             price=price,
             commission=self._commission(contracts),
+            margin_liquidation=margin_liquidation,
         )
         self.portfolio.apply_fill(fill)
         return fill
@@ -296,7 +314,8 @@ class Broker:
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)
                 fills.append(
-                    self._emit_fill(next_bar.ts, order.side, order.contracts, price)
+                    self._emit_fill(next_bar.ts, order.side, order.contracts, price,
+                                    margin_liquidation=order.margin_liquidation)
                 )
                 order.status = "filled"
                 self.pending = None

@@ -38,6 +38,9 @@ class Trade:
     # entry fees still pooled on the position, plus the closing fill's share.
     # pnl stays PRICE P&L so every existing reader keeps its meaning.
     commission: float = 0.0
+    # True when the engine closed these contracts on a margin call
+    # (on_margin_call="liquidate"), not the strategy or its stop.
+    margin_liquidation: bool = False
 
     @property
     def net_pnl(self) -> float:
@@ -52,6 +55,24 @@ class Fill:
     contracts: int
     price: float
     commission: float
+    margin_liquidation: bool = False   # the engine's forced exit on a margin call
+
+
+@dataclass
+class MarginCall:
+    """A maintenance breach at a bar's close (spec §5.2).
+
+    ``equity`` is account equity (cash + open MTM) at the close; ``maintenance`` and
+    ``initial`` are the requirements for the ``contracts`` held. The call restores the
+    account to INITIAL, so ``amount = initial - equity``, never ``maintenance - equity``.
+    """
+
+    ts: int
+    contracts: int
+    equity: float
+    maintenance: float
+    initial: float
+    amount: float
 
 
 class Portfolio:
@@ -157,6 +178,7 @@ class Portfolio:
                 pnl=realized,
                 r_multiple=r_mult,
                 commission=trade_commission,
+                margin_liquidation=fill.margin_liquidation,
             )
         )
 
@@ -222,16 +244,29 @@ class Portfolio:
             initial_margin * |qty| - equity   (>= 0)
         Otherwise 0. Flat => 0. Uses the last mark() price.
         """
+        call = self.margin_call(ts=0)
+        return 0.0 if call is None else call.amount
+
+    def margin_call(self, ts: int) -> MarginCall | None:
+        """The margin call at the last mark() price, or None (spec §5.2).
+
+        None when flat or when equity >= maintenance_margin * |qty| (maintenance is
+        the floor; equal to it is not a breach). On a breach the call restores to
+        INITIAL: amount = initial_margin * |qty| - equity. ``ts`` stamps the event.
+        """
         qty = abs(self.position.qty)
         if qty == 0:
-            return 0.0
+            return None
         mark = self._mark_price
         if mark is None:
             mark = self.position.avg_price
         eq = self.equity(mark_price=mark)
-        if eq >= self.instrument.maintenance_margin * qty:
-            return 0.0
-        return max(0.0, self.instrument.initial_margin * qty - eq)
+        maintenance = self.instrument.maintenance_margin * qty
+        if eq >= maintenance:
+            return None
+        initial = self.instrument.initial_margin * qty
+        return MarginCall(ts=ts, contracts=qty, equity=eq, maintenance=maintenance,
+                          initial=initial, amount=max(0.0, initial - eq))
 
     def mark_open_at_end(self, ts: int) -> None:
         """Book a residual open position as a flagged open-at-end Trade (§5.9).

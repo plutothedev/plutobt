@@ -21,6 +21,13 @@ class BacktestConfig:
     #   session's open. `session` must then hold a trading-session ID on every bar that
     #   never decreases (e.g. the CME trading day as an int YYYYMMDD), not RTH/ETH labels.
     break_on: str = "gap"
+    # What a margin call does (spec §5.2): at a bar's close, equity below the
+    # maintenance margin of the held contracts records a MarginCall (the call restores
+    # to INITIAL margin; no deposit is ever invented), then:
+    # "liquidate" (default): a forced market exit of the whole position fills at the
+    #   next bar's open; its Trade carries margin_liquidation=True.
+    # "record": the event only; the position is kept, so the breach can be studied.
+    on_margin_call: str = "liquidate"
 
 
 def load_config(path: str) -> BacktestConfig:
