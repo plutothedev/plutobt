@@ -610,3 +610,87 @@ def test_a_column_that_never_warms_up_never_runs_on_bar():
     nq = get_instrument("NQ")
     result = Engine(nq, BacktestConfig()).run(_ohlc([(100, 101, 99, 100)] * 4), Never())
     assert seen == [] and len(result.equity_curve) == 4
+
+
+# ---------------------------------------------------------------------------
+# Film-ready audit (2026-11-02): clean ValueErrors for bad column names and ts types;
+# non-positive prices refused unless the config allows them (probe p10).
+# ---------------------------------------------------------------------------
+
+class _Adds(Strategy):
+    def __init__(self, name):
+        self.name = name
+
+    def precompute(self, df):
+        df = df.copy()
+        df[self.name] = 1.0
+        return df
+
+
+@pytest.mark.parametrize("name", ["ema-20", "my col", "_x", "class", 0])
+def test_a_column_name_on_bar_cannot_read_is_refused(name):
+    # Unchecked, namedtuple's own error ("Type names and field names must be valid
+    # identifiers") came out of the middle of the run.
+    from plutobt.broker import FrameError
+
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 3)
+    with pytest.raises(FrameError, match=f"column {name!r}") as e:
+        Engine(nq, BacktestConfig()).run(df, _Adds(name))
+    assert "Python identifier" in str(e.value)
+    df[name] = 1.0                                         # the caller's own column
+    with pytest.raises(ValueError, match=f"column {name!r}") as e:
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+    assert not isinstance(e.value, FrameError)
+
+
+def test_a_duplicate_column_name_is_refused():
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 3)
+    df = pd.concat([df, df[["close"]].rename(columns={"close": "x"}),
+                    df[["close"]].rename(columns={"close": "x"})], axis=1)
+    with pytest.raises(ValueError, match="column 'x' appears twice"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+def test_a_none_ts_is_a_value_error_not_a_type_error():
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 5).astype({"ts": object})
+    df.loc[2, "ts"] = None
+    with pytest.raises(ValueError, match=r"row 2 holds ts None \(NoneType\), not a number"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+def test_a_datetime_ts_column_is_a_value_error():
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 5)
+    df["ts"] = pd.to_datetime(df["ts"], unit="s")
+    with pytest.raises(ValueError, match=r"the 'ts' column holds datetimes \(datetime64"):
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+
+
+@pytest.mark.parametrize("px", [0.0, -5.0])
+def test_a_non_positive_price_frame_is_refused_by_default(px):
+    # assert_positive_prices existed but was never called: a back-adjusted series that
+    # went negative ran without a word.
+    def never(df):
+        raise AssertionError("precompute ran")
+
+    class Never(Strategy):
+        precompute = staticmethod(never)
+
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100), (px, px + 1, px - 1, px), (100, 101, 99, 100)])
+    with pytest.raises(ValueError, match="non-positive price in column 'open' at row 1") as e:
+        Engine(nq, BacktestConfig()).run(df, Never())
+    assert "allow_nonpositive_prices" in str(e.value)
+
+
+def test_allow_nonpositive_prices_runs_a_frame_that_traded_below_zero():
+    # CL settled at -37.63 on 2020-04-20; dollar P&L stays valid below zero.
+    cl = get_instrument("CL")
+    df = _ohlc([(10, 11, 9, 10), (10, 11, 9, 10), (-5, -4, -6, -5), (-5, -4, -6, -5)])
+    eng = Engine(cl, BacktestConfig(allow_nonpositive_prices=True, slippage_ticks=0.0,
+                                    commission_per_side=0.0, on_margin_call="record"))
+    (t,) = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1)})).trades
+    assert t.entry_price == 10.0 and t.pnl == pytest.approx(-15.0 * cl.point_value)

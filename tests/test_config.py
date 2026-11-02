@@ -20,6 +20,7 @@ def test_backtestconfig_is_dataclass_with_exact_fields():
         "on_margin_call",  # 2026-11-02: margin calls run in the engine
         "check_causality",  # 2026-11-02: Engine.run checks precompute for look-ahead
         "causality_sample",
+        "allow_nonpositive_prices",  # 2026-11-02: Engine.run refuses prices <= 0
     }
 
 

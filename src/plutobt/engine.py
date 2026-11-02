@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import keyword
 import math
 import numbers
 from dataclasses import asdict, dataclass, field, replace
@@ -14,6 +15,7 @@ import pandas as pd
 from plutobt import __version__
 from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
+from plutobt.data import assert_positive_prices
 from plutobt.instruments import Instrument
 from plutobt.lookahead import _ROW_RULE, LookaheadError, _first_mismatch, assert_causal
 from plutobt.portfolio import MarginCall, Portfolio, Trade
@@ -43,12 +45,24 @@ _BASE_COLS = frozenset(("ts", "open", "high", "low", "close", "volume", "session
 _STARTING_CASH = 100_000.0
 
 # v1 default roll/sample vintage; NOT the run date (back-adjustment construction
-# is out of v1, §5.6). Stamped into every manifest's roll metadata.
+# is out of v1, §5.6). Stamped into the manifest's roll metadata only for a run on a
+# shipped sample file, recognized by its data_sha256 (load_bars of data/sample/*).
 _ROLL_AS_OF_DEFAULT = "2026-06-07"
+_SAMPLE_SHA256 = {
+    "9d70cc5b6882c1342d54be9c84f5f871324027d6201679142cb7a90cec82f100": "nq_5m.json",
+    "9c8bbe386a3e4ed9868beae594a67fe86d7fc9ef486576e5abb865ec39ae1699": "es_5m.json",
+    "b47f1c8b0c9784e2c98f8db8998889ac54a38d84ab9157f2af53367945e6bc42": "cl_5m.json",
+}
+_ROLL_UNKNOWN = "unknown/user-supplied"
 
 # The time-order rule, quoted by every refusal of a frame's bar order.
-_TIME_RULE = ("bar timestamps (the 'ts' column) must strictly increase, since the engine "
-              "runs the bars in row order")
+_TIME_RULE = ("bar timestamps (the 'ts' column, in unix seconds) must strictly increase, "
+              "since the engine runs the bars in row order")
+
+# The column-name rule, quoted by every refusal of a frame's column names.
+_COLUMN_RULE = ("every column name must be a Python identifier that does not start with "
+                "an underscore and is not a keyword (e.g. 'ema_20', not 'ema-20'), since "
+                "on_bar reads each one as ctx.bar.<name>")
 
 # The session-ID rule for break_on="session", quoted by every refusal of the column.
 _SESSION_RULE = (
@@ -63,10 +77,29 @@ def _time_problem(frame: pd.DataFrame) -> str | None:
     timestamps strictly increase."""
     if "ts" not in frame.columns:
         return "the frame has no 'ts' column"
+    if pd.api.types.is_datetime64_any_dtype(frame["ts"]):
+        return (f"the 'ts' column holds datetimes ({frame['ts'].dtype}), not a number of "
+                "unix seconds; convert it to int unix seconds first")
     ts = frame["ts"].tolist()
-    for i in range(1, len(ts)):
-        if not ts[i] > ts[i - 1]:      # written so that a NaN ts is refused too
-            return f"row {i} (ts {ts[i]}) is not after row {i - 1} (ts {ts[i - 1]})"
+    for i, value in enumerate(ts):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real):
+            return (f"row {i} holds ts {value!r} ({type(value).__name__}), not a number "
+                    "of unix seconds")
+        if i and not value > ts[i - 1]:      # written so that a NaN ts is refused too
+            return f"row {i} (ts {value}) is not after row {i - 1} (ts {ts[i - 1]})"
+    return None
+
+
+def _column_problem(frame: pd.DataFrame) -> str | None:
+    """The first column name a namedtuple field (ctx.bar.<name>) cannot be; None if none."""
+    seen = set()
+    for name in frame.columns:
+        if name in seen:
+            return f"column {name!r} appears twice"
+        seen.add(name)
+        if (not isinstance(name, str) or not name.isidentifier()
+                or name.startswith("_") or keyword.iskeyword(name)):
+            return f"column {name!r} is not a name on_bar can read as ctx.bar.<name>"
     return None
 
 
@@ -138,10 +171,12 @@ class Engine:
 
         Checks first: a bad config (``break_on``; a commission, slippage or
             periods_per_year that is not finite) and a bad ``df`` (bar timestamps
-            that do not strictly increase; in session mode, a bad ``session``
-            column) are refused with a ValueError before the strategy's
-            ``precompute`` runs. The same frame checks run on what ``precompute``
-            returns, and a frame it broke raises FrameError, naming it; so does a
+            that are not numbers of unix seconds or do not strictly increase; a
+            column name that is not a Python identifier; in session mode, a bad
+            ``session`` column; any price <= 0 unless ``allow_nonpositive_prices``)
+            are refused with a ValueError before the strategy's ``precompute`` runs.
+            The same frame checks run on what ``precompute`` returns, and a frame
+            it broke raises FrameError, naming it; so does a
             precompute that drops, adds or reorders rows, or changes a base column
             (ts, open, high, low, close, volume, session) the caller's frame holds,
             since the fills read those columns.
@@ -191,6 +226,16 @@ class Engine:
         """
         self._check_config()
         self._check_frame(df, precomputed=False)       # the caller's own frame
+        if not self.config.allow_nonpositive_prices:
+            try:
+                assert_positive_prices(df)
+            except ValueError as refused:
+                raise ValueError(
+                    f"{refused} Engine.run refuses such a frame by default: it is usually "
+                    "a back-adjusted series pushed through zero. Set "
+                    "allow_nonpositive_prices = true only for an instrument that really "
+                    "traded there (CL settled at -37.63 on 2020-04-20)"
+                ) from refused
         data = strategy.precompute(df.copy()).reset_index(drop=True)
         self._check_frame(data, precomputed=True)      # what the strategy made of it
         self._check_precompute_kept_the_bars(df, data)
@@ -316,17 +361,18 @@ class Engine:
         in session mode, a broken session column. A problem in the caller's frame is a
         plain ValueError; one in what the strategy's precompute returned is a FrameError
         naming it."""
-        rules = [(_time_problem, _TIME_RULE, "the bar timestamps")]
+        rules = [(_time_problem, _TIME_RULE, "removed or broke the bar timestamps")]
         if self.config.break_on == "session":
-            rules.append((_session_problem, _SESSION_RULE, "the session column"))
+            rules.append((_session_problem, _SESSION_RULE,
+                          "removed or broke the session column"))
+        rules.append((_column_problem, _COLUMN_RULE,
+                      "made a column name the bar loop cannot use"))
         for find, rule, what in rules:
             problem = find(frame)
             if problem is None:
                 continue
             if precomputed:
-                raise FrameError(
-                    f"the strategy's precompute removed or broke {what}: {problem}. {rule}"
-                )
+                raise FrameError(f"the strategy's precompute {what}: {problem}. {rule}")
             raise ValueError(f"{rule}; {problem}")
 
     @staticmethod
@@ -384,16 +430,21 @@ class Engine:
         source = config); consumers read it from there, never a top-level dup.
         """
         raw = df.to_csv(index=False).encode("utf-8")
-        return {
-            "data_sha256": hashlib.sha256(raw).hexdigest(),
-            "version": __version__,
-            "config": asdict(self.config),
-            "instrument": self.instrument.symbol,
+        sha = hashlib.sha256(raw).hexdigest()
+        if sha in _SAMPLE_SHA256:
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
             # synthetic snapshot. These document the continuous-series policy;
             # full back-adjustment construction is out of v1 scope.
-            "roll_trigger": "none_single_expiry",
-            "splice_method": "none_single_expiry",
-            "adjustment_method": "backwards_difference",
-            "as_of_date": _ROLL_AS_OF_DEFAULT,
+            roll = ("none_single_expiry", "none_single_expiry", "backwards_difference",
+                    _ROLL_AS_OF_DEFAULT)
+        else:
+            # Any other frame: the engine cannot know how it was rolled or adjusted.
+            roll = (_ROLL_UNKNOWN,) * 4
+        return {
+            "data_sha256": sha,
+            "version": __version__,
+            "config": asdict(self.config),
+            "instrument": self.instrument.symbol,
+            **dict(zip(("roll_trigger", "splice_method", "adjustment_method",
+                        "as_of_date"), roll, strict=True)),
         }

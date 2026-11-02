@@ -32,11 +32,17 @@ class BacktestConfig:
     # with lookahead.assert_causal (each bar's values must not change when the later bars
     # are removed) and refuses a leak with a LookaheadError naming the column.
     check_causality: bool = True
-    # The truncation grid: None (default) checks at every bar, exhaustive (about 0.2 s on
+    # The truncation grid: None (default) checks at every bar, exhaustive (about 0.3 s on
     # each 324-bar demo sample; the cost grows with the square of the bar count, so a long
     # history may want a sample). An int k checks k evenly spaced bars only and CAN MISS a
     # leak that touches a few rows between them.
     causality_sample: int | None = None
+    # Engine.run refuses a frame with any open/high/low/close <= 0 (the guard is
+    # data.assert_positive_prices): it is usually a back-adjusted continuous series pushed
+    # through zero, where percentage and log returns break. True runs it anyway, for an
+    # instrument that really traded at or below zero (CL settled at -37.63 on 2020-04-20):
+    # points/dollar P&L stays valid there, ratio returns on the prices do not.
+    allow_nonpositive_prices: bool = False
 
 
 def load_config(path: str) -> BacktestConfig:

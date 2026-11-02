@@ -60,6 +60,36 @@ def test_manifest_roll_metadata_documents_v1_defaults():
     assert m["as_of_date"] == "2026-06-07"
 
 
+_ROLL_KEYS = ("roll_trigger", "splice_method", "adjustment_method", "as_of_date")
+
+
+def test_every_shipped_sample_gets_the_sample_vintage_roll_metadata():
+    from plutobt.engine import _SAMPLE_SHA256
+
+    root = SAMPLE.parent
+    assert sorted(_SAMPLE_SHA256.values()) == ["cl_5m.json", "es_5m.json", "nq_5m.json"]
+    for name in _SAMPLE_SHA256.values():
+        sym = name[:2].upper()
+        m = Engine(get_instrument(sym), BacktestConfig()).run(
+            load_bars(str(root / name)), GoldenStrategy()).manifest
+        assert _SAMPLE_SHA256[m["data_sha256"]] == name    # the constant is the file's hash
+        assert [m[k] for k in _ROLL_KEYS] == ["none_single_expiry", "none_single_expiry",
+                                              "backwards_difference", "2026-06-07"]
+
+
+def test_a_user_frame_gets_unknown_roll_metadata():
+    # Unchecked, the sample's single-expiry/back-adjusted/2026-06-07 vintage was stamped
+    # on ANY frame (probe p10 d). A slice of the sample is no longer the shipped file.
+    import pandas as pd
+
+    sliced = load_bars(str(SAMPLE)).iloc[:200]
+    own = pd.DataFrame({"ts": [0, 300, 600], "open": [1.0] * 3, "high": [1.0] * 3,
+                        "low": [1.0] * 3, "close": [1.0] * 3, "volume": [1] * 3})
+    for df in (sliced, own):
+        m = Engine(get_instrument("NQ"), BacktestConfig()).run(df, GoldenStrategy()).manifest
+        assert [m[k] for k in _ROLL_KEYS] == ["unknown/user-supplied"] * 4
+
+
 # ---------------------------------------------------------------------------
 # M8.6: golden.toml config
 # ---------------------------------------------------------------------------
