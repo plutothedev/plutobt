@@ -648,51 +648,140 @@ def test_flip_bar_new_stop_not_touched_stays_resting():
     assert broker.resting_stop == 15_100.0
 
 
-def test_old_stop_hit_first_resizes_a_pending_flip_to_its_new_side():
-    # Adverse first: the held long's stop fires at the top of the bar and flattens it.
-    # The pending sell(2) was sized as a flip (close 1 + open 1); its closing half is
-    # done, so it opens just the new short 1 at the open. That short's stop (15,100) is
-    # then live and the bar's high (15,150) takes it out: one fill per order.
+# ---------------------------------------------------------------------------
+# A pending MARKET order fills at the bar's open, which comes before the bar's high and
+# low in real time. The held stop sees only the range after that fill, and only if a
+# position it protects is still open. If the open is already at or beyond the stop
+# (gap-through), the stop fills at the open first and the order is re-sized.
+# ---------------------------------------------------------------------------
+
+def test_market_flip_fills_at_the_open_and_the_old_stop_never_fires():
+    # Long 1 @100 stop 95, sell(2) pending; the bar opens 98, then trades down to 90.
+    # The flip closes the long at 98 and opens short 1 there; the 95 stop is gone.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.sell(contracts=2)
+    fills = broker.fill_pending(Bar(2, 98.0, 99.0, 90.0, 92.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 2, 98.0)]
+    assert (order.status, order.contracts) == ("filled", 2)
+    assert (pf.position.qty, pf.position.avg_price) == (-1, 98.0)
+    assert [(t.side, t.exit_price) for t in pf.trades] == [("long", 98.0)]
+    assert broker.resting_stop is None
+
+
+def test_market_flip_open_gapped_through_the_old_stop_fills_the_stop_first():
+    # Positive control: the bar opens at 94, already through 95. The stop fills at the
+    # open, then the flip, re-sized to its new side, sells 1 at the same open.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.sell(contracts=2)
+    fills = broker.fill_pending(Bar(2, 94.0, 96.0, 90.0, 92.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 94.0),
+                                                                ("sell", 1, 94.0)]
+    assert (order.status, order.contracts) == ("filled", 1)
+    assert (pf.position.qty, pf.position.avg_price) == (-1, 94.0)
+    assert [(t.side, t.exit_price) for t in pf.trades] == [("long", 94.0)]
+
+
+def test_market_flip_at_the_open_then_its_new_stop_on_the_rest_of_the_bar():
+    # Replaces f071c26's test_old_stop_hit_first_cancels_the_entry_no_second_stop_fill,
+    # which fired the long's 14,900 stop although the bar opened above it (14,950) with
+    # a market flip pending. The flip fills at the open; its new short's 15,100 stop is
+    # live for the rest of the bar and the 15,150 high takes it out.
     broker, inst, pf = make_broker(slippage_ticks=1.0)
     open_long(broker, entry_open=15_000.0, stop=14_900.0)
     order = broker.sell(contracts=2, stop=15_100.0)
     bar = Bar(ts=2000, open=14_950.0, high=15_150.0, low=14_850.0, close=15_000.0)
     fills = broker.fill_pending(bar)
     assert [(f.side, f.contracts, f.price) for f in fills] == [
-        ("sell", 1, 14_899.75), ("sell", 1, 14_949.75), ("buy", 1, 15_100.25)]
-    assert (order.status, order.contracts) == ("filled", 1)
+        ("sell", 2, 14_949.75), ("buy", 1, 15_100.25)]
+    assert (order.status, order.contracts) == ("filled", 2)
     assert pf.position.qty == 0
     assert broker.resting_stop is None
     assert [t.side for t in pf.trades] == ["long", "short"]
 
 
-def test_old_stop_hit_first_resized_flip_keeps_its_new_short():
-    # Long 2 stopped out; the pending sell(5) opens short 3 with its own stop resting.
+def test_gapped_stop_resized_flip_keeps_its_new_short():
+    # Long 2 with stop 14,900; the bar opens 14,880 (through it). The stop sells 2 at
+    # the open; the pending sell(5) opens short 3 there with its own stop resting.
     broker, inst, pf = make_broker(slippage_ticks=0.0)
     broker.buy(contracts=2, stop=14_900.0)
     broker.fill_pending(Bar(ts=1000, open=15_000.0, high=15_010.0, low=14_990.0,
                             close=15_000.0))
     order = broker.sell(contracts=5, stop=15_100.0)
-    bar = Bar(ts=2000, open=14_950.0, high=15_000.0, low=14_850.0, close=14_900.0)
+    bar = Bar(ts=2000, open=14_880.0, high=14_950.0, low=14_850.0, close=14_900.0)
     fills = broker.fill_pending(bar)
     assert [(f.side, f.contracts, f.price) for f in fills] == [
-        ("sell", 2, 14_900.0), ("sell", 3, 14_950.0)]
+        ("sell", 2, 14_880.0), ("sell", 3, 14_880.0)]
     assert (order.status, order.contracts) == ("filled", 3)
     assert pf.position.qty == -3
     assert broker.resting_stop == 15_100.0
     assert pf.position.initial_stop == 15_100.0
 
 
-def test_old_stop_hit_first_cancels_a_pending_pure_exit():  # positive control
-    # A pending close() is stale once the stop has flattened the position.
+def test_gapped_stop_cancels_a_pending_close():
+    # The open is through the stop: the stop is the exit, the pending close() is stale.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    open_long(broker, entry_open=15_000.0, stop=14_900.0)
+    order = broker.close()
+    bar = Bar(ts=2000, open=14_880.0, high=14_960.0, low=14_850.0, close=14_900.0)
+    fills = broker.fill_pending(bar)
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 14_880.0)]
+    assert order.status == "cancelled"
+    assert pf.position.qty == 0
+
+
+def test_pending_close_fills_at_the_open_before_the_stop():
     broker, inst, pf = make_broker(slippage_ticks=0.0)
     open_long(broker, entry_open=15_000.0, stop=14_900.0)
     order = broker.close()
     bar = Bar(ts=2000, open=14_950.0, high=14_960.0, low=14_850.0, close=14_900.0)
     fills = broker.fill_pending(bar)
-    assert [(f.side, f.contracts) for f in fills] == [("sell", 1)]
-    assert order.status == "cancelled"
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 14_950.0)]
+    assert order.status == "filled"
     assert pf.position.qty == 0
+
+
+def test_market_scale_in_at_the_open_then_the_held_stop_on_the_rest_of_the_bar():
+    # The add fills at the open (98); the 95 stop still protects the now-2-lot long and
+    # the bar's low (90) takes both out at the stop.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    broker.buy(contracts=1)
+    fills = broker.fill_pending(Bar(2, 98.0, 99.0, 90.0, 92.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("buy", 1, 98.0),
+                                                                ("sell", 2, 95.0)]
+    assert pf.position.qty == 0
+
+
+def test_refused_market_order_still_leaves_the_held_stop_live():
+    # The add fails margin (11 lots); the held long's stop still fires on the bar.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.buy(contracts=10)
+    fills = broker.fill_pending(Bar(2, 98.0, 99.0, 90.0, 92.0))
+    assert order.status == "rejected"
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 95.0)]
+    assert pf.position.qty == 0
+
+
+def test_limit_flip_keeps_adverse_first():
+    # A limit's fill time inside the bar is unknowable, so the held stop is checked
+    # first (adverse first, section 5.4): stop sells 1 at 95, then the sell limit,
+    # re-sized to its new side, sells 1 at 99 on the bar's high.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.sell(contracts=2, limit=99.0)
+    fills = broker.fill_pending(Bar(2, 98.0, 100.0, 90.0, 92.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 95.0),
+                                                                ("sell", 1, 99.0)]
+    assert (order.status, order.contracts) == ("filled", 1)
+    assert pf.position.qty == -1
 
 
 # ---------------------------------------------------------------------------
@@ -794,12 +883,25 @@ def test_no_shorts_trims_a_flip_to_its_closing_half():
 
 
 def test_no_shorts_refuses_a_flip_resized_by_a_stop_out():
-    # The long's stop closes it; what is left of the pending sell(2) is a short entry.
+    # The open (94) is through the long's 95 stop, which closes it there; what is left
+    # of the pending sell(2) is a short entry, refused.
+    broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
+    broker.buy(contracts=1, stop=95.0)
+    broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
+    order = broker.sell(contracts=2)
+    fills = broker.fill_pending(Bar(2, 94.0, 96.0, 93.0, 94.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 94.0)]
+    assert order.status == "rejected"
+    assert pf.position.qty == 0
+
+
+def test_no_shorts_flip_trimmed_at_the_open_before_the_stop():
+    # Not gapped: the trimmed flip (sell 1) closes the long at the open (96).
     broker, inst, pf = make_broker(slippage_ticks=0.0, allow_short=False)
     broker.buy(contracts=1, stop=95.0)
     broker.fill_pending(Bar(1, 100.0, 101.0, 99.0, 100.0))
     order = broker.sell(contracts=2)
     fills = broker.fill_pending(Bar(2, 96.0, 96.0, 94.0, 94.0))
-    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 95.0)]
-    assert order.status == "rejected"
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 1, 96.0)]
+    assert (order.status, order.contracts) == ("filled", 1)
     assert pf.position.qty == 0

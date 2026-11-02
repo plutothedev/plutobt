@@ -455,6 +455,20 @@ def test_flip_without_a_new_stop_leaves_no_stale_stop_in_the_engine():
         ("long", 600, False), ("short", None, True)]
 
 
+def test_market_flip_fills_at_the_open_before_the_old_stop_in_the_engine():
+    # Long 1 @100 stop 95; sell(2) decided on bar 1. Bar 2 opens 98, then trades to 90:
+    # the flip closes the long at 98 and the short rides; the 95 stop never fills.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    df = _ohlc([(100, 101, 99, 100), (100, 101, 99, 100), (98, 99, 90, 92),
+                (92, 93, 91, 92)])
+    result = eng.run(df, _Script({0: lambda c: c.broker.buy(contracts=1, stop=95.0),
+                                  1: lambda c: c.broker.sell(contracts=2)}))
+    assert [(t.side, t.entry_price, t.exit_price, t.open_at_end)
+            for t in result.trades] == [("long", 100.0, 98.0, False),
+                                        ("short", 98.0, None, True)]
+
+
 def test_entry_bar_stop_pierce_fires_in_the_engine():
     # Entry fills at bar 1's open 100 with stop 95; bar 1's low (90) trades through it.
     nq = get_instrument("NQ")

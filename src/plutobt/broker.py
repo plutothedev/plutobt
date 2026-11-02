@@ -234,6 +234,15 @@ class Broker:
         ref = max(stop, live_from)
         return ref + slip
 
+    def _open_through_stop(self, open_px: float) -> bool:
+        """True when the bar opens at or beyond the held position's resting stop (a
+        gap-through: the stop is triggered by the open itself)."""
+        stop = self.resting_stop
+        pos_side = self._position_side()
+        if stop is None or pos_side is None:
+            return False
+        return open_px <= stop if pos_side == "long" else open_px >= stop
+
     def _fire_resting_stop(self, bar, live_from: float | None = None) -> list[Fill]:
         fills: list[Fill] = []
         stop = self.resting_stop
@@ -285,9 +294,19 @@ class Broker:
                         f"cannot fill the {order.side} order at ts {_ts_text(next_bar.ts)}: "
                         "its size")
         fills: list[Fill] = []
-        stop_fills = self._fire_resting_stop(next_bar)    # adverse fills first
-        fills.extend(stop_fills)
         order = self.pending
+        # The held position's stop vs the pending order. A MARKET order fills at the
+        # open, and the open comes before the bar's high and low in real time, so the
+        # stop is checked only against the range AFTER that fill, and only if a
+        # position it protects is still open (a flip or close at the open leaves none).
+        # The exception is an open already at or beyond the stop (gap-through): the
+        # stop fills at the open first, and the order is re-sized below. A LIMIT's fill
+        # time inside the bar is unknowable, so the stop is checked first (adverse
+        # first, §5.4), the conservative convention.
+        defer_stop = (order is not None and order.kind == "market"
+                      and not self._open_through_stop(float(next_bar.open)))
+        stop_fills = [] if defer_stop else self._fire_resting_stop(next_bar)
+        fills.extend(stop_fills)
         # If the protective stop just flattened us, the pending order was sized against
         # a position that is gone. A flip (same side as the stop's exit, more contracts
         # than it closed) already has its closing half done, so it keeps just its new
@@ -337,8 +356,8 @@ class Broker:
                         order.status = "rejected"
                         self.pending = None
                         order = None
+        armed_at: float | None = None     # where an attached stop went live, if one did
         if order is not None:
-            armed_at: float | None = None     # where an attached stop went live, if one did
             prior_side = self._position_side()
             if order.kind == "market":
                 price = self._market_fill_price(order.side, next_bar.open)
@@ -387,6 +406,10 @@ class Broker:
                 # the fill for a limit), not the bar's open. Firing consumes the stop,
                 # so it fills at most once.
                 fills.extend(self._fire_resting_stop(next_bar, live_from=armed_at))
+        if defer_stop and armed_at is None:
+            # The market order went first (filled, trimmed or refused); whatever stop
+            # still protects an open position now sees the rest of the bar.
+            fills.extend(self._fire_resting_stop(next_bar))
         if self.portfolio.position.qty == 0:
             self.resting_stop = None      # no orphan stop on a flat position
         return fills
