@@ -25,6 +25,13 @@ class LookaheadError(FrameError, AssertionError):
     """
 
 
+# Float noise, not a leak: two numbers match within RTOL relative or ATOL absolute.
+# pandas centres rolling moments (skew, kurt) on the whole input, so their last digits
+# move by about 1e-11 relative when later bars are removed; a real leak moves a value
+# by far more (one part per million is caught 1000 times over).
+RTOL = 1e-9
+ATOL = 1e-10
+
 _ROW_RULE = ("precompute must return one row per input bar, in order (no dropped, "
              "added or reordered rows); mark warm-up bars with NaN instead of dropping them")
 
@@ -38,10 +45,10 @@ def _values(s: pd.Series) -> tuple[bool, np.ndarray]:
 
 def _mismatch_at(a: tuple[bool, np.ndarray], b: tuple[bool, np.ndarray]) -> int | None:
     """Position of the first value that differs between two ``_values`` of one length,
-    NaN matching NaN; numbers within 1e-12, anything else by equality. None if none."""
+    NaN matching NaN; numbers within RTOL/ATOL, anything else by equality. None if none."""
     (num_a, x), (num_b, y) = a, b
     if num_a and num_b:
-        same = np.isclose(x, y, rtol=1e-12, atol=1e-12, equal_nan=True)
+        same = np.isclose(x, y, rtol=RTOL, atol=ATOL, equal_nan=True)
     else:
         na_x, na_y = pd.isna(x), pd.isna(y)
         same = np.array([(p and q) or (not p and not q and bool(u == v))
@@ -68,6 +75,9 @@ def assert_causal(
     prefix result is compared with the full result's first t+1 rows. The truncation
     points run from t=0 (the 1-bar prefix, which catches a leak into row 0 such as a
     backfilled first return) to t=n-2; the n-bar prefix is the full frame itself.
+    Numbers match within float noise, rtol=1e-9 and atol=1e-10 (RTOL, ATOL): pandas'
+    rolling skew and kurt move their last digits (about 1e-11 relative) when later bars
+    are removed, which is not a leak.
 
     ``sample=None`` (or >= n-1) truncates at every bar: exhaustive, at a cost that grows
     with the square of the bar count. ``sample=k`` truncates at k evenly spaced bars

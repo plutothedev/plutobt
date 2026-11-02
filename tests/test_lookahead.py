@@ -1,3 +1,5 @@
+import pathlib
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -188,3 +190,37 @@ def test_full_grid_computes_every_proper_prefix_once():
 def test_sampled_grid_spans_the_first_and_last_proper_prefix():
     calls = _prefix_lengths(60, 5)
     assert calls[0] == 60 and calls[1] == 1 and calls[-1] == 59 and len(calls) == 6
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02): numbers match within float noise (rtol 1e-9, atol 1e-10).
+# ---------------------------------------------------------------------------
+
+_SAMPLE = pathlib.Path(__file__).resolve().parents[1] / "data" / "sample" / "nq_5m.json"
+
+
+@pytest.mark.parametrize("stat", ["skew", "kurt"])
+def test_assert_causal_passes_honest_rolling_skew_and_kurt(stat):
+    # pandas centres rolling moments on the whole input, so the last digits at bar 42
+    # move when later bars are removed (about 1e-11 relative); 1e-12 refused them.
+    from plutobt.data import load_bars
+
+    df = load_bars(str(_SAMPLE))
+    assert assert_causal(lambda d: d.assign(x=getattr(d["close"].rolling(30), stat)()),
+                         df) is None
+
+
+@pytest.mark.parametrize("fn", [
+    lambda d: d.assign(x=d["close"].shift(-1).rolling(30).skew()),
+    lambda d: d.assign(x=d["close"] * (1 + 1e-6 * (d["close"].shift(-1) > d["close"]))),
+], ids=["shifted-skew", "one-part-per-million"])
+@pytest.mark.filterwarnings("ignore:All-NaN slice:RuntimeWarning")  # 1-bar prefix
+def test_assert_causal_still_catches_a_leak_above_float_noise(fn):
+    from plutobt.data import load_bars
+
+    with pytest.raises(AssertionError, match="non-causal column 'x'"):
+        assert_causal(fn, load_bars(str(_SAMPLE)))
+
+
+def test_the_tolerance_is_documented():
+    assert "1e-9" in assert_causal.__doc__
