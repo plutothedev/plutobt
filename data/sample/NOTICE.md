@@ -17,7 +17,7 @@ real calendar dates and real exchange hours; the prices and volumes are not.
 - **Bars:** 5-minute, REGULAR TRADING HOURS only, on each instrument's session
   from the registry in `src/plutobt/instruments.py` (America/Chicago clock).
 - **Trading days:** 20, Monday 2026-03-02 to Friday 2026-03-27. The range
-  crosses four weekends and the US DST change on Sunday 2026-03-08 (CT moves
+  crosses three weekends and the US DST change on Sunday 2026-03-08 (CT moves
   from UTC-6 to UTC-5, so the same 08:30 CT open is an hour earlier in UTC).
 - **No bars outside RTH:** each session stops at its close and the next one
   opens the following trading day, with an overnight price gap.

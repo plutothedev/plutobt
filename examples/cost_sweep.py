@@ -34,7 +34,8 @@ SLIPPAGE_TICKS = [0.0, 1.0, 2.0, 4.0]
 
 
 def run(slippages: list[float] = SLIPPAGE_TICKS) -> pd.DataFrame:
-    """One row per slippage level: final equity, Sharpe, profit factor, expectancy,
+    """One row per slippage level: final equity, Sharpe (with its standard error and
+    95% CI, as compute_metrics reports them), profit factor, expectancy,
     closed trades, positions open at the end, and fills (each closed trade has two, an
     open position its entry only: the fills every tick of slippage is charged on)."""
     base = load_config(str(NQ_CONFIG))
@@ -50,6 +51,8 @@ def run(slippages: list[float] = SLIPPAGE_TICKS) -> pd.DataFrame:
             "commission_per_side": cfg.commission_per_side,
             "final_equity": float(result.equity_curve.iloc[-1]),
             "sharpe": m["sharpe"],
+            "sharpe_se": m["sharpe_se"],
+            "sharpe_ci": m["sharpe_ci"],
             "profit_factor": m["profit_factor"],
             "expectancy": m["expectancy"],
             "n_trades": m["n_trades"],
@@ -69,6 +72,16 @@ def _trades(n_closed: int, n_open: int) -> str:
     return f"{n_closed} + {n_open} open" if n_open else f"{n_closed}"
 
 
+def _ci_verdict(table: pd.DataFrame) -> str:
+    """Whether any row's Sharpe is distinguishable from zero, read off the 95% CIs."""
+    excl = [f"{ticks:g} ticks" for ticks, (lo, hi) in table["sharpe_ci"].items()
+            if (lo > 0.0 or hi < 0.0)]      # a NaN interval excludes nothing
+    if not excl:
+        return ("Every Sharpe above has a 95% CI that includes 0: none is "
+                "distinguishable from zero.")
+    return f"95% CI excludes 0 at: {', '.join(excl)}"
+
+
 def main() -> None:
     table = run()
     tick_value = get_instrument("NQ").tick_value
@@ -78,13 +91,18 @@ def main() -> None:
           "slippage varied per side")
     print("IN-SAMPLE, single pre-specified strategy; not predictive of live results.")
     print()
-    print(f"{'slippage':>12}  {'final equity':>14}  {'Sharpe':>7}  {'PF':>6}  "
+    print(f"{'slippage':>12}  {'final equity':>14}  {'Sharpe':>7}  {'SE':>6}  {'PF':>6}  "
           f"{'expectancy':>11}  {'trades':>12}")
     for ticks, row in table.iterrows():
         print(f"{ticks:>6g} ticks  {row['final_equity']:>14,.2f}  "
-              f"{_fmt(row['sharpe'], '.3f'):>7}  {_fmt(row['profit_factor'], '.3f'):>6}  "
+              f"{_fmt(row['sharpe'], '.3f'):>7}  {_fmt(row['sharpe_se'], '.3f'):>6}  "
+              f"{_fmt(row['profit_factor'], '.3f'):>6}  "
               f"{_fmt(row['expectancy'], ',.2f'):>11}  "
               f"{_trades(int(row['n_trades']), int(row['n_open'])):>12}")
+    print()
+    print("SE: the Sharpe's standard error (iid, skew/kurtosis-adjusted), from "
+          "compute_metrics.")
+    print(_ci_verdict(table))
     print()
     print(f"Starting equity $100,000.00, 1 NQ contract (${tick_value:.2f} a tick).")
     if table["n_open"].any():

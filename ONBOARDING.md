@@ -8,19 +8,23 @@ It's two things at once: a **real tool** for Pluto's NQ trading, and the **subje
 ## 2. The one idea you must hold in your head
 > **Decision-at-t, fill-at-t+1.**
 
-Your strategy looks at bar `t` and decides. The order it places fills at bar `t+1`'s open — never bar `t`. That single rule kills look-ahead bias by construction. Most amateur backtesters secretly let you trade on a bar using that same bar's close (impossible in reality). PlutoBT physically can't. See `src/plutobt/engine.py` (the `run` loop).
+Your strategy looks at bar `t` and decides. The order it places fills at bar `t+1`'s open — never bar `t`. Fills are causal by construction: no order fills at the bar that decided it. Most amateur backtesters secretly let you trade on a bar using that same bar's close (impossible in reality). Look-ahead can still hide in your strategy's own code, so `Engine.run` checks the vectorized `precompute` for it before the first bar. That is a check, not a sandbox: `on_bar` code written to cheat is not caught (README, "Look-ahead check"). See `src/plutobt/engine.py` (the `run` loop).
 
 ## 3. The other thing that makes it "honest"
 Everything is **futures-accurate, not stock-approximate**:
 - **Performance-bond margin** — initial/maintenance margin, margin calls, mark-to-market equity every bar (`portfolio.py`).
 - **Realistic fills** — directional slippage, gap-through protective stops (price gaps past your stop → you fill at the gap, not the stop), GTC resting stops (`broker.py`).
-- **Verified contract specs** — NQ/ES/CL/GC/ZN/YM/RTY/MNQ/MES point values, tick sizes, margins, all from CME publications. ZN even handles Treasury 32nds quoting (`110'085` = 110 + 8.5/32) (`instruments.py`).
-- Every result ships a **manifest** with a sha256 of the input data → reproducible "golden run" anyone can verify.
+- **Contract specs** — NQ/ES/CL/GC/ZN/YM/RTY/MNQ/MES point values and tick sizes per the CME contract specs; margins are representative defaults (as of 2026-06-07), so check your broker's before relying on them. ZN even handles Treasury 32nds quoting (`110'085` = 110 + 8.5/32) (`instruments.py`).
+- Every result ships a **manifest** with `data_sha256`: the sha256 of the loaded bars written as CSV (`df.to_csv(index=False)`), not of the file on disk, so `sha256sum nq_5m.json` gives a different value. To check the hash a report prints, from the repo root:
+  ```bash
+  PYTHONPATH=src python -c "import hashlib; from plutobt.data import load_bars; print(hashlib.sha256(load_bars('data/sample/nq_5m.json').to_csv(index=False).encode()).hexdigest())"
+  ```
+  The golden run (`configs/golden_expected.json`) pins that hash, and `pytest` checks it.
 
 ## 4. Repo map
 ```
 plutobt/
-├─ src/plutobt/          ← the engine (12 modules, ~1700 LOC)
+├─ src/plutobt/          ← the engine (12 modules)
 ├─ tests/                ← the test suite, one file per module (plus property and sample-data tests)
 ├─ examples/run_demo.py  ← the end-to-end demo (the "video payoff")
 ├─ scripts/              ← gen_sample.py (synthetic data), freeze_golden.py

@@ -7,7 +7,7 @@ registry in src/plutobt/instruments.py (America/Chicago wall clock):
     NQ, ES  08:30-15:15 CT  -> 81 bars/day x 20 days = 1,620 bars
     CL      08:00-13:30 CT  -> 66 bars/day x 20 days = 1,320 bars
 
-The 20 trading days run Monday 2026-03-02 to Friday 2026-03-27: four weekends, and the
+The 20 trading days run Monday 2026-03-02 to Friday 2026-03-27: three weekends, and the
 US DST change on Sunday 2026-03-08 (CT goes from UTC-6 to UTC-5, so the same 08:30 CT
 open lands an hour earlier in UTC). No bars outside RTH: each session ends at its close
 and the next opens the following trading day, with an overnight gap in price as well as

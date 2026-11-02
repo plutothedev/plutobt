@@ -6,5 +6,6 @@ commission_per_side = 2.5     # representative NQ per-side commission (§9)
 slippage_ticks      = 1.0     # 1 tick/side minimum, liquid front-month (§5.4)
 risk_free           = 0.0     # default; set only when stated
 periods_per_year    = 20412.0 # 81 RTH 5m bars/day * 252 trading days (§5.7)
-carry_overnight     = false   # cancel unfilled orders at session end (§5.5)
+carry_overnight     = false   # cancel a pending ENTRY at a session break; exits
+                              # and held positions carry across it (§5.5)
 allow_short         = true

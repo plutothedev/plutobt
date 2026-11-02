@@ -72,7 +72,8 @@ def test_the_engine_line_runs_the_same_signal_with_nq_costs(res, printed):
     assert eng["slippage_usd"] == 3910.0 and eng["commission_usd"] == 1955.0
     assert eng["gross_pnl"] == 5715.0 and eng["net_pnl"] == -150.0
     assert "=== THE ENGINE: same signal through PlutoBT, NQ costs" in printed
-    assert f"annualized Sharpe = {eng['sharpe']:>8.2f}    trades = 391" in printed
+    assert (f"annualized Sharpe = {eng['sharpe']:>8.2f} (SE {eng['sharpe_se']:.2f})"
+            "    trades = 391") in printed
     assert "win rate = 34% (closed trades, net of costs)" in printed
     assert "= net -$150.00" in printed                  # a loss reads -$, never $-
 
@@ -152,3 +153,31 @@ def test_nobody_is_flat_overnight_and_the_docstring_says_so():
     for claim in ("holds 10 positions overnight", "on 10 of the 19 overnight gaps",
                   "the lie on 9", "5 times"):
         assert claim in doc, claim
+
+
+def test_every_sharpe_carries_the_engines_standard_error(res, printed):
+    # Final pre-film audit, item 6: three Sharpes printed bare, each with an SE of
+    # about 3.5. The SE comes from metrics.sharpe_stats (compute_metrics' own), and
+    # the verdict under them is computed from the CIs, not written in.
+    from plutobt.metrics import sharpe_stats
+
+    for key in ("cheat", "honest"):
+        assert f"{res[key + '_sharpe']:>8.2f} (SE {res[key + '_se']:.2f})" in printed
+    eng = res["engine"]
+    assert f"{eng['sharpe']:>8.2f} (SE {eng['sharpe_se']:.2f})" in printed
+    # The pandas lines' SE is for the very returns their Sharpe is computed from.
+    _, sr, rets = cold_open.simulate(*cold_open.inputs(), cheat=True)
+    st = sharpe_stats(rets, cold_open.PPY)
+    assert st["sharpe"] == sr == res["cheat_sharpe"] and st["sharpe_se"] == res["cheat_se"]
+    assert res["cheat_ci"][0] > 0.0                     # the lie looks "significant"
+    for ci in (res["honest_ci"], eng["sharpe_ci"]):
+        assert ci[0] <= 0.0 <= ci[1]
+    assert "  95% CI excludes 0: the lie" in printed
+    assert ("  95% CI includes 0 (not distinguishable from zero): the truth, the engine"
+            in printed)
+
+
+def test_the_saved_chart_path_is_repo_relative(printed):
+    # Final pre-film audit, item 7: it printed the full local path on camera.
+    assert "Saved before/after chart -> examples/output/cold_open_lie_vs_truth.png" in printed
+    assert str(_ROOT) not in printed

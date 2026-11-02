@@ -172,15 +172,29 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
     if it never recovers, runs to the last bar. Positional (integer)
     bar distance is used, independent of the index dtype.
     """
+    depth, duration, _ = _deepest_drawdown(equity)
+    return (depth, duration)
+
+
+def max_drawdown_recovered(equity: pd.Series) -> bool:
+    """Whether the deepest drawdown (the one ``max_drawdown`` measures) regained its
+    peak by the last bar. False means its duration runs to the last bar and is a lower
+    bound, not a finished episode. True with no drawdown at all."""
+    return _deepest_drawdown(equity)[2]
+
+
+def _deepest_drawdown(equity: pd.Series) -> tuple[float, int, bool]:
+    """(depth, duration in bars, recovered) of the deepest drawdown episode; the one
+    computation behind ``max_drawdown`` and ``max_drawdown_recovered``."""
     eq = np.asarray(equity, dtype=float)
     n = eq.size
     if n == 0:
-        return (0.0, 0)
+        return (0.0, 0, True)
     running_max = np.maximum.accumulate(eq)
     dd = eq / running_max - 1.0
     depth = float(dd.min())
     if depth == 0.0:
-        return (0.0, 0)
+        return (0.0, 0, True)
     trough_pos = int(dd.argmin())
     # Peak position: last index at/before the trough where equity == running_max.
     peak_val = running_max[trough_pos]
@@ -189,12 +203,14 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
         peak_pos -= 1
     # Recovery: first bar after the trough whose equity regains the peak.
     recovery_pos = n - 1
+    recovered = False
     for j in range(trough_pos + 1, n):
         if eq[j] >= peak_val:
             recovery_pos = j
+            recovered = True
             break
     duration = recovery_pos - peak_pos
-    return (depth, int(duration))
+    return (depth, int(duration), recovered)
 
 
 def trailing_hwm_drawdown(equity: pd.Series) -> float:
@@ -210,6 +226,18 @@ def trailing_hwm_drawdown(equity: pd.Series) -> float:
     running_max = np.maximum.accumulate(eq)
     dd = eq / running_max - 1.0
     return float(-dd.min())
+
+
+# The trading-day basis of periods_per_year (bars per day x 252, see compute_metrics).
+TRADING_DAYS_PER_YEAR = 252
+
+
+def trading_days_covered(n_bars: int, periods_per_year: float) -> float:
+    """How many trading days ``n_bars`` bars span, on the periods_per_year basis
+    (bars per day x 252): ``n_bars * 252 / periods_per_year``. The 20-day NQ sample
+    (1,620 bars at 20412 a year) is 20.0. A run under 252 of them is under a year, so
+    an annualized return (and Calmar) from it is an extrapolation."""
+    return n_bars * TRADING_DAYS_PER_YEAR / periods_per_year
 
 
 def calmar(annual_return: float, max_dd: float) -> float:
@@ -353,6 +381,49 @@ def cost_sensitivity(run_fn, slippage_ticks_list: list[float]) -> pd.DataFrame:
     return df
 
 
+def sharpe_stats(returns: pd.Series, periods_per_year: float) -> dict:
+    """The Sharpe, per bar and annualized, with its standard error and 95% CI, exactly
+    as ``compute_metrics`` reports them (it calls this): keys ``sharpe_raw``,
+    ``sharpe``, ``sharpe_se`` and ``sharpe_ci``. Public so a script that builds its
+    own return series (the cold-open demo) prints the engine's error bar, not its own.
+    """
+    returns = pd.Series(returns, dtype="float64")
+    t_count = int(returns.size)
+    # Sharpe: sharpe_raw = per-bar, sharpe = annualized (§0.2)
+    sr_raw = sharpe(returns, 1.0)
+    sr_ann = sharpe(returns, periods_per_year)
+    # SE and CI are reported in the SAME annualized units as `sharpe`, because
+    # every reader pairs the adjacent keys (format_report prints them in one
+    # sentence; the chat model quotes them together). They used to be left on
+    # the raw per-bar Sharpe, which produced "Sharpe 0.640 (95% CI [-0.05,
+    # 0.13])" - a point estimate outside its own interval - live on pluto's
+    # screen. `sharpe` is exactly sqrt(periods_per_year) times `sharpe_raw`,
+    # and a constant times an estimator has that constant times its standard
+    # error, so the same sqrt(periods_per_year) factor scales sharpe_se and
+    # sharpe_ci. The SE is the iid non-normal one (Mertens 2002 / Opdyke 2007),
+    # with the sample skew and kurtosis psr uses, so the CI and PSR tell the same
+    # story: Lo's normal-only SE printed "CI includes 0" beside "PSR = 0.986" on a
+    # right-skewed series (review, 2026-11-02). They can still differ in a sliver,
+    # since PSR scales by sqrt(T-1) and the SE by sqrt(T). Serial correlation is
+    # not adjusted for (Lo's eta(q) is not applied). The raw-unit statistics stay
+    # available through the pinned pure functions and sharpe_raw.
+    scale = math.sqrt(periods_per_year)
+    # Zero return volatility (has_volatility): the Sharpe is 0/0 (NaN), and the SE at
+    # sr = 0 is a fixed sqrt(1/T) that would print a fake interval around it
+    # ([-15.58, 15.58] at T = 323, ppy = 20412). NaN, like the T = 0 case.
+    r_arr = np.asarray(returns, dtype=float)
+    has_vol = has_volatility(r_arr)
+    if has_vol:
+        g3, g4 = _skew_kurtosis(r_arr)
+        se = sharpe_se(sr_raw, t_count, skew=g3, kurtosis=g4) * scale
+        raw_lo, raw_hi = sharpe_ci(sr_raw, t_count, skew=g3, kurtosis=g4)
+        ci = (raw_lo * scale, raw_hi * scale)
+    else:
+        se = float("nan")
+        ci = (float("nan"), float("nan"))
+    return {"sharpe_raw": sr_raw, "sharpe": sr_ann, "sharpe_se": se, "sharpe_ci": ci}
+
+
 def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> dict:
     """Assemble the full metrics bundle for a BacktestResult, labeled IN-SAMPLE.
 
@@ -396,38 +467,9 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     returns = equity.pct_change().dropna()
     t_count = int(returns.size)
 
-    # Sharpe: sharpe_raw = per-bar, sharpe = annualized (§0.2)
-    sr_raw = sharpe(returns, 1.0)
-    sr_ann = sharpe(returns, periods_per_year)
-    # SE and CI are reported in the SAME annualized units as `sharpe`, because
-    # every reader pairs the adjacent keys (format_report prints them in one
-    # sentence; the chat model quotes them together). They used to be left on
-    # the raw per-bar Sharpe, which produced "Sharpe 0.640 (95% CI [-0.05,
-    # 0.13])" - a point estimate outside its own interval - live on pluto's
-    # screen. `sharpe` is exactly sqrt(periods_per_year) times `sharpe_raw`,
-    # and a constant times an estimator has that constant times its standard
-    # error, so the same sqrt(periods_per_year) factor scales sharpe_se and
-    # sharpe_ci. The SE is the iid non-normal one (Mertens 2002 / Opdyke 2007),
-    # with the sample skew and kurtosis psr uses, so the CI and PSR tell the same
-    # story: Lo's normal-only SE printed "CI includes 0" beside "PSR = 0.986" on a
-    # right-skewed series (review, 2026-11-02). They can still differ in a sliver,
-    # since PSR scales by sqrt(T-1) and the SE by sqrt(T). Serial correlation is
-    # not adjusted for (Lo's eta(q) is not applied). The raw-unit statistics stay
-    # available through the pinned pure functions and sharpe_raw.
-    scale = math.sqrt(periods_per_year)
-    # Zero return volatility (has_volatility): the Sharpe is 0/0 (NaN), and the SE at
-    # sr = 0 is a fixed sqrt(1/T) that would print a fake interval around it
-    # ([-15.58, 15.58] at T = 323, ppy = 20412). NaN, like the T = 0 case.
-    r_arr = np.asarray(returns, dtype=float)
-    has_vol = has_volatility(r_arr)
-    if has_vol:
-        g3, g4 = _skew_kurtosis(r_arr)
-        se = sharpe_se(sr_raw, t_count, skew=g3, kurtosis=g4) * scale
-        raw_lo, raw_hi = sharpe_ci(sr_raw, t_count, skew=g3, kurtosis=g4)
-        ci = (raw_lo * scale, raw_hi * scale)
-    else:
-        se = float("nan")
-        ci = (float("nan"), float("nan"))
+    stats = sharpe_stats(returns, periods_per_year)
+    sr_raw, sr_ann = stats["sharpe_raw"], stats["sharpe"]
+    se, ci = stats["sharpe_se"], stats["sharpe_ci"]
     psr_val = psr(returns, sr0=0.0) if t_count > 1 else float("nan")
 
     # Sortino: annualized (§0.2 key "sortino")

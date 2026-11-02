@@ -637,7 +637,7 @@ class Engine:
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
             # synthetic snapshot. These document the continuous-series policy;
             # full back-adjustment construction is out of v1 scope.
-            roll = ("none_single_expiry", "none_single_expiry", "backwards_difference",
+            roll = ("none_single_expiry", "none_single_expiry", "none (single expiry, no roll)",
                     _ROLL_AS_OF_DEFAULT)
         else:
             # Any other frame: the engine cannot know how it was rolled or adjusted.

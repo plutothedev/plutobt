@@ -1,0 +1,19 @@
+=== THE LIE: bar t traded on bar t's own close (impossible in real life) ===
+  annualized Sharpe =    77.03 (SE 7.45)    bar hit rate = 99%    growth = x1.25 (unlevered, no costs)
+
+=== THE TRUTH: the signal acts at the next bar's open (before costs) ===
+  annualized Sharpe =     4.81 (SE 3.58)    bar hit rate = 53%    growth = x1.01 (unlevered, no costs)
+
+=== THE ENGINE: same signal through PlutoBT, NQ costs ($2.50/side, 1 tick/side) ===
+  annualized Sharpe =    -0.07 (SE 3.55)    trades = 391    win rate = 34% (closed trades, net of costs)
+  1 NQ: gross $5,715.00  - slippage $3,910.00  - commission $1,955.00  = net -$150.00
+
+SE: the Sharpe's standard error (iid, skew/kurtosis-adjusted), as the engine reports it.
+  95% CI excludes 0: the lie
+  95% CI includes 0 (not distinguishable from zero): the truth, the engine
+
+The only thing I changed:
+    position = signal           # the lie   (trade bar t on bar t's own close)
+    position = signal.shift(1)  # the truth (act at the next bar's open)
+
+Saved before/after chart -> examples/output/cold_open_lie_vs_truth.png

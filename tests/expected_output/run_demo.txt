@@ -1,0 +1,67 @@
+=== PlutoBT report: NQ ===
+IN-SAMPLE, single pre-specified strategy; not predictive of live results.
+Observations T = 1619   (periods_per_year = 20412.0)
+Annualization = sqrt(periods_per_year) = sqrt(20412) = 142.871
+Sharpe/bar    = 0.0125479   (raw, per bar)
+Sharpe        = 1.793   (annualized: Sharpe/bar x 142.871)
+Sharpe SE     = 3.529   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-5.124, +8.710]
+⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+PSR           = 0.694   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
+Sortino       = 2.678
+Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)
+Profit factor = 1.269
+Expectancy    = 27.603   ($ per closed trade, net of costs)
+Win rate      = 0.123
+Avg R         = 0.263
+Max DD depth  = -0.027650
+Max DD duration = 309 bars
+Trades        = 73   (closed)
+Open at end   = 1 (marked to last close, excluded from trade stats)
+data_sha256   = 6b6e0227d4c6cd6de39a3cd71f7c062a859001d6668e168e939f51019dc8d3b1   (of the loaded bars as CSV, not the file)
+engine version = 0.2.0
+
+=== PlutoBT report: ES ===
+IN-SAMPLE, single pre-specified strategy; not predictive of live results.
+Observations T = 1619   (periods_per_year = 20412.0)
+Annualization = sqrt(periods_per_year) = sqrt(20412) = 142.871
+Sharpe/bar    = -0.0274604   (raw, per bar)
+Sharpe        = -3.923   (annualized: Sharpe/bar x 142.871)
+Sharpe SE     = 3.513   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-10.809, +2.963]
+⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+PSR           = 0.132   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
+Sortino       = -5.322
+Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)
+Profit factor = 0.465
+Expectancy    = -98.750   ($ per closed trade, net of costs)
+Win rate      = 0.214
+Avg R         = -0.376
+Max DD depth  = -0.034634
+Max DD duration = 566 bars   (not recovered by the last bar)
+Trades        = 28   (closed)
+Open at end   = 1 (marked to last close, excluded from trade stats)
+data_sha256   = 47b1add21432e3980ca2bcd40d32695aed6494a603a17f067218b4befa409b15   (of the loaded bars as CSV, not the file)
+engine version = 0.2.0
+⚠ insufficient sample: n_trades=28 < 30; profit factor, expectancy, win rate and Avg R unreliable
+
+=== PlutoBT report: CL ===
+IN-SAMPLE, single pre-specified strategy; not predictive of live results.
+Observations T = 1319   (periods_per_year = 16632.0)
+Annualization = sqrt(periods_per_year) = sqrt(16632) = 128.965
+Sharpe/bar    = -0.0388931   (raw, per bar)
+Sharpe        = -5.016   (annualized: Sharpe/bar x 128.965)
+Sharpe SE     = 3.327   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-11.537, +1.505]
+⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+PSR           = 0.066   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
+Sortino       = -6.179
+Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)
+Profit factor = 0.251
+Expectancy    = -287.769   ($ per closed trade, net of costs)
+Win rate      = 0.128
+Avg R         = -1.251
+Max DD depth  = -0.153372
+Max DD duration = 1168 bars   (not recovered by the last bar)
+Trades        = 39   (closed)
+Open at end   = 0
+data_sha256   = 187a2f7097b399d966ad5c653fb1abba91074de43d0d778e0a4f392c3fcc42f1   (of the loaded bars as CSV, not the file)
+engine version = 0.2.0
+

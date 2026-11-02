@@ -4,7 +4,12 @@ from __future__ import annotations
 import math
 
 from plutobt.engine import BacktestResult
-from plutobt.metrics import MIN_TRADE_SAMPLE
+from plutobt.metrics import (
+    MIN_TRADE_SAMPLE,
+    TRADING_DAYS_PER_YEAR,
+    max_drawdown_recovered,
+    trading_days_covered,
+)
 
 _LABEL = "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
 
@@ -50,6 +55,11 @@ def _signed(x: float) -> str:
         if x == 0.0 or float(text) != 0.0:
             return text
     return f"{x:+.3e}"
+
+
+def _days(x: float) -> str:
+    """A day count to at most one decimal, no trailing zeros (20, 201.6)."""
+    return f"{x:.1f}".rstrip("0").rstrip(".")
 
 
 def format_report(result: BacktestResult, symbol: str) -> str:
@@ -101,6 +111,22 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     # return volatility (a flat or constant-growth curve), and Sortino/Calmar NaN for
     # the 0/0 of a flat curve: say why, not "nan" (and never a 0.000 Sharpe).
     no_vol = "n/a (no returns)" if t_obs == 0 else "n/a (zero return volatility)"
+    # Calmar divides an ANNUALIZED return (mean bar return x periods_per_year) by the
+    # max drawdown. From under a year of bars that is an extrapolation (20 trading days
+    # is x12.6), so a finite Calmar is printed only once the run covers a year; the
+    # value stays in result.metrics["calmar"].
+    days = trading_days_covered(len(result.equity_curve), ppy)
+    if math.isfinite(calmar) and days < TRADING_DAYS_PER_YEAR:
+        calmar_str = f"n/a (needs >= 1 year; this run covers {_days(days)} trading days)"
+    else:
+        calmar_str = _num(calmar, ".3f", nan=no_vol, inf="inf (no drawdown)")
+    # The deepest drawdown may still be open at the last bar: its duration is then a
+    # lower bound, not a finished episode.
+    dd_open = ("   (not recovered by the last bar)"
+               if not max_drawdown_recovered(result.equity_curve) else "")
+    expectancy_str = (f"{expectancy:.3f}   ($ per closed trade, net of costs)"
+                      if math.isfinite(expectancy)
+                      else _num(expectancy, ".3f", nan=no_trades))
 
     lines = [
         f"=== PlutoBT report: {symbol} ===",
@@ -121,29 +147,30 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         lines.append("⚠ Sharpe CI includes 0: not statistically distinguishable from zero")
     lines += [
         f"PSR           = {_num(psr, '.3f', nan=no_vol if math.isnan(sharpe) else 'n/a')}"
-        "   (P[true Sharpe > 0], skew/kurtosis-"
-        "adjusted, Bailey & Lopez de Prado)",
+        "   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; "
+        "skew/kurtosis-adjusted, Bailey & Lopez de Prado)",
         f"Sortino       = {_num(sortino, '.3f', nan=no_vol, inf='inf (no downside)')}",
-        f"Calmar        = {_num(calmar, '.3f', nan=no_vol, inf='inf (no drawdown)')}",
+        f"Calmar        = {calmar_str}",
         f"Profit factor = {_num(pf, '.3f', nan=pf_nan, inf='inf (no losing trades)')}",
-        f"Expectancy    = {_num(expectancy, '.3f', nan=no_trades)}",
+        f"Expectancy    = {expectancy_str}",
         f"Win rate      = {win_rate_str}",
         f"Avg R         = {avg_r_str}",
         f"Max DD depth  = {dd_depth:.6f}",
-        f"Max DD duration = {dd_dur} bars",
+        f"Max DD duration = {dd_dur} bars{dd_open}",
         f"Trades        = {n_trades}   (closed)",
         f"Open at end   = {n_open}"
         + (" (marked to last close, excluded from trade stats)" if n_open else ""),
-        f"data_sha256   = {man['data_sha256']}",
+        f"data_sha256   = {man['data_sha256']}   (of the loaded bars as CSV, not the file)",
         f"engine version = {man['version']}",
     ]
 
-    # §5.7 low-sample warning: trade-based stats (PF/expectancy) are unreliable
-    # below MIN_TRADE_SAMPLE closed trades (the same n_trades as the Trades line).
+    # §5.7 low-sample warning: every trade-based stat (profit factor, expectancy, win
+    # rate, Avg R) is unreliable below MIN_TRADE_SAMPLE closed trades (the same
+    # n_trades as the Trades line).
     if n_trades < MIN_TRADE_SAMPLE:
         lines.append(
             f"⚠ insufficient sample: n_trades={n_trades} < {MIN_TRADE_SAMPLE}; "
-            f"PF/expectancy unreliable"
+            f"profit factor, expectancy, win rate and Avg R unreliable"
         )
 
     return "\n".join(lines)
