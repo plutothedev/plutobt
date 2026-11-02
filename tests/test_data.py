@@ -404,6 +404,65 @@ def test_load_bars_accepts_whole_numbers_written_as_floats(tmp_path):
     assert df["volume"].tolist() == [3, 1]
 
 
+@pytest.mark.parametrize(("ts", "unit", "factor"), [
+    (1772461800000, "milliseconds", "1,000"),
+    (1772461800000000, "microseconds", "1,000,000"),
+    (1772461800000000000, "nanoseconds", "1,000,000,000"),
+], ids=["ms", "us", "ns"])
+def test_load_bars_names_the_unit_of_a_ts_that_is_not_seconds(tmp_path, ts, unit, factor):
+    # Milliseconds loaded silently as seconds in the year 58,000 (final audit B).
+    path = _write_json(tmp_path, [[ts, 100.0, 101.0, 99.0, 100.0, 1]])
+    with pytest.raises(ValueError, match=rf"row 0: ts {ts} looks like {unit}, not unix "
+                                         rf"seconds .*divide the ts by {factor}"):
+        load_bars(path)
+
+
+def test_load_bars_refuses_a_ts_past_int64(tmp_path):
+    # 2**63 + 10 wrapped to a negative int64.
+    path = _write_json(tmp_path, [[2**63 + 10, 100.0, 101.0, 99.0, 100.0, 1]])
+    with pytest.raises(ValueError, match="row 0: ts 9223372036854775818 is out of range"):
+        load_bars(path)
+
+
+def test_load_bars_accepts_a_ts_just_under_the_seconds_bound(tmp_path):  # control
+    path = _write_json(tmp_path, [[99_999_999_999, 100.0, 101.0, 99.0, 100.0, 1]])
+    assert load_bars(path)["ts"].tolist() == [99_999_999_999]
+
+
+@pytest.mark.parametrize(("bad", "why"), [
+    ("100", r"must be a number, got '100' \(str\)"),
+    (True, r"must be a number, got True \(bool\)"),
+    (None, r"must be a number, got None \(NoneType\)"),
+    (float("nan"), "must be a finite number, got nan"),
+    (float("inf"), "must be a finite number, got inf"),
+], ids=["text", "bool", "null", "nan", "inf"])
+@pytest.mark.parametrize(("col", "k"), [("open", 1), ("low", 3)])
+def test_load_bars_refuses_a_price_that_is_not_a_finite_number(tmp_path, bad, why, col, k):
+    # Text prices were coerced ("100" became 100.0) and inf loaded as inf.
+    row = [1700000600, 100.0, 101.0, 99.0, 100.0, 1]
+    row[k] = bad
+    path = _write_json(tmp_path, [_GOOD, row])
+    with pytest.raises(ValueError, match=rf"row 1: {col} {why}"):
+        load_bars(path)
+
+
+def test_load_bars_refuses_a_literal_overflowing_to_inf(tmp_path):
+    p = tmp_path / "bars.json"
+    p.write_text("[[1700000000, 1e400, 1, 1, 1, 5]]", encoding="utf-8")
+    with pytest.raises(ValueError, match="row 0: open must be a finite number, got inf"):
+        load_bars(str(p))
+
+
+@pytest.mark.parametrize(("row", "what"), [
+    ([1700000600, 100.0, 99.5, 99.0, 100.0, 1], r"high 99\.5 is below max\(open, close\)"),
+    ([1700000600, 100.0, 101.0, 100.5, 101.0, 1], r"low 100\.5 is above min\(open, close\)"),
+], ids=["high", "low"])
+def test_load_bars_refuses_a_bar_that_does_not_hold_its_body(tmp_path, row, what):
+    path = _write_json(tmp_path, [_GOOD, row])
+    with pytest.raises(ValueError, match=rf"row 1 \(ts 1700000600\): {what}"):
+        load_bars(path)
+
+
 def _hourly(t0: int, t1: int) -> pd.DataFrame:
     ts = np.arange(t0, t1, 3600, dtype="int64")
     n = len(ts)

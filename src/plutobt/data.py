@@ -33,6 +33,69 @@ def _whole(value) -> bool:
     return math.isfinite(value) and float(value).is_integer()
 
 
+# Unix seconds stay below 1e11 until the year 5138; a larger ts is another unit.
+_SECONDS_MAX = 1e11
+_TS_UNITS = ((1e14, "milliseconds", "1,000"), (1e17, "microseconds", "1,000,000"),
+             (2.0 ** 63, "nanoseconds", "1,000,000,000"))
+
+
+def ts_unit_problem(value) -> str | None:
+    """Why ``value`` (a whole number) is not a ts in unix seconds, or None if it can be:
+    a ts of 1e11 or more is in another unit, named with the division that converts it
+    (1772461800000 is milliseconds), and one past what int64 holds is out of range."""
+    if -_SECONDS_MAX < value < _SECONDS_MAX:
+        return None
+    if value > 0:
+        for limit, unit, factor in _TS_UNITS:
+            if value < limit:
+                return (f"ts {value!r} looks like {unit}, not unix seconds (seconds stay "
+                        f"below 1e11 until the year 5138): divide the ts by {factor}")
+    return (f"ts {value!r} is out of range for unix seconds (a whole number below 1e11 "
+            "in absolute value)")
+
+
+def _num(value) -> str:
+    """A price for a message: 100.0, 18000.25."""
+    return repr(float(value))
+
+
+def ohlcv_problem(df: pd.DataFrame) -> str | None:
+    """The first problem with a frame's base bar values, naming row and column; None if
+    there is none. open, high, low and close must be present; they and volume (when
+    present) must be numeric columns holding finite numbers (a NaN compares false
+    against every stop and limit, so a NaN low silently disables a stop); every bar
+    must hold its body: low <= min(open, close) and high >= max(open, close)."""
+    ts = df["ts"].tolist() if "ts" in df.columns else None
+
+    def where(i: int) -> str:
+        return f"row {i}" if ts is None else f"row {i} (ts {ts[i]})"
+
+    for col in _PRICE_COLS:
+        if col not in df.columns:
+            return f"the frame has no {col!r} column"
+    for col in (*_PRICE_COLS, "volume"):
+        if col not in df.columns:
+            continue
+        s = df[col]
+        if pd.api.types.is_bool_dtype(s.dtype) or not pd.api.types.is_numeric_dtype(s.dtype):
+            sample = s.iloc[0] if len(s) else None
+            return (f"column {col!r} holds {s.dtype} values (e.g. {sample!r}), not numbers; "
+                    "convert it with pd.to_numeric first")
+        v = s.to_numpy(dtype="float64", na_value=np.nan)
+        bad = np.flatnonzero(~np.isfinite(v))
+        if bad.size:
+            i = int(bad[0])
+            return (f"column {col!r} at {where(i)} holds {s.iloc[i]!r}, not a finite "
+                    "number")
+    o, h, lo, c = (df[col].to_numpy(dtype="float64") for col in _PRICE_COLS)
+    top, bottom = np.maximum(o, c), np.minimum(o, c)
+    for i in np.flatnonzero((h < top) | (lo > bottom)).tolist()[:1]:
+        if h[i] < top[i]:
+            return f"{where(i)}: high {_num(h[i])} is below max(open, close) {_num(top[i])}"
+        return f"{where(i)}: low {_num(lo[i])} is above min(open, close) {_num(bottom[i])}"
+    return None
+
+
 def load_bars(path: str) -> pd.DataFrame:
     """Load JSON [ts, o, h, l, c, v] arrays into a canonical DataFrame.
 
@@ -41,7 +104,12 @@ def load_bars(path: str) -> pd.DataFrame:
     ts and volume must be whole numbers (a float like 1700000000.0 is fine): a null,
     NaN, fractional, boolean or text value is refused with a ValueError naming the row,
     since casting it to int64 would invent a value (null became INT64_MIN, 0.9 of a
-    second was dropped). Prices may be null; validate_bars reports them.
+    second was dropped). ts must be unix seconds: one of 1e11 or more is refused,
+    naming the unit it looks like (milliseconds, microseconds, nanoseconds) and the
+    division that converts it, and one past int64 as out of range. Prices must be
+    finite numbers (a null, NaN, inf, boolean or text price is refused, naming the
+    row), and every bar must hold its body (low <= min(open, close), high >=
+    max(open, close)), so a file that loads is one Engine.run can fill against.
     """
     with open(path, encoding="utf-8") as fh:
         rows = json.load(fh)
@@ -60,6 +128,15 @@ def load_bars(path: str) -> pd.DataFrame:
         if not _whole(row[0]):
             raise ValueError(f"row {i}: ts must be a whole number of unix seconds, "
                              f"got {row[0]!r}")
+        unit = ts_unit_problem(row[0])
+        if unit is not None:
+            raise ValueError(f"row {i}: {unit}")
+        for col, value in zip(_PRICE_COLS, row[1:5], strict=True):
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                raise ValueError(f"row {i}: {col} must be a number, got {value!r} "
+                                 f"({type(value).__name__})")
+            if not math.isfinite(value):
+                raise ValueError(f"row {i}: {col} must be a finite number, got {value!r}")
         if not _whole(row[5]):
             raise ValueError(f"row {i}: volume must be a whole number, got {row[5]!r}")
     arr = np.asarray(rows, dtype="float64")
@@ -74,6 +151,9 @@ def load_bars(path: str) -> pd.DataFrame:
         },
         columns=_COLUMNS,
     )
+    problem = ohlcv_problem(df)
+    if problem is not None:
+        raise ValueError(f"{path!r}: {problem}")
     return df.reset_index(drop=True)
 
 
