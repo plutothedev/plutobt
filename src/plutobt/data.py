@@ -7,6 +7,8 @@ Data is unix-seconds; bar ts marks the bar OPEN (verified empirically, §5.5).
 from __future__ import annotations
 
 import json
+import math
+import numbers
 from dataclasses import dataclass, field
 from datetime import time
 from zoneinfo import ZoneInfo
@@ -19,12 +21,27 @@ from plutobt.instruments import Instrument
 CT = ZoneInfo("America/Chicago")
 _COLUMNS = ["ts", "open", "high", "low", "close", "volume"]
 
+# A CME Globex trading day opens at 17:00 CT the evening before its date and ends at the
+# 16:00 CT close: daily bars bucket by it, never by the UTC (or CT) calendar day.
+_TRADING_DAY_OPEN_CT_HOURS = 17
+
+
+def _whole(value) -> bool:
+    """True for a finite whole number (1700000000 or 1700000000.0); not bool or None."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return False
+    return math.isfinite(value) and float(value).is_integer()
+
 
 def load_bars(path: str) -> pd.DataFrame:
     """Load JSON [ts, o, h, l, c, v] arrays into a canonical DataFrame.
 
     Columns: ts(int64), open/high/low/close(float64), volume(int64).
     ts is kept as a column (default RangeIndex), per the DATA API contract.
+    ts and volume must be whole numbers (a float like 1700000000.0 is fine): a null,
+    NaN, fractional, boolean or text value is refused with a ValueError naming the row,
+    since casting it to int64 would invent a value (null became INT64_MIN, 0.9 of a
+    second was dropped). Prices may be null; validate_bars reports them.
     """
     with open(path, encoding="utf-8") as fh:
         rows = json.load(fh)
@@ -40,6 +57,11 @@ def load_bars(path: str) -> pd.DataFrame:
             raise ValueError(
                 f"row {i}: expected 6 fields [ts,o,h,l,c,v], got {got}"
             )
+        if not _whole(row[0]):
+            raise ValueError(f"row {i}: ts must be a whole number of unix seconds, "
+                             f"got {row[0]!r}")
+        if not _whole(row[5]):
+            raise ValueError(f"row {i}: volume must be a whole number, got {row[5]!r}")
     arr = np.asarray(rows, dtype="float64")
     df = pd.DataFrame(
         {
@@ -235,10 +257,24 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     consistent with §5.5. Empty buckets (gaps) are dropped. ts returns to a
     plain int64 column with a RangeIndex.
 
+    A rule of a day or longer ("1D", "W", ...) buckets by CME trading day in
+    America/Chicago, not by the UTC calendar: the trading day ends at the 16:00 CT
+    close, a bar opening at 17:00 CT or later belongs to the next one, and the daily
+    bar's ts is its 17:00 CT open (so Sunday evening opens Monday's bar). Intraday
+    rules bucket on the UTC clock as before.
+
     Note: a 'session' label (if present) is NOT preserved; call tag_sessions
     on the result if session labels are needed at the coarser cadence.
     """
+    offset = pd.tseries.frequencies.to_offset(rule)
+    daily = (not isinstance(offset, pd.offsets.Tick)
+             or pd.Timedelta(offset) >= pd.Timedelta(days=1))
     dt = pd.to_datetime(df["ts"], unit="s", utc=True)
+    if daily:
+        # The trading date, as a naive midnight: the CT wall clock moved on by the hours
+        # from the 17:00 open to midnight, so 17:00 CT lands on the next date.
+        shift = pd.Timedelta(hours=24 - _TRADING_DAY_OPEN_CT_HOURS)
+        dt = (dt.dt.tz_convert(CT).dt.tz_localize(None) + shift).dt.normalize()
     work = df.set_index(dt)
     agg = (
         work.resample(rule, label="left", closed="left")
@@ -253,6 +289,10 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     )
     out = agg.reset_index()
     # The datetime column is named "ts" (inherits from the Series used in set_index).
+    if daily:
+        # Back from the trading date to its open: 17:00 CT the evening before.
+        shift = pd.Timedelta(hours=24 - _TRADING_DAY_OPEN_CT_HOURS)
+        out["ts"] = (out["ts"] - shift).dt.tz_localize(CT).dt.tz_convert("UTC")
     out["ts"] = out["ts"].astype("int64") // 1_000_000_000
     out["volume"] = out["volume"].astype("int64")
     return out[_COLUMNS].reset_index(drop=True)

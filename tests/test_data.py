@@ -366,3 +366,94 @@ def test_data_pipeline_round_trip(tmp_path):
     # 81 five-min RTH bars -> 27 fifteen-min bars
     assert len(fifteen) == 27
     assert validate_bars(fifteen).ok is True
+
+
+# ---------------------------------------------------------------------------
+# Film-ready audit (2026-11-02): ts and volume are whole numbers or refused; daily
+# bars are CME trading days in America/Chicago.
+# ---------------------------------------------------------------------------
+
+_GOOD = [1700000300, 100.0, 101.0, 99.0, 100.0, 1]
+
+
+@pytest.mark.parametrize(("bad", "shown"), [
+    (None, "None"), (1700000000.9, "1700000000.9"), (float("nan"), "nan"),
+    (True, "True"), ("1700000000", "'1700000000'"),
+], ids=["null", "fractional", "nan", "bool", "string"])
+def test_load_bars_refuses_a_ts_that_is_not_whole_unix_seconds(tmp_path, bad, shown):
+    # Unchecked, null loaded as INT64_MIN and 1700000000.9 as 1700000000 (probe p07).
+    path = _write_json(tmp_path, [[bad, 100.0, 101.0, 99.0, 100.0, 1], _GOOD])
+    with pytest.raises(ValueError, match=rf"row 0: ts must be a whole number of unix "
+                                         rf"seconds, got {shown}"):
+        load_bars(path)
+
+
+@pytest.mark.parametrize("bad", [None, 2.5], ids=["null", "fractional"])
+def test_load_bars_refuses_a_volume_that_is_not_a_whole_number(tmp_path, bad):
+    # The same int64 cast turned a null volume into INT64_MIN.
+    path = _write_json(tmp_path, [_GOOD, [1700000600, 100.0, 101.0, 99.0, 100.0, bad]])
+    with pytest.raises(ValueError, match="row 1: volume must be a whole number"):
+        load_bars(path)
+
+
+def test_load_bars_accepts_whole_numbers_written_as_floats(tmp_path):
+    # Control: 1700000000.0 is a whole second; it loads exactly.
+    path = _write_json(tmp_path, [[1700000000.0, 100.0, 101.0, 99.0, 100.0, 3.0], _GOOD])
+    df = load_bars(path)
+    assert df["ts"].tolist() == [1700000000, 1700000300]
+    assert df["volume"].tolist() == [3, 1]
+
+
+def _hourly(t0: int, t1: int) -> pd.DataFrame:
+    ts = np.arange(t0, t1, 3600, dtype="int64")
+    n = len(ts)
+    return pd.DataFrame({"ts": ts, "open": np.arange(n, dtype="float64"),
+                         "high": np.arange(n, dtype="float64") + 1.0,
+                         "low": np.arange(n, dtype="float64") - 1.0,
+                         "close": np.arange(n, dtype="float64") + 0.5,
+                         "volume": np.ones(n, dtype="int64")})
+
+
+@pytest.mark.parametrize("day", [(2025, 1, 14), (2025, 7, 15)], ids=["CST", "CDT"])
+def test_resample_daily_keeps_one_cme_trading_day_in_one_bar(day):
+    # 17:00 CT the day before -> 16:00 CT: one trading day. Bucketed in UTC it split at
+    # UTC midnight, 18:00 or 19:00 CT (probe p08).
+    y, m, d = day
+    df = _hourly(_ct_ts(y, m, d - 1, 17, 0), _ct_ts(y, m, d, 16, 0))
+    out = resample(df, "1D")
+    assert len(out) == 1
+    r = out.iloc[0]
+    assert r["ts"] == _ct_ts(y, m, d - 1, 17, 0)   # the trading day's open, CT
+    assert (r["open"], r["high"], r["low"], r["close"], r["volume"]) == (
+        0.0, 23.0, -1.0, 22.5, 23)
+
+
+def test_resample_daily_splits_at_17_00_ct():
+    # A bar opening 16:00 CT belongs to the day ending that afternoon; 17:00 CT opens the
+    # next one. Three bars, two trading days.
+    rows = [[_ct_ts(2025, 6, 3, 15, 0), 1.0, 2.0, 0.5, 1.5, 1],
+            [_ct_ts(2025, 6, 3, 16, 0), 1.5, 2.5, 1.0, 2.0, 2],
+            [_ct_ts(2025, 6, 3, 17, 0), 2.0, 3.0, 1.5, 2.5, 4]]
+    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+    out = resample(df, "1D")
+    assert out["ts"].tolist() == [_ct_ts(2025, 6, 2, 17, 0), _ct_ts(2025, 6, 3, 17, 0)]
+    assert out["volume"].tolist() == [3, 4]
+
+
+def test_resample_daily_puts_the_sunday_open_in_mondays_bar():
+    # Thursday 17:00 -> Friday 16:00 is Friday's bar; Sunday 17:00 -> Monday 16:00 is
+    # Monday's, opening Sunday 17:00 CT. Nothing for the weekend.
+    friday = _hourly(_ct_ts(2025, 6, 5, 17, 0), _ct_ts(2025, 6, 6, 16, 0))
+    monday = _hourly(_ct_ts(2025, 6, 8, 17, 0), _ct_ts(2025, 6, 9, 16, 0))
+    out = resample(pd.concat([friday, monday], ignore_index=True), "1D")
+    assert out["ts"].tolist() == [_ct_ts(2025, 6, 5, 17, 0), _ct_ts(2025, 6, 8, 17, 0)]
+    assert out["volume"].tolist() == [23, 23]
+
+
+def test_resample_intraday_still_buckets_on_the_utc_clock():
+    # Unchanged: an hourly resample of 5-minute bars labels each bucket at the top of the
+    # hour, crossing 17:00 CT with no trading-day handling.
+    df = _seq_df(list(range(_ct_ts(2025, 6, 3, 16, 30), _ct_ts(2025, 6, 3, 17, 30), 300)))
+    out = resample(df, "60min")
+    assert out["ts"].tolist() == [_ct_ts(2025, 6, 3, 16, 0), _ct_ts(2025, 6, 3, 17, 0)]
+    assert out["volume"].tolist() == [60, 60]
