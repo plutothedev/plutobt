@@ -83,18 +83,52 @@ def test_cl_call_restores_to_initial_3400_through_the_engine():
     assert first.amount != pytest.approx(400.0)     # restore to INITIAL, not maintenance
 
 
-def test_record_keeps_the_position_and_logs_every_bar_in_breach():
+def test_record_keeps_the_position_and_logs_one_event_per_breach():
     eng = Engine(CL_TEXTBOOK, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0,
                                              on_margin_call="record"))
     result = eng.run(_ohlc(_CL_ROWS), _buy_one_at_bar0())
-    # Bars 3, 4, 5 close below maintenance (equity 6,600, 6,000, 6,000).
-    assert [mc.ts for mc in result.margin_calls] == [900, 1200, 1500]
-    assert [mc.amount for mc in result.margin_calls] == pytest.approx([3_400.0, 4_000.0,
-                                                                       4_000.0])
+    # Bars 3, 4, 5 all close below maintenance (equity 6,600, 6,000, 6,000): one
+    # breach, so one call, when equity first drops under.
+    assert [mc.ts for mc in result.margin_calls] == [900]
+    assert [mc.amount for mc in result.margin_calls] == pytest.approx([3_400.0])
     # No deposit is invented and nothing is sold: the position rides to the end.
     assert len(result.trades) == 1 and result.trades[0].open_at_end
     assert not result.trades[0].margin_liquidation
     assert result.equity_curve.iloc[-1] == pytest.approx(100_000.0 - 94.0 * 1_000)
+
+
+def test_record_a_recovery_ends_the_breach_and_a_new_drop_is_a_new_call():
+    # 6,600 (call) -> 6,000 (same breach) -> 7,000 (back AT maintenance: over)
+    # -> 6,500 (a new breach, a new call of 3,500).
+    rows = [_flat(150.0), _flat(150.0), _flat(57.0), _flat(56.6), _flat(56.0),
+            _flat(57.0), _flat(56.5), _flat(56.5)]
+    eng = Engine(CL_TEXTBOOK, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0,
+                                             on_margin_call="record"))
+    result = eng.run(_ohlc(rows), _buy_one_at_bar0())
+    assert [(mc.ts, mc.amount) for mc in result.margin_calls] == [
+        (900, pytest.approx(3_400.0)), (1800, pytest.approx(3_500.0))]
+
+
+def test_record_a_changed_position_starts_a_new_breach():
+    # 2 lots from 100.00; at 53.00 equity is 100,000 - 94,000 = 6,000, under the 14,000
+    # maintenance for 2: call 20,000 - 6,000 = 14,000. Selling 1 at 53.00 leaves 1 lot,
+    # still under its 7,000 maintenance: a changed position, so a new call of 4,000.
+    rows = [_flat(100.0), _flat(100.0), _flat(53.0), _flat(53.0), _flat(53.0)]
+    eng = Engine(CL_TEXTBOOK, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0,
+                                             on_margin_call="record"))
+    result = eng.run(_ohlc(rows), _Script({0: lambda c: c.broker.buy(contracts=2),
+                                           2: lambda c: c.broker.sell(contracts=1)}))
+    assert [(mc.ts, mc.contracts, mc.amount) for mc in result.margin_calls] == [
+        (600, 2, pytest.approx(14_000.0)), (900, 1, pytest.approx(4_000.0))]
+
+
+def test_liquidate_queues_once_and_logs_one_event():
+    # The call bar queues one forced exit; nothing is logged or queued again before
+    # it fills, and after it the account is flat.
+    eng = Engine(CL_TEXTBOOK, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    result = eng.run(_ohlc(_CL_ROWS), _buy_one_at_bar0())
+    assert [mc.ts for mc in result.margin_calls] == [900]
+    assert [t.margin_liquidation for t in result.trades] == [True]
 
 
 def test_liquidate_is_the_default_and_exits_at_the_next_bars_open():

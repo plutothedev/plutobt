@@ -134,6 +134,9 @@ class Engine:
         Margin calls (§5.2): after bar t's mark, equity below the maintenance margin of
             the held contracts records a MarginCall in ``margin_calls`` (the call
             restores to INITIAL: amount = initial - equity; no deposit is invented).
+            One call per breach: it is logged when equity first drops under, and the
+            breach ends when equity is back at or above maintenance or the position
+            goes flat or changes (a changed position still under is a new call).
             ``on_margin_call="liquidate"`` (default) then queues a forced market exit
             of the whole position, replacing any order placed on bar t; it fills at
             bar t+1's open (no break cancels it) and its Trade has
@@ -168,6 +171,7 @@ class Engine:
         equity_vals: list[float] = []
         margin_calls: list[MarginCall] = []
         liquidate = self.config.on_margin_call == "liquidate"
+        breach_qty: int | None = None    # the position the open breach was called on
         state: dict = {}
 
         prev = None
@@ -224,7 +228,12 @@ class Engine:
 
             # §5.2: maintenance is the floor, checked on the book marked at close t.
             call = portfolio.margin_call(ts=int(bar.ts))
-            if call is not None:
+            if call is None:
+                breach_qty = None
+            elif breach_qty != portfolio.position.qty:
+                # A new breach (not the one already called on this same position): log
+                # it once, and queue the forced exit once.
+                breach_qty = portfolio.position.qty
                 margin_calls.append(call)
                 if liquidate:
                     broker.liquidate()
