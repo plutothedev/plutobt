@@ -88,6 +88,7 @@ def test_plot_trades_marks_each_side_and_each_exit_distinctly():
     from types import SimpleNamespace
 
     import pandas as pd
+    from matplotlib.colors import to_hex, to_rgb
 
     from plutobt.portfolio import Trade
 
@@ -108,9 +109,15 @@ def test_plot_trades_marks_each_side_and_each_exit_distinctly():
 
     long_entry, long_exit = drawn[(0.0, 10.0)], drawn[(1.0, 11.0)]
     short_entry, short_exit = drawn[(2.0, 12.0)], drawn[(3.0, 9.0)]
-    assert long_entry[0] == "^"
-    assert short_entry[0] == "v"                      # a short is a sell, not the buy marker
-    assert short_entry[1] != long_entry[1]            # and a distinct colour
-    assert long_exit[0] not in ("^", "v") and short_exit[0] not in ("^", "v")
-    assert long_exit != short_exit                    # exits tell the sides apart too
-    assert len({long_entry, long_exit, short_entry, short_exit}) == 4
+    # The exact legend the docstring promises (review, 2026-11-02: the test only checked
+    # that the sides differed, so swapped or arbitrary colours would have passed):
+    # colour = side (long green C2, short red C3), shape = what happened.
+    green, red = to_hex("C2"), to_hex("C3")
+    assert (green, red) == ("#2ca02c", "#d62728")     # matplotlib's default cycle
+    assert long_entry == ("^", green)                 # a long buys: up triangle, green
+    assert long_exit == ("x", green)
+    assert short_entry == ("v", red)                  # a short sells: down triangle, red
+    assert short_exit == ("x", red)
+    for hexcol, hue in ((green, 1), (red, 0)):        # green really is green, red red
+        rgb = to_rgb(hexcol)
+        assert rgb[hue] == max(rgb) and rgb[hue] > 2 * min(rgb)
