@@ -49,9 +49,10 @@ def test_partial_cover_takes_the_path_that_retests_the_tightened_stop():
 
 def test_equal_price_stop_and_limit_take_the_worse_tie_order():
     # Long 1 @18,000.25 (1 tick slippage) stop 17,900; buy limit 1 @17,900. The bar
-    # trades through 17,900 and closes there. Stop first: out at 17,899.75, then the
-    # limit buys 1 at 17,900 (97,990 at the close). Limit first: long 2, then the stop
-    # sells both at 17,899.75 (97,985). The engine books the worse, limit first.
+    # trades through 17,900 and closes there. Stop first: out at 17,899.75, and the
+    # scale-in, sized against a position that is gone, is cancelled (flat, 97,990 at
+    # the close). Limit first: long 2, then the stop sells both at 17,899.75 (97,985).
+    # The engine books the worse, limit first.
     broker, pf = make(slip=1.0)
     broker.buy(1, stop=17_900.0)
     broker.fill_pending(Bar(1, 18_000.0, 18_000.0, 18_000.0, 18_000.0))
