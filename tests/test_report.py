@@ -425,6 +425,7 @@ def _dd_result(values):
     ([100, 110, 90, 111], False),           # recovered on the last bar
     ([100, 110, 80, 111, 105], False),      # deepest recovered; a later shallow one did not
     ([100, 101, 102], False),               # no drawdown at all
+    ([100, 80, 100, 80], True),             # two equally deep; the later one is still open
 ])
 def test_an_unrecovered_drawdown_duration_says_so(values, flagged):
     text = format_report(_dd_result(values), symbol="NQ")
@@ -439,6 +440,25 @@ def test_max_drawdown_recovered_helper():
     assert max_drawdown_recovered(pd.Series([100.0, 110.0, 90.0, 110.0])) is True
     assert max_drawdown_recovered(pd.Series([100.0, 110.0, 80.0, 111.0, 105.0])) is True
     assert max_drawdown_recovered(pd.Series([], dtype=float)) is True
+
+
+def test_an_equally_deep_open_drawdown_is_the_one_reported():
+    # Ties used to pick the first (recovered) episode while an equally deep later one
+    # was open. Any deepest episode still open means "not recovered", and the duration
+    # is that open episode's, from its peak to the last bar (a lower bound).
+    from plutobt.metrics import max_drawdown, max_drawdown_recovered
+
+    eq = pd.Series([100.0, 80.0, 100.0, 80.0])
+    assert max_drawdown_recovered(eq) is False
+    assert max_drawdown(eq) == (pytest.approx(-0.2), 1)
+    # equal depth (30%) on a different peak: 3.5/5 - 1 rounds a hair deeper than
+    # 4.2/6 - 1, which must not make the open episode count as shallower
+    eq = pd.Series([5.0, 3.5, 5.0, 6.0, 4.2])
+    assert max_drawdown_recovered(eq) is False
+    assert max_drawdown(eq)[1] == 1
+    # control: the deeper episode recovered, the open one is shallower
+    assert max_drawdown_recovered(pd.Series([100.0, 80.0, 100.0, 85.0])) is True
+    assert max_drawdown(pd.Series([100.0, 80.0, 100.0, 85.0])) == (pytest.approx(-0.2), 2)
 
 
 def test_psr_label_does_not_claim_a_probability_of_the_true_sharpe():

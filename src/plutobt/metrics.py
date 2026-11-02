@@ -169,8 +169,9 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
 
     Depth = min over t of equity_t / running_peak_t - 1.
     Duration = duration of the deepest drawdown episode (peak-to-recovery);
-    if it never recovers, runs to the last bar. Positional (integer)
-    bar distance is used, independent of the index dtype.
+    if it never recovers, runs to the last bar. Of equally deep episodes the first
+    is measured, unless one is still open at the last bar: then that one. Positional
+    (integer) bar distance is used, independent of the index dtype.
     """
     depth, duration, _ = _deepest_drawdown(equity)
     return (depth, duration)
@@ -178,8 +179,9 @@ def max_drawdown(equity: pd.Series) -> tuple[float, int]:
 
 def max_drawdown_recovered(equity: pd.Series) -> bool:
     """Whether the deepest drawdown (the one ``max_drawdown`` measures) regained its
-    peak by the last bar. False means its duration runs to the last bar and is a lower
-    bound, not a finished episode. True with no drawdown at all."""
+    peak by the last bar. False when any episode of that depth is still open (even if
+    an earlier, equally deep one recovered): its duration then runs to the last bar and
+    is a lower bound, not a finished episode. True with no drawdown at all."""
     return _deepest_drawdown(equity)[2]
 
 
@@ -196,6 +198,13 @@ def _deepest_drawdown(equity: pd.Series) -> tuple[float, int, bool]:
     if depth == 0.0:
         return (0.0, 0, True)
     trough_pos = int(dd.argmin())
+    # Equally deep episodes (to rounding): an open one at the end wins the tie, so a
+    # drawdown that has not recovered is never reported as recovered.
+    if dd[-1] < 0.0:
+        open_from = int(np.flatnonzero(dd == 0.0)[-1]) + 1 if (dd == 0.0).any() else 0
+        tail = dd[open_from:]
+        if tail.min() <= depth + 1e-12 * abs(depth):
+            trough_pos = open_from + int(tail.argmin())
     # Peak position: last index at/before the trough where equity == running_max.
     peak_val = running_max[trough_pos]
     peak_pos = trough_pos
