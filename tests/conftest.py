@@ -22,3 +22,23 @@ class GoldenStrategy(Strategy):
             ctx.broker.buy(contracts=1, stop=ctx.bar.close - 20 * ctx.tick)
         elif (not ctx.bar.long) and ctx.position.qty != 0:
             ctx.broker.close()
+
+
+def pytest_addoption(parser):
+    parser.addoption("--slow", action="store_true", default=False,
+                     help="also run tests marked slow (the full look-ahead property sweep)")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: long-running; skipped unless --slow is given")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--slow"):
+        return
+    import pytest
+
+    skip = pytest.mark.skip(reason="slow: run with --slow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)

@@ -42,20 +42,32 @@ class Strategy:
       the first bar (``check_causality``).
     - ``on_bar(ctx)`` may use only what ``ctx`` holds: bar t's row (``ctx.bar``), the
       position, equity and the ``ctx.state`` it wrote on earlier bars.
-    - Neither keeps the frame: ``precompute`` is STATELESS, so it never stores ``df``
-      (or anything built from it) on ``self`` for ``on_bar`` to read later: it could
-      index past bar t. ``Engine.run`` refuses a strategy left holding a DataFrame,
-      Series or array as long as the bars (directly, or in a list, tuple or dict
-      attribute); a frame hidden deeper is still outside what any check can see.
+    - Neither keeps the frame: ``precompute`` never stores ``df`` (or anything built
+      from it) on ``self`` for ``on_bar`` to read later, since it holds the bars after t.
+
+    What the automatic check covers, and what it does not: it catches look-ahead in
+    ``precompute`` (a ``.shift(-1)``, a backfill, a centred window, a whole-sample
+    mean), which is the common honest mistake. It is not a sandbox: Python cannot stop
+    code written to cheat, so a strategy that hides the bars somewhere and reads ahead
+    from ``on_bar`` is not caught. Keeping ``on_bar`` to ``ctx`` is the author's side
+    of the contract.
     """
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Vectorized, CAUSAL, STATELESS indicator/signal computation.
+        """Vectorized, CAUSAL indicator/signal computation.
 
         Add columns to ``df`` and return it (see the class docstring for the rules).
-        The engine calls it more than once: on the full frame, then on prefixes
-        ``df[:t+1]`` for the causality check. Base implementation is identity
-        passthrough; subclasses override.
+        With ``check_causality`` on, the engine calls it more than once, each check
+        call on its own deepcopy of the strategy as it was passed to ``Engine.run``:
+        on the full frame (the frame that is traded), on each prefix ``df[:t+1]``, then
+        once more on the strategy itself, so ``on_bar`` sees the traded call's state.
+        So nothing one call saves on ``self`` reaches another: a mean fitted "once" on the
+        first frame seen is refitted on each prefix, and is caught if it used the whole
+        sample. State the strategy already holds when ``Engine.run`` is called is a
+        parameter (fit a model on training data before the run, never inside
+        ``precompute`` on the bars being tested). A function held on ``self`` is shared
+        by the copies, not copied, so state it captures is outside the snapshot. Base
+        implementation is identity passthrough; subclasses override.
         """
         return df
 

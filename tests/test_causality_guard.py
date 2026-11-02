@@ -161,9 +161,10 @@ def test_demo_runs_identically_with_the_check_on_and_off(sym):
         (t.entry_ts, t.exit_ts, t.pnl) for t in off.trades]
 
 
-def test_the_engine_trades_on_its_own_full_frame_precompute():
-    # The check calls precompute on prefixes too; the loop runs the frame the engine's
-    # own first call made, and the strategy's last call is the full frame again.
+def test_the_engine_trades_the_frame_it_checked():
+    # The traded frame comes from a copy of the strategy on the full frame; each prefix
+    # runs on its own copy; the strategy passed in runs the full frame last, so the
+    # state on_bar sees is the traded call's.
     seen = []
 
     def record(df):
@@ -171,7 +172,132 @@ def test_the_engine_trades_on_its_own_full_frame_precompute():
         return _honest(df)
 
     _eng().run(_bars(), Fn(record))
-    assert seen[0] == 60 and seen[-1] == 60
+    assert seen == [60, *range(1, 60), 60]
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02, second round): state saved by precompute cannot leak into the
+# check. Every call starts from a deepcopy of the strategy as it was passed in.
+# ---------------------------------------------------------------------------
+
+class FitOnce(Strategy):
+    """Fits a z-score's mean and std on the first frame it sees, then reuses them: the
+    engine's first call is the full frame, so the fit is the whole sample's."""
+
+    def __init__(self):
+        self.mu = self.sd = None
+
+    def precompute(self, df):
+        if self.mu is None:
+            self.mu, self.sd = df["close"].mean(), df["close"].std()
+        return df.assign(z=(df["close"] - self.mu) / self.sd)
+
+
+def test_a_fit_once_whole_sample_state_is_refused():
+    # Unchecked (probe p_state), every check reused the full-sample fit and ran clean.
+    with pytest.raises(LookaheadError, match="non-causal column 'z'"):
+        _eng().run(_bars(), FitOnce())
+
+
+def test_a_refused_strategy_is_left_as_passed_and_refused_again():
+    # Only copies ran, so the strategy keeps no whole-sample fit for a second run to
+    # reuse; the same object is refused again.
+    s = FitOnce()
+    for _ in range(2):
+        with pytest.raises(LookaheadError, match="non-causal column 'z'"):
+            _eng().run(_bars(), s)
+        assert s.mu is None
+
+
+def test_a_leak_only_in_the_first_call_is_refused():
+    # Probe p_state's Counting: it leaked on the engine's first (traded) call only.
+    class FirstCall(Strategy):
+        def __init__(self):
+            self.k = 0
+
+        def precompute(self, df):
+            self.k += 1
+            x = df["close"].shift(-1).ffill() if self.k == 1 else df["close"]
+            return df.assign(x=x)
+
+    with pytest.raises(LookaheadError, match="non-causal column 'x'"):
+        _eng().run(_bars(), FirstCall())
+
+
+def test_a_leak_in_the_traded_call_through_class_state_is_refused():
+    # Class attributes are shared by the copies, so this leaks on the first call ever
+    # and never again; the check compares the prefixes with the frame that is traded.
+    class Shared(Strategy):
+        calls = 0
+
+        def precompute(self, df):
+            type(self).calls += 1
+            x = df["close"].shift(-1).ffill() if type(self).calls == 1 else df["close"]
+            return df.assign(x=x)
+
+    with pytest.raises(LookaheadError, match="non-causal column 'x'"):
+        _eng().run(_bars(), Shared())
+
+
+def test_a_seeded_rng_made_in_init_runs():
+    # Probe p_state: each call drew fresh numbers from one RNG and was refused. Every
+    # copy now starts from the same RNG state, as the traded call did.
+    class Coin(Fn):
+        def __init__(self):
+            super().__init__(None)
+            self.rng = np.random.default_rng(7)
+
+        def precompute(self, df):
+            return df.assign(go=self.rng.random(len(df)) < 0.3)
+
+    on = _eng().run(_bars(), Coin())
+    off = _eng(check_causality=False).run(_bars(), Coin())
+    assert list(on.equity_curve) == list(off.equity_curve) and on.trades
+
+
+def test_on_bar_runs_on_the_strategy_passed_in_with_the_traded_calls_state():
+    class Remembers(Strategy):
+        def __init__(self):
+            self.fitted_on, self.seen = None, []
+
+        def precompute(self, df):
+            self.fitted_on = len(df)
+            return df
+
+        def on_bar(self, ctx):
+            self.seen.append(self.fitted_on)
+
+    s = Remembers()
+    _eng().run(_bars(), s)
+    assert s.seen == [60] * 60 and s.fitted_on == 60
+
+
+def test_a_precompute_that_differs_on_the_strategy_passed_in_is_refused():
+    # The traded frame came from a copy; on_bar runs on the strategy passed in, so its
+    # own full-frame call must give the same frame, or on_bar's state is not the
+    # traded one.
+    class Drifts(Strategy):
+        calls = 0
+
+        def precompute(self, df):
+            type(self).calls += 1
+            return df.assign(x=float(type(self).calls > 60))   # call 61 = the last one
+
+    with pytest.raises(LookaheadError, match="column 'x'.*same starting state"):
+        _eng().run(_bars(), Drifts())
+
+
+def test_a_strategy_that_cannot_be_copied_is_refused_with_the_switch_named():
+    import threading
+
+    class Locked(Fn):
+        def __init__(self):
+            super().__init__(_honest)
+            self.lock = threading.Lock()
+
+    with pytest.raises(TypeError, match="deepcopy.*check_causality = false"):
+        _eng().run(_bars(), Locked())
+    assert len(_eng(check_causality=False).run(_bars(), Locked()).equity_curve) == 60
 
 
 def test_engine_refuses_a_backfilled_first_return():
@@ -219,34 +345,41 @@ def test_an_object_column_that_cannot_be_compared_is_a_frame_error():
 
 
 # ---------------------------------------------------------------------------
-# Review fix (2026-11-02): a strategy may not keep the bar frame for on_bar.
+# Review decision (2026-11-02, second round): the kept-frame refusal is removed. It was
+# bypassable nine ways (a list, a deque, a dict keyed by ts, a closure, a transposed
+# array...) and refused honest strategies, so the boundary is stated instead: the check
+# covers precompute, on_bar must decide from ctx, and cheating code is not sandboxed.
 # ---------------------------------------------------------------------------
 
 class Keeps(Strategy):
-    """Stores ``keep(df)`` on self as ``name``, then reads ahead from it in on_bar."""
-
-    def __init__(self, name, keep):
-        self.name, self.keep = name, keep
+    """Stores the bar frame on self in precompute, as the refused check looked for."""
 
     def precompute(self, df):
-        setattr(self, self.name, self.keep(df))
+        self.df = df.reset_index(drop=True)
         return df
 
 
-@pytest.mark.parametrize(("name", "keep", "kind"), [
-    ("df", lambda d: d.reset_index(drop=True), "DataFrame"),
-    ("closes", lambda d: d["close"], "Series"),
-    ("raw", lambda d: d["close"].to_numpy(), "ndarray"),
-    ("cache", lambda d: [d], "DataFrame"),
-    ("memo", lambda d: {"frame": d}, "DataFrame"),
-], ids=["frame", "series", "ndarray", "in-list", "in-dict"])
-def test_a_strategy_that_keeps_the_bar_frame_is_refused(name, keep, kind):
-    # Probe p03's Hoard: on_bar indexed self.df[k + 2] and made money from the future,
-    # past every check. A kept frame as long as the bars is now refused up front.
-    with pytest.raises(FrameError, match=f"attribute {name!r} holds a {kind} of 60 rows"):
-        _eng().run(_bars(), Keeps(name, keep))
-    with pytest.raises(FrameError, match="on_bar must decide from ctx"):
-        _eng(check_causality=False).run(_bars(), Keeps(name, keep))
+def test_holding_the_bar_frame_is_not_refused_the_check_is_not_a_sandbox():
+    # The documented boundary: storing the frame is against the contract, but no
+    # Python check can stop code written to read ahead from on_bar.
+    assert len(_eng().run(_bars(), Keeps()).equity_curve) == 60
+    assert "not a sandbox" in Strategy.__doc__
+
+
+def test_former_false_positives_of_the_kept_frame_check_run():
+    # A lookup table as long as the bars, and an equity curve kept for plotting then
+    # re-run (probe p_hoard), were refused by the removed check.
+    class Table(Fn):
+        def __init__(self, n):
+            super().__init__(_honest)
+            self.weights = np.linspace(0.0, 1.0, n)
+
+    assert len(_eng().run(_bars(), Table(60)).equity_curve) == 60
+    s = EMACross()
+    df = load_bars(str(ROOT / "data" / "sample" / "nq_5m.json"))
+    first = _eng().run(df, s)
+    s.curve = first.equity_curve
+    assert list(_eng().run(df, s).equity_curve) == list(first.equity_curve)
 
 
 def test_honest_strategies_with_attributes_still_run():
@@ -301,3 +434,34 @@ def test_auto_does_not_warn_on_a_short_frame():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _eng().run(_bars(), Fn(_honest))
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02, second round): the sampled-grid warning points at the user's
+# own call and says how many prefixes were checked and how to check them all.
+# ---------------------------------------------------------------------------
+
+def test_the_sampled_warning_points_at_the_engine_run_call():
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _eng().run(_bars(3000), Fn(_honest))
+    (w,) = (w for w in caught if "causality check sampled" in str(w.message))
+    assert pathlib.Path(w.filename).resolve() == pathlib.Path(__file__).resolve()
+    text = str(w.message)
+    assert "checked 286 of the 2999 prefixes of 3000 bars" in text
+    assert "causality_sample = None" in text and "every prefix" in text
+
+
+def test_the_sampled_warning_points_at_a_direct_assert_causal_call():
+    import warnings
+
+    from plutobt.lookahead import assert_causal
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert_causal(_honest, _bars(2500), sample="auto")
+    (w,) = caught
+    assert pathlib.Path(w.filename).resolve() == pathlib.Path(__file__).resolve()
+    assert "sample=None" in str(w.message)

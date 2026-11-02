@@ -30,7 +30,10 @@ class BacktestConfig:
     on_margin_call: str = "liquidate"
     # Look-ahead guard: before the bar loop, Engine.run checks the strategy's precompute
     # with lookahead.assert_causal (each bar's values must not change when the later bars
-    # are removed) and refuses a leak with a LookaheadError naming the column.
+    # are removed) and refuses a leak with a LookaheadError naming the column. Every
+    # precompute call runs on its own copy.deepcopy of the strategy as passed in; a
+    # strategy that cannot be copied (it holds a lock, socket or open file) is refused
+    # with a TypeError, and false skips the guard (and the copies).
     check_causality: bool = True
     # The truncation grid. "auto" (default): every prefix up to 2,000 bars (about 0.3 s on
     # each 324-bar demo sample); above that 250 evenly spaced prefixes plus the first 20
