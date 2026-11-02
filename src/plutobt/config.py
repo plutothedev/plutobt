@@ -32,11 +32,12 @@ class BacktestConfig:
     # with lookahead.assert_causal (each bar's values must not change when the later bars
     # are removed) and refuses a leak with a LookaheadError naming the column.
     check_causality: bool = True
-    # The truncation grid: None (default) checks at every bar, exhaustive (about 0.3 s on
-    # each 324-bar demo sample; the cost grows with the square of the bar count, so a long
-    # history may want a sample). An int k checks k evenly spaced bars only and CAN MISS a
-    # leak that touches a few rows between them.
-    causality_sample: int | None = None
+    # The truncation grid. "auto" (default): every prefix up to 2,000 bars (about 0.3 s on
+    # each 324-bar demo sample); above that 250 evenly spaced prefixes plus the first 20
+    # and last 20, with a warning that the check was sampled. None forces every prefix
+    # (exhaustive; the cost grows with the square of the bar count). An int k checks k
+    # evenly spaced prefixes. A sampled grid CAN MISS a leak on a few rows between them.
+    causality_sample: int | str | None = "auto"
     # Engine.run refuses a frame with any open/high/low/close <= 0 (the guard is
     # data.assert_positive_prices): it is usually a back-adjusted continuous series pushed
     # through zero, where percentage and log returns break. True runs it anyway, for an

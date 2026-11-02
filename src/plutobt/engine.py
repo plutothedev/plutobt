@@ -200,7 +200,8 @@ class Engine:
             (ts, open, high, low, close, volume, session) the caller's frame holds,
             since the fills read those columns.
         Look-ahead guard (``check_causality``, on by default): the precompute is run
-            on every prefix ``df[:t+1]`` (or ``causality_sample`` evenly spaced ones)
+            on every prefix ``df[:t+1]`` (``causality_sample="auto"`` samples
+            above 2,000 bars, with a warning; see BacktestConfig)
             and each bar's values must match the full run's; a leak (a ``.shift(-1)``,
             a whole-sample mean) raises LookaheadError naming the column, before any
             bar runs. ``on_bar`` sees only bar t's row; a strategy left holding
@@ -442,10 +443,10 @@ class Engine:
                 # periods_per_year derived from the data (TOML can hold nan and inf).
                 raise ValueError(f"{name} must be a finite number or None, got {value!r}")
         sample = cfg.causality_sample
-        if sample is not None and (isinstance(sample, bool) or not isinstance(sample, int)
-                                   or sample < 1):
-            raise ValueError("causality_sample must be None (check every bar) or a whole "
-                             f"number of bars >= 1, got {sample!r}")
+        if sample is not None and sample != "auto" and (
+                isinstance(sample, bool) or not isinstance(sample, int) or sample < 1):
+            raise ValueError("causality_sample must be 'auto', None (check every bar) or "
+                             f"a whole number of bars >= 1, got {sample!r}")
 
     def _build_manifest(self, df: pd.DataFrame) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the

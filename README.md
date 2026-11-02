@@ -13,6 +13,8 @@ and auditability. Key properties:
   `Engine.run` re-runs the strategy's `precompute` on every prefix of the data and
   refuses any column whose value at bar t changes when the later bars are removed
   (`check_causality`, on by default), or a precompute that rewrites the price bars.
+  Above 2,000 bars the default (`causality_sample = "auto"`) checks 250 evenly spaced
+  prefixes plus the first and last 20, and warns that it sampled; `None` checks all.
 - **Realistic fills**: directional slippage, gap-through stops, GTC protective
   stops, limit order fill-or-carry.
 - **Performance-bond accounting**: MTM equity, initial/maintenance margin, open-at-end

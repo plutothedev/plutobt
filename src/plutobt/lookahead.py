@@ -9,6 +9,7 @@ strategy by default (``check_causality``).
 """
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 
 import numpy as np
@@ -31,6 +32,13 @@ class LookaheadError(FrameError, AssertionError):
 # by far more (one part per million is caught 1000 times over).
 RTOL = 1e-9
 ATOL = 1e-10
+
+# sample="auto": every prefix up to AUTO_FULL_MAX bars; above, AUTO_SPACED evenly
+# spaced prefixes plus the first and last AUTO_EDGE (leaks cluster at the edges: a
+# backfilled first bar, a whole-sample statistic that only moves near the end).
+AUTO_FULL_MAX = 2000
+AUTO_SPACED = 250
+AUTO_EDGE = 20
 
 _ROW_RULE = ("precompute must return one row per input bar, in order (no dropped, "
              "added or reordered rows); mark warm-up bars with NaN instead of dropping them")
@@ -90,10 +98,25 @@ def _first_mismatch(a: pd.Series, b: pd.Series) -> int | None:
     return _mismatch_at(_values(a), _values(b), a.name)
 
 
+def _grid(n: int, sample: int | str | None) -> np.ndarray | range:
+    """The truncation points t (prefix df[:t+1]) for ``n`` bars, from 0 to n-2."""
+    if sample == "auto":
+        if n <= AUTO_FULL_MAX:
+            return range(0, n - 1)
+        spaced = np.linspace(0, n - 2, num=AUTO_SPACED, dtype="int64")
+        edges = np.r_[np.arange(min(AUTO_EDGE, n - 1)),
+                      np.arange(max(0, n - 1 - AUTO_EDGE), n - 1)]
+        return np.unique(np.r_[spaced, edges])
+    if sample is None or sample >= n - 1:
+        return range(0, n - 1)
+    # Evenly spaced truncation points across [0, n-2]: prefixes df[:1] .. df[:n-1].
+    return np.unique(np.linspace(0, n - 2, num=sample, dtype="int64"))
+
+
 def assert_causal(
     precompute_fn: Callable[[pd.DataFrame], pd.DataFrame],
     df: pd.DataFrame,
-    sample: int | None = None,
+    sample: int | str | None = None,
 ) -> None:
     """Raise LookaheadError if ``precompute_fn`` reads bars after the one it fills.
 
@@ -109,8 +132,11 @@ def assert_causal(
 
     ``sample=None`` (or >= n-1) truncates at every bar: exhaustive, at a cost that grows
     with the square of the bar count. ``sample=k`` truncates at k evenly spaced bars
-    from t=0 to t=n-2 only, and CAN MISS a sparse leak: one that touches a few rows (say, the
-    last bar of each session) between two truncation points is never seen.
+    from t=0 to t=n-2 only. ``sample="auto"`` (Engine.run's default) is the full grid
+    up to 2,000 bars and, above that, 250 evenly spaced prefixes plus the first 20 and
+    last 20, with a UserWarning that the check was sampled. A sampled grid CAN MISS a
+    sparse leak: one that touches a few rows (say, the last bar of each session)
+    between two truncation points is never seen.
 
     A precompute that drops, adds or reorders rows is refused with a FrameError (a
     ValueError) before any compare, since its rows no longer line up with the bars.
@@ -121,11 +147,11 @@ def assert_causal(
     if n < 2:
         return None
 
-    if sample is None or sample >= n - 1:
-        grid = range(0, n - 1)
-    else:
-        # Evenly spaced truncation points across [0, n-2]: prefixes df[:1] .. df[:n-1].
-        grid = np.unique(np.linspace(0, n - 2, num=sample, dtype="int64"))
+    grid = _grid(n, sample)
+    if sample == "auto" and len(grid) < n - 1:   # an explicit k was asked for
+        warnings.warn(f"causality check sampled: {len(grid)} of {n - 1} prefixes on {n} "
+                      "bars (set causality_sample = None to check every prefix)",
+                      UserWarning, stacklevel=2)
 
     expected = {col: _values(full[col]) for col in full.columns}
     for t in grid:

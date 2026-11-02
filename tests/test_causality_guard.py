@@ -87,9 +87,9 @@ def test_check_causality_false_skips_the_check():
 
 
 def test_causality_sample_picks_the_grid():
-    # The default is the full grid, which catches a leak on one bar; a sampled grid can
-    # miss it (documented on assert_causal).
-    assert BacktestConfig().causality_sample is None
+    # The default ("auto") is the full grid on a frame this short, which catches a leak
+    # on one bar; a sampled grid can miss it (documented on assert_causal).
+    assert BacktestConfig().causality_sample == "auto"
     with pytest.raises(LookaheadError, match="non-causal column 'go'"):
         _eng().run(_bars(), Fn(_sparse_peek))
     assert len(_eng(causality_sample=5).run(_bars(), Fn(_sparse_peek)).equity_curve) == 60
@@ -262,3 +262,42 @@ def test_honest_strategies_with_attributes_still_run():
     assert len(_eng().run(_bars(), Params()).equity_curve) == 60
     df = load_bars(str(ROOT / "data" / "sample" / "nq_5m.json"))
     assert len(_eng().run(df, EMACross()).equity_curve) == len(df)
+
+
+# ---------------------------------------------------------------------------
+# Review decision (2026-11-02): causality_sample = "auto" scales to long histories.
+# ---------------------------------------------------------------------------
+
+def test_auto_is_the_full_grid_up_to_2000_bars():
+    from plutobt.lookahead import _grid
+
+    assert list(_grid(2000, "auto")) == list(range(1999))
+    assert list(_grid(2000, None)) == list(range(1999))
+
+
+def test_auto_samples_a_longer_frame_keeping_both_ends():
+    from plutobt.lookahead import _grid
+
+    grid = list(_grid(8000, "auto"))
+    assert grid[:20] == list(range(20)) and grid[-20:] == list(range(7979, 7999))
+    assert grid == sorted(set(grid)) and 250 <= len(grid) <= 290
+    assert list(_grid(8000, None)) == list(range(7999))   # explicit None: every prefix
+
+
+def test_auto_warns_when_it_samples_and_still_catches_an_edge_leak():
+    n = 2500
+    with pytest.warns(UserWarning, match="causality check sampled"):
+        result = _eng().run(_bars(n), Fn(_honest))
+    assert len(result.equity_curve) == n
+    leak = Fn(lambda d: _honest(d).assign(r=d["close"].diff().bfill()))
+    with pytest.raises(LookaheadError, match="non-causal column 'r' at t=0"), pytest.warns(
+            UserWarning, match="causality check sampled"):
+        _eng().run(_bars(n), leak)
+
+
+def test_auto_does_not_warn_on_a_short_frame():
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _eng().run(_bars(), Fn(_honest))
