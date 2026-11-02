@@ -2,9 +2,11 @@
 
 Inside a bar the engine does not know whether the high or the low came first, nor, at an
 equal price, whether the stop or the limit traded first. It evaluates every ordering the
-bar allows (open -> low -> high, open -> high -> low, and both tie orders) and commits the
-one that leaves the LOWEST account equity marked at the bar's close: the worst-case mode
-of Löw, Maier-Paape and Platen (2015).
+bar allows (open -> low -> high, open -> high -> low, both tie orders at an equal price,
+and both orders at the open when a gap-through stop and a market or marketable order act
+there together) and commits the one that leaves the LOWEST account equity marked at that
+bar's close: the worst-case mode of Löw, Maier-Paape and Platen (2015). The choice is made
+per bar, among those orderings only; it is not a worst case over the whole run.
 """
 import random
 from collections import namedtuple
@@ -92,21 +94,106 @@ def test_a_limit_filled_only_on_the_rejected_path_stays_pending():
     assert pf.cash == pytest.approx(98_000.0)
 
 
+def gapped_long():
+    """Long 1 @18,000.25 (NQ, 1 tick slippage, no fees) with its stop at 17,900."""
+    broker, pf = make(slip=1.0)
+    broker.buy(1, stop=17_900.0)
+    broker.fill_pending(Bar(1, 18_000.0, 18_000.0, 18_000.0, 18_000.0))
+    assert pf.position.avg_price == 18_000.25
+    return broker, pf
+
+
+GAP_BAR = Bar(2, 17_850.0, 17_870.0, 17_650.0, 17_860.0)
+
+
+def test_a_gap_through_stop_and_a_marketable_scale_in_take_the_worse_open_order():
+    # The reviewer's repro. Long 1 stop 17,900; a buy limit 17,950 (marketable at the
+    # 17,850 open) with an attached stop 17,700. Both act at the open and the bar does
+    # not say which traded first. Stop first: out at 17,849.75, the scale-in is
+    # cancelled (96,990). Limit first: buy 1 at 17,850.25, long 2 with the stop now
+    # 17,700, and the fall to 17,650 sells both at 17,699.75 (90,980). The engine books
+    # the worse.
+    broker, pf = gapped_long()
+    add = broker.buy(1, limit=17_950.0, stop=17_700.0)
+    fills = broker.fill_pending(GAP_BAR)
+    assert got(fills) == [("buy", 1, 17_850.25), ("sell", 2, 17_699.75)]
+    assert add.status == "filled"
+    assert pf.position.qty == 0
+    assert pf.equity(17_860.0) == pytest.approx(90_980.0)
+
+
+def test_a_gap_through_stop_and_a_market_scale_in_take_the_worse_open_order():
+    # Same book, a market buy 1 with no stop. Stop first: 96,990. Market first: buy 1 at
+    # 17,850.25, then the stop (still beyond the open) sells both at 17,849.75: 96,980.
+    broker, pf = gapped_long()
+    add = broker.buy(1)
+    fills = broker.fill_pending(GAP_BAR)
+    assert got(fills) == [("buy", 1, 17_850.25), ("sell", 2, 17_849.75)]
+    assert add.status == "filled"
+    assert pf.equity(17_860.0) == pytest.approx(96_980.0)
+
+
+def test_an_open_order_that_does_not_matter_keeps_the_stop_first():
+    # Same book, a market exit for the whole position. Either order sells 1 at
+    # 17,849.75, so the default (the stop first at the open) stands and the exit, sized
+    # against a position that is gone, is cancelled.
+    broker, pf = gapped_long()
+    out = broker.close()
+    fills = broker.fill_pending(GAP_BAR)
+    assert got(fills) == [("sell", 1, 17_849.75)]
+    assert out.status == "cancelled"
+    assert pf.equity(17_860.0) == pytest.approx(96_990.0)
+
+
+class Counting(Broker):
+    """Counts the copies of the book the bar tries orderings on."""
+    shadows = 0
+
+    def _shadow(self, order):
+        Counting.shadows += 1
+        return super()._shadow(order)
+
+
+def shadows_for(setup, bar):
+    broker, _ = make(Counting, slip=1.0)
+    broker.buy(1, stop=17_900.0)
+    broker.fill_pending(Bar(1, 18_000.0, 18_000.0, 18_000.0, 18_000.0))
+    setup(broker)
+    Counting.shadows = 0
+    broker.fill_pending(bar)
+    return Counting.shadows
+
+
+def test_a_bar_without_an_ambiguity_walks_once():
+    # Gap-through stop, nothing pending: one walk, no copies.
+    assert shadows_for(lambda b: None, GAP_BAR) == 0
+    # Gap-through stop and a limit that neither trades at the open nor is reached.
+    assert shadows_for(lambda b: b.buy(1, limit=17_600.0), GAP_BAR) == 0
+    # A market order and a stop the bar never reaches: the open is not a tie.
+    assert shadows_for(lambda b: b.buy(1), Bar(2, 18_000.0, 18_010.0, 17_990.0, 18_000.0)) == 0
+    # The open tie is branched: both open orders run on copies.
+    assert shadows_for(lambda b: b.buy(1), GAP_BAR) > 0
+
+
 # ---------------------------------------------------------------------------
 # Property: the booked path is never kinder than any single ordering the bar allows.
 # ---------------------------------------------------------------------------
 
-def forced(down_first, stop_first):
-    """A Broker that walks exactly one intrabar ordering (no worst-of choice)."""
+def forced(open_stop_first, down_first, stop_first):
+    """A Broker that walks exactly one ordering (no worst-of choice): the order at the
+    open and the intrabar path."""
 
     class Forced(Broker):
+        def _open_candidates(self):
+            return [open_stop_first]
+
         def _intrabar_candidates(self, default_down_first):
             return [(down_first, stop_first)]
 
     return Forced
 
 
-ORDERINGS = [(d, s) for d in (True, False) for s in (True, False)]
+ORDERINGS = [(o, d, s) for o in (True, False) for d in (True, False) for s in (True, False)]
 
 
 def scenario(r):
@@ -148,15 +235,31 @@ def play(cls, sc):
     return pf.equity(bar.close)
 
 
+def open_tie(sc):
+    """True when the scenario's bar opens through the held stop AND fills the pending
+    order at the open: the tie at the open the bar does not resolve."""
+    pos, stop, amend, side, n, kind, lim, ast, bar, slip, cash = sc
+    gapped = stop is not None and (bar.open <= stop if pos > 0 else bar.open >= stop)
+    at_open = kind == "market" or (kind == "limit" and (
+        bar.open <= lim if side == "buy" else bar.open >= lim))
+    return gapped and at_open
+
+
 def test_property_booked_equity_is_the_worst_of_every_ordering():
     r = random.Random(20261102)
-    branched = 0
+    branched = open_branched = 0
     for _ in range(5_000):
         sc = scenario(r)
         eng = play(Broker, sc)
-        alts = [play(forced(d, s), sc) for d, s in ORDERINGS]
-        assert eng <= min(alts) + 1e-6, (sc, eng, alts)
-        assert eng == pytest.approx(min(alts), abs=1e-6), (sc, eng, alts)
-        branched += max(alts) - min(alts) > 1e-6
-    # The scenarios must actually exercise path-dependent bars, or the test is vacuous.
+        alts = {o: play(forced(*o), sc) for o in ORDERINGS}
+        worst = min(alts.values())
+        assert eng <= worst + 1e-6, (sc, eng, alts)
+        assert eng == pytest.approx(worst, abs=1e-6), (sc, eng, alts)
+        branched += max(alts.values()) - worst > 1e-6
+        if open_tie(sc):
+            stop_first = min(v for o, v in alts.items() if o[0])
+            open_branched += worst < stop_first - 1e-6
+    # The scenarios must actually exercise path-dependent bars, and bars where the
+    # order at the open decides the result, or the test is vacuous.
     assert branched > 50, branched
+    assert open_branched > 50, open_branched

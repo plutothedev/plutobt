@@ -437,6 +437,43 @@ class Broker:
         d = default_down_first
         return [(d, True), (not d, True), (d, False), (not d, False)]
 
+    def _open_candidates(self) -> list[bool]:
+        """The orders a gap-through stop and a market or marketable order can take at the
+        open, as stop_first, the default (the stop first) first."""
+        return [True, False]
+
+    def _open(self, ts, order: Order | None, open_px: float, at_open: bool,
+              stop_first: bool) -> tuple[list[Fill], Order | None]:
+        """The open: a gap-through stop and the market or marketable order, in the given
+        order. Returns the fills and the order still pending after the open.
+
+        Order first, the stop is not fired here: if it is still beyond the open after
+        the order's fill, the walk fills it at the open, as it does any stop already
+        beyond the price it went live at."""
+        fills: list[Fill] = []
+        if stop_first and self._open_through_stop(open_px):
+            stopped = self._fire_stop(ts, open_px)
+            fills.append(stopped)
+            order = self._after_stop(order, stopped)
+        if order is not None and at_open:
+            fill = self._execute(order, ts, self._open_fill_price(order, open_px), open_px)
+            fills.extend([fill] if fill is not None else [])
+            order = None
+        return fills, order
+
+    def _path_candidates(self, order: Order | None, low: float,
+                         high: float) -> list[tuple[bool, bool]]:
+        """The intrabar orderings to try after the open, the default first. Only a
+        pending limit the bar's range reaches makes the ordering matter: without one the
+        held stop is the only order left and fills at the same price on either path, so
+        the default is walked once."""
+        side = self._position_side()
+        down_first = (side == "long") if side is not None else (
+            order is None or order.side == "buy")
+        if order is not None and low <= order.price <= high:
+            return self._intrabar_candidates(down_first)
+        return [(down_first, True)]
+
     def _shadow(self, order: Order | None) -> tuple[Broker, Order | None]:
         """A throwaway copy of this broker, its portfolio and the pending order, to try
         an ordering on without touching the real book. Trades are not copied: closing
@@ -455,29 +492,34 @@ class Broker:
         the bar's prices in time order.
 
         1. The open. If the open is at or beyond the held position's stop
-           (gap-through), the stop fills at the open first. Then the pending order
-           fills at the open if it is a MARKET order or a marketable LIMIT (a buy limit
-           at or above the open, a sell limit at or below it), both like a market
-           order: the open plus slippage against the order, a marketable limit capped
-           by its limit (a buy at min(limit, open + slip), a sell at
-           max(limit, open - slip)). So a limit through the market is no free market
-           order.
+           (gap-through), the stop fills at the open. The pending order fills at the
+           open if it is a MARKET order or a marketable LIMIT (a buy limit at or above
+           the open, a sell limit at or below it), both like a market order: the open
+           plus slippage against the order, a marketable limit capped by its limit (a
+           buy at min(limit, open + slip), a sell at max(limit, open - slip)). So a
+           limit through the market is no free market order. When both act at the open,
+           which traded first is a tie the bar does not resolve, so both orders are
+           candidates in step 2: the stop first (its exit cancels a now stale order; a
+           flip keeps its new side), or the order first (the stop then fills at the open
+           too if it is still beyond the open for the position the order leaves).
         2. The path: worst case. A bar's OHLC does not say whether the high or the low
            came first, nor which of two orders at the same price traded first. So the
            rest of the bar runs on the worst of the two monotone intrabar paths
            (open -> low -> high and open -> high -> low), each with both tie orders (stop
-           before limit, limit before stop), judged by account equity marked at the
-           bar's close: every candidate runs on a copy of the book, and the one with the
-           lowest close equity is committed. This is the worst-case mode of Löw,
+           before limit, limit before stop) and, when step 1 has a tie at the open, both
+           orders there, judged by account equity marked at the bar's close: every
+           candidate runs on a copy of the book, and the one with the lowest close
+           equity is committed. This is the worst-case mode of Löw,
            Maier-Paape and Platen, "Correctness of Backtest Engines" (2015,
            arXiv:1509.08248). Real intrabar paths can wiggle more than this, so it is a
            conservative convention, not a guarantee against every path. On a tie the
            default ordering stands: the adverse extreme for the position held after the
            open first (down to the low for a long, up to the high for a short); flat,
            toward the pending limit (down for a buy limit, up for a sell limit), the
-           adverse direction for the position it would open; and at the same price the
-           stop first. Only a pending limit the bar's range reaches can make the
-           ordering matter, so every other bar walks the default once.
+           adverse direction for the position it would open; at the same price the
+           stop first; and at the open the stop first. Only a tie at the open, or a
+           pending limit the bar's range reaches after the open, can make the ordering
+           matter, so every other bar walks the default once.
            Along a path every resting order triggers in the order the path crosses its
            price: a resting LIMIT fills at its price with no slippage (it waits in the
            book and the market comes to it; one the open already trades through is
@@ -504,40 +546,52 @@ class Broker:
                         "its size")
             if order.kind not in ("market", "limit"):
                 raise ValueError(f"unknown order kind: {order.kind!r}")
-        fills: list[Fill] = []
         ts = next_bar.ts
         open_px = float(next_bar.open)
+        low, high = float(next_bar.low), float(next_bar.high)
+        close_px = float(next_bar.close)
         at_open = order is not None and (order.kind == "market"
                                          or self._marketable(order, open_px))
-        # 1. The open: a gap-through stop, then a market or marketable order.
-        if self._open_through_stop(open_px):
-            stopped = self._fire_stop(ts, open_px)
-            fills.append(stopped)
-            order = self._after_stop(order, stopped)
-        if order is not None and at_open:
-            fill = self._execute(order, ts, self._open_fill_price(order, open_px), open_px)
-            fills.extend([fill] if fill is not None else [])
-            order = None
-        # 2. The path. Only a pending limit the bar's range can reach makes the ordering
-        # matter: without one, the held stop is the only order left and fills at the
-        # same price on either path.
-        low, high = float(next_bar.low), float(next_bar.high)
-        side = self._position_side()
-        down_first = (side == "long") if side is not None else (
-            order is None or order.side == "buy")
-        candidates = self._intrabar_candidates(down_first)
-        if order is not None and low <= order.price <= high and len(candidates) > 1:
-            close_px = float(next_bar.close)
-            best, worst = None, None
-            for cand in candidates:
+        if at_open and self._open_through_stop(open_px):
+            # A gap-through stop and an order filled at the open: which traded first is a
+            # tie the bar does not resolve, so the open is part of the choice. Every
+            # (open order, path) pair runs on a copy of the book.
+            candidates = []
+            for open_stop_first in self._open_candidates():
                 shadow, twin = self._shadow(order)
-                shadow._walk(ts, twin, open_px, low, high, *cand)
-                eq = shadow.portfolio.equity(close_px)
-                # Strictly lower only: on a tie the earlier (default) ordering stands.
-                if worst is None or eq < worst - 1e-6:
-                    best, worst = cand, eq
-            chosen = best
+                _, rest = shadow._open(ts, twin, open_px, at_open, open_stop_first)
+                candidates += [(open_stop_first, *path)
+                               for path in shadow._path_candidates(rest, low, high)]
+            chosen = self._worst(ts, order, open_px, low, high, close_px, at_open,
+                                 candidates)
+            fills, order = self._open(ts, order, open_px, at_open, chosen[0])
+            path = chosen[1:]
         else:
-            chosen = candidates[0]
-        fills.extend(self._walk(ts, order, open_px, low, high, *chosen))
+            # The open is settled (at most one order acts there); only the path is left.
+            fills, order = self._open(ts, order, open_px, at_open, True)
+            paths = self._path_candidates(order, low, high)
+            path = paths[0] if len(paths) == 1 else self._worst(
+                ts, order, open_px, low, high, close_px, False,
+                [(None, *p) for p in paths])[1:]
+        fills.extend(self._walk(ts, order, open_px, low, high, *path))
         return fills
+
+    def _worst(self, ts, order: Order | None, open_px: float, low: float, high: float,
+               close_px: float, at_open: bool, candidates: list[tuple]) -> tuple:
+        """The candidate (open_stop_first, down_first, stop_first) that leaves the lowest
+        equity marked at this bar's close, each run on a copy of the book. None for
+        open_stop_first means the open is already done. Strictly lower only: on a tie
+        the earlier (default) candidate stands."""
+        if len(candidates) == 1:
+            return candidates[0]
+        best, worst = None, None
+        for cand in candidates:
+            open_stop_first, down_first, stop_first = cand
+            shadow, twin = self._shadow(order)
+            if open_stop_first is not None:
+                _, twin = shadow._open(ts, twin, open_px, at_open, open_stop_first)
+            shadow._walk(ts, twin, open_px, low, high, down_first, stop_first)
+            eq = shadow.portfolio.equity(close_px)
+            if worst is None or eq < worst - 1e-6:
+                best, worst = cand, eq
+        return best
