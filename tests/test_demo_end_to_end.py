@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from plutobt.engine import BacktestResult
 
@@ -40,8 +41,25 @@ def test_generalization_sweep_runs_all_three_symbols():
         assert isinstance(result, BacktestResult)
         assert len(result.equity_curve) > 0
         assert "sharpe" in result.metrics
-        # Same annualization basis across the sweep.
-        assert result.metrics["periods_per_year"] == 20412.0
+    # Each symbol annualizes on its own RTH session: 5m bars/day x 252.
+    assert results["NQ"].metrics["periods_per_year"] == 20412.0      # 81 x 252
+    assert results["ES"].metrics["periods_per_year"] == 20412.0      # 81 x 252
+    assert results["CL"].metrics["periods_per_year"] == 16632.0      # 66 x 252
+
+
+@pytest.mark.parametrize("sym", ["nq", "es", "cl"])
+def test_each_config_annualizes_on_its_instruments_rth_session(sym):
+    # periods_per_year = 5-minute bars in the registry session x 252 trading days.
+    from datetime import datetime
+
+    from plutobt.config import load_config
+    from plutobt.instruments import get_instrument
+
+    inst = get_instrument(sym.upper())
+    span = (datetime.strptime(inst.session_close_ct, "%H:%M")
+            - datetime.strptime(inst.session_open_ct, "%H:%M"))
+    bars_per_day = span.total_seconds() / 300
+    assert load_config(f"configs/{sym}.toml").periods_per_year == bars_per_day * 252
 
 
 def test_sweep_applies_distinct_per_instrument_costs():

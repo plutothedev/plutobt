@@ -21,8 +21,8 @@ def test_per_instrument_cost_configs_load(path, slippage):
     assert cfg.slippage_ticks == slippage
     # Costs do NOT auto-carry: each config sets its own commission per side.
     assert cfg.commission_per_side > 0.0
-    # All three share the 5m-RTH annualization basis: 81 bars/day * 252 = 20412.
-    assert cfg.periods_per_year == 20412.0
+    # Each config annualizes on its own 5m RTH session: bars/day * 252 (NQ/ES 81, CL 66).
+    assert cfg.periods_per_year == {"configs/cl.toml": 16632.0}.get(path, 20412.0)
     assert cfg.allow_short is False  # EMACross demo is long-only
 
 

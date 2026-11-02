@@ -3,6 +3,6 @@
 commission_per_side = 3.50
 slippage_ticks = 3.0
 risk_free = 0.0
-periods_per_year = 20412.0   # demo holds annualization basis fixed across instruments
+periods_per_year = 16632.0   # 5m RTH 08:00-13:30 CT: 66 bars/day * 252
 carry_overnight = false
 allow_short = false
