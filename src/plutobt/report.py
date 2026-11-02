@@ -22,6 +22,12 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     dd_dur = m["max_drawdown_duration"]
     ppy = m["periods_per_year"]
     t_obs = m["T"]
+    # Closed trades: the count every trade statistic (win rate / PF / expectancy) and the
+    # low-sample warning are computed over, so the Trades line can never disagree with them.
+    n_trades = m["n_trades"]
+    # A position still open at the last bar is marked to the last close: it is in equity
+    # and Sharpe, but not in the trade stats, so it is disclosed on its own line.
+    n_open = sum(1 for t in result.trades if t.open_at_end)
     # avg_r may be None (§0.2); handle gracefully for display.
     avg_r_val = m.get("avg_r")
     avg_r_str = f"{avg_r_val:.3f}" if avg_r_val is not None else "n/a"
@@ -39,16 +45,16 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"Avg R         = {avg_r_str}",
         f"Max DD depth  = {dd_depth:.6f}",
         f"Max DD duration = {dd_dur} bars",
-        f"Trades        = {len(result.trades)}",
+        f"Trades        = {n_trades}   (closed)",
+        f"Open at end   = {n_open}"
+        + (" (marked to last close, excluded from trade stats)" if n_open else ""),
         f"data_sha256   = {man['data_sha256']}",
         f"engine version = {man['version']}",
     ]
 
     # §5.7 low-sample warning: trade-based stats (PF/expectancy) are unreliable
-    # below MIN_TRADE_SAMPLE closed trades. compute_metrics always emits n_trades;
-    # surface the warning when it is present and below the threshold.
-    n_trades = m.get("n_trades")
-    if n_trades is not None and n_trades < MIN_TRADE_SAMPLE:
+    # below MIN_TRADE_SAMPLE closed trades (the same n_trades as the Trades line).
+    if n_trades < MIN_TRADE_SAMPLE:
         lines.append(
             f"⚠ insufficient sample: n_trades={n_trades} < {MIN_TRADE_SAMPLE}; "
             f"PF/expectancy unreliable"

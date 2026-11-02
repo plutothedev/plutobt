@@ -52,6 +52,7 @@ def _fake_result():
         "max_drawdown_duration": 1,
         "periods_per_year": 20412.0,
         "T": 4,
+        "n_trades": 1,
     }
     manifest = {
         "data_sha256": "deadbeef",
@@ -122,3 +123,41 @@ def test_format_report_renders_real_compute_metrics_output():
     assert "IN-SAMPLE" in text
     assert "not predictive of live results" in text
     assert "PlutoBT report: NQ" in text
+
+
+def _line(text: str, prefix: str) -> str:
+    """The one report line starting with ``prefix`` (fails loudly if absent or doubled)."""
+    hits = [ln for ln in text.splitlines() if ln.startswith(prefix)]
+    assert len(hits) == 1, (prefix, hits)
+    return hits[0]
+
+
+def test_trades_line_counts_closed_trades_and_discloses_open_at_end():
+    # One closed trade plus one position still open at the last bar. The trade stats
+    # (win rate / PF / expectancy, n_trades) count only the closed one, so the Trades
+    # line must too, and the open position gets its own disclosure line.
+    res = _fake_result()
+    res.trades.append(
+        Trade(entry_ts=600, exit_ts=None, side="long", contracts=1,
+              entry_price=103.0, exit_price=None, pnl=40.0, open_at_end=True)
+    )
+    res.metrics["n_trades"] = 1
+    text = format_report(res, symbol="NQ")
+    assert _line(text, "Trades ").split("=")[1].split()[0] == "1"
+    assert _line(text, "Open at end").split("=")[1].strip().startswith("1 ")
+    assert "excluded from trade stats" in _line(text, "Open at end")
+
+
+def test_trades_line_agrees_with_low_sample_warning_on_real_es_run():
+    # ES demo: 5 closed trades + 1 open at the end. It used to print "Trades = 6" beside
+    # "n_trades=5".
+    from examples.run_demo import run_symbol
+
+    res = run_symbol("ES", data_path="data/sample/es_5m.json", config_path="configs/es.toml")
+    n_open = sum(t.open_at_end for t in res.trades)
+    assert n_open == 1
+    text = format_report(res, symbol="ES")
+    n_closed = res.metrics["n_trades"]
+    assert _line(text, "Trades ").split("=")[1].split()[0] == str(n_closed)
+    assert f"n_trades={n_closed} " in text
+    assert _line(text, "Open at end").split("=")[1].strip().startswith(f"{n_open} ")
