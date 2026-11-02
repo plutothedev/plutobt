@@ -232,9 +232,19 @@ class Portfolio:
         """
         self._mark_price = float(price)
 
-    def margin_ok(self, contracts: int) -> bool:
-        """Entry gate (spec §5.2): cash >= initial_margin * contracts."""
-        return self.cash >= self.instrument.initial_margin * contracts
+    def margin_ok(self, contracts: int, mark_price: float | None = None) -> bool:
+        """Entry gate (spec §5.2): equity >= initial_margin * contracts.
+
+        ``contracts`` is the WHOLE position the order would leave, held contracts
+        included. Equity is cash + open MTM marked at ``mark_price`` (default: the last
+        mark(), else the entry price), so an open loss shrinks what can be added and an
+        open profit grows it. Flat, equity is cash.
+        """
+        if mark_price is None:
+            mark_price = self._mark_price
+        if mark_price is None:
+            mark_price = self.position.avg_price
+        return self.equity(mark_price) >= self.instrument.initial_margin * contracts
 
     def margin_call_amount(self) -> float:
         """Variation-margin call on a maintenance breach (spec §5.2).

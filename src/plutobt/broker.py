@@ -291,14 +291,13 @@ class Broker:
             reducing = self._is_reducing(order)
             opening = order.contracts - held if reducing else order.contracts
             if opening > 0:
-                if reducing:
-                    # A flip's new side opens on what its closing half leaves: equity
-                    # marked at this bar's open (before slippage and fees), as close()
-                    # then a new entry would see it, not the cash from before the loss.
-                    basis = self.portfolio.equity(float(next_bar.open))
-                    affordable = basis >= self.instrument.initial_margin * opening
-                else:
-                    affordable = self.portfolio.margin_ok(opening)
+                # Initial margin covers the WHOLE position the fill leaves: a flip's new
+                # side, or the held contracts plus a scale-in's. Equity is marked at this
+                # bar's open (before slippage and fees), so open P&L counts: a flip's
+                # new side opens on what its closing half leaves, as close() then a new
+                # entry would see it. A pure reduction opens nothing and is never gated.
+                resulting = opening if reducing else held + opening
+                affordable = self.portfolio.margin_ok(resulting, float(next_bar.open))
                 if not affordable:
                     if reducing:
                         # A flip whose new side fails margin keeps only its closing

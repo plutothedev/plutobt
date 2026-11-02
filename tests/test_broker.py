@@ -398,6 +398,102 @@ def test_exit_not_gated_by_margin():
 
 
 # ---------------------------------------------------------------------------
+# Scale-in margin: an order that adds contracts is accepted only if equity (cash +
+# open MTM, marked at the fill bar's open) covers INITIAL margin on the whole
+# resulting position, not just the new contracts against cash. NQ IM = 23,000.
+# ---------------------------------------------------------------------------
+
+def _flat_bar(ts, px):
+    return Bar(ts=ts, open=px, high=px, low=px, close=px)
+
+
+def test_five_from_flat_still_refused():  # unchanged from-flat behaviour
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    order = broker.buy(contracts=5)               # 115,000 > 100,000
+    assert broker.fill_pending(_flat_bar(1000, 100.0)) == []
+    assert order.status == "rejected"
+    assert pf.position.qty == 0
+
+
+def test_four_from_flat_still_accepted():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    order = broker.buy(contracts=4)               # 92,000 <= 100,000
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    assert order.status == "filled"
+    assert pf.position.qty == 4
+
+
+def test_scale_in_counts_the_contracts_already_held():
+    # Long 4 (92,000 of IM); 4 more would need 184,000 on 100,000 of equity.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=4)
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    order = broker.buy(contracts=4)
+    assert broker.fill_pending(_flat_bar(2000, 100.0)) == []
+    assert order.status == "rejected"
+    assert pf.position.qty == 4
+
+
+def test_scale_in_counts_the_open_loss():
+    # Long 1 from 100; at the next open (-3,800) it is down 78,000: equity 22,000, and
+    # 4 contracts need 92,000. Cash alone (100,000) would have passed 3 new ones.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    order = broker.buy(contracts=3)
+    assert broker.fill_pending(_flat_bar(2000, -3_800.0)) == []
+    assert order.status == "rejected"
+    assert pf.position.qty == 1
+
+
+def test_scale_in_counts_the_open_profit():
+    # Cash 30,000, long 1 from 100; at 2,100 it is up 40,000: equity 70,000 covers
+    # 3 contracts (69,000), though cash alone covers no 2 new ones (46,000).
+    broker, inst, pf = make_broker(starting_cash=30_000.0, slippage_ticks=0.0)
+    broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    order = broker.buy(contracts=2)
+    broker.fill_pending(_flat_bar(2000, 2_100.0))
+    assert order.status == "filled"
+    assert pf.position.qty == 3
+
+
+def test_scale_in_within_margin_is_accepted():  # positive control
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=1)
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    order = broker.buy(contracts=3)               # 4 x 23,000 = 92,000 <= 100,000
+    broker.fill_pending(_flat_bar(2000, 100.0))
+    assert order.status == "filled"
+    assert pf.position.qty == 4
+
+
+def test_short_scale_in_counts_the_contracts_already_held():
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.sell(contracts=3)
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    order = broker.sell(contracts=2)              # 5 x 23,000 > 100,000
+    assert broker.fill_pending(_flat_bar(2000, 100.0)) == []
+    assert order.status == "rejected"
+    assert pf.position.qty == -3
+
+
+def test_reducing_and_closing_are_never_blocked_by_margin():
+    # Long 4 from 100, then the market collapses: equity is far below any requirement.
+    broker, inst, pf = make_broker(slippage_ticks=0.0)
+    broker.buy(contracts=4)
+    broker.fill_pending(_flat_bar(1000, 100.0))
+    partial = broker.sell(contracts=1)
+    broker.fill_pending(_flat_bar(2000, -1_000.0))
+    assert partial.status == "filled"
+    assert pf.position.qty == 3
+    exit_ = broker.close()
+    broker.fill_pending(_flat_bar(3000, -1_000.0))
+    assert exit_.status == "filled"
+    assert pf.position.qty == 0
+
+
+# ---------------------------------------------------------------------------
 # M5.11 — cancel_pending_entry() cancels only the entry, never resting_stop
 # ---------------------------------------------------------------------------
 

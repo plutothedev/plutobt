@@ -215,12 +215,23 @@ def test_margin_ok_gate_on_initial_margin():
     assert pf.margin_ok(n_ok + 1) is False
 
 
-def test_margin_ok_uses_current_cash_not_equity():
+def test_margin_ok_flat_reads_cash():
     cl = get_instrument("CL")
     pf = Portfolio(starting_cash=cl.initial_margin, instrument=cl)
-    # Exactly enough cash for 1 contract.
+    # Flat, equity is cash: exactly enough for 1 contract.
     assert pf.margin_ok(1) is True
     assert pf.margin_ok(2) is False
+
+
+def test_margin_ok_reads_equity_marked_at_the_given_price():
+    # contracts is the WHOLE resulting position; open MTM counts both ways.
+    cl = get_instrument("CL")                         # IM 7,700
+    pf = Portfolio(starting_cash=20_000.0, instrument=cl)
+    pf.apply_fill(Fill(ts=1000, side="buy", contracts=1, price=70.00, commission=0.0))
+    assert pf.margin_ok(2, mark_price=70.00) is True     # 20,000 >= 15,400
+    assert pf.margin_ok(3, mark_price=70.00) is False    # 20,000 <  23,100
+    assert pf.margin_ok(3, mark_price=73.20) is True     # 23,200 >= 23,100
+    assert pf.margin_ok(2, mark_price=65.00) is False    # 15,000 <  15,400
 
 
 def test_margin_call_zero_when_above_maintenance():
