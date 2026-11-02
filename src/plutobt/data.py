@@ -259,11 +259,13 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     consistent with §5.5. Empty buckets (gaps) are dropped. ts returns to a
     plain int64 column with a RangeIndex.
 
-    A rule of a day or longer ("1D", "W", ...) buckets by CME trading day in
-    America/Chicago, not by the UTC calendar: the trading day ends at the 16:00 CT
-    close, a bar opening at 17:00 CT or later belongs to the next one, and the daily
-    bar's ts is its 17:00 CT open (so Sunday evening opens Monday's bar). Intraday
-    rules bucket on the UTC clock as before.
+    A rule of a day or longer ("1D", "W", "ME", "QS", ...) buckets by CME trading day
+    in America/Chicago, not by the UTC calendar: the trading day ends at the 16:00 CT
+    close and a bar opening at 17:00 CT or later belongs to the next one. Each bucket
+    holds exactly its trading days (pandas' own closed/label side for the rule, so an
+    end-anchored "ME" or "W" keeps its last day), and its ts is the 17:00 CT open of
+    its first trading day: Sunday evening for a daily Monday bar or a weekly bar.
+    Intraday rules bucket on the UTC clock, label='left'/closed='left', as before.
 
     Note: a 'session' label (if present) is NOT preserved; call tag_sessions
     on the result if session labels are needed at the coarser cadence.
@@ -272,29 +274,27 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     daily = (not isinstance(offset, pd.offsets.Tick)
              or pd.Timedelta(offset) >= pd.Timedelta(days=1))
     dt = pd.to_datetime(df["ts"], unit="s", utc=True)
+    shift = pd.Timedelta(hours=24 - _TRADING_DAY_OPEN_CT_HOURS)
+    aggs = dict(open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                close=("close", "last"), volume=("volume", "sum"))
     if daily:
         # The trading date, as a naive midnight: the CT wall clock moved on by the hours
-        # from the 17:00 open to midnight, so 17:00 CT lands on the next date.
-        shift = pd.Timedelta(hours=24 - _TRADING_DAY_OPEN_CT_HOURS)
-        dt = (dt.dt.tz_convert(CT).dt.tz_localize(None) + shift).dt.normalize()
-    work = df.set_index(dt)
-    agg = (
-        work.resample(rule, label="left", closed="left")
-        .agg(
-            open=("open", "first"),
-            high=("high", "max"),
-            low=("low", "min"),
-            close=("close", "last"),
-            volume=("volume", "sum"),
-        )
-        .dropna(subset=["open"])
-    )
-    out = agg.reset_index()
-    # The datetime column is named "ts" (inherits from the Series used in set_index).
-    if daily:
-        # Back from the trading date to its open: 17:00 CT the evening before.
-        shift = pd.Timedelta(hours=24 - _TRADING_DAY_OPEN_CT_HOURS)
-        out["ts"] = (out["ts"] - shift).dt.tz_localize(CT).dt.tz_convert("UTC")
+        # from the 17:00 open to midnight, so 17:00 CT lands on the next date. Dates
+        # take pandas' default sides for the rule: an end-anchored rule ("ME", "W") is
+        # closed on the right, so its last trading day stays in its own bucket.
+        tdate = (dt.dt.tz_convert(CT).dt.tz_localize(None) + shift).dt.normalize()
+        work = df.set_index(tdate).assign(first_day=tdate.to_numpy())
+        agg = (work.resample(rule).agg(**aggs, first_day=("first_day", "first"))
+               .dropna(subset=["open"]))
+        # The bucket's open: 17:00 CT the evening before its first trading date.
+        opened = (agg["first_day"] - shift).dt.tz_localize(CT).dt.tz_convert("UTC")
+        out = agg.reset_index(drop=True).assign(ts=opened.to_numpy())
+    else:
+        work = df.set_index(dt)
+        agg = (work.resample(rule, label="left", closed="left").agg(**aggs)
+               .dropna(subset=["open"]))
+        # The datetime column is named "ts" (inherits from the Series used in set_index).
+        out = agg.reset_index()
     out["ts"] = out["ts"].astype("int64") // 1_000_000_000
     out["volume"] = out["volume"].astype("int64")
     return out[_COLUMNS].reset_index(drop=True)

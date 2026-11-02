@@ -457,3 +457,45 @@ def test_resample_intraday_still_buckets_on_the_utc_clock():
     out = resample(df, "60min")
     assert out["ts"].tolist() == [_ct_ts(2025, 6, 3, 16, 0), _ct_ts(2025, 6, 3, 17, 0)]
     assert out["volume"].tolist() == [60, 60]
+
+
+def _cme_week_hours():
+    """Hourly CME bars 2026-02-22 (Sun) 17:00 CT .. 2026-04-10 (Fri) 15:00 CT: closed
+    Saturday, Sunday before 17:00, Friday from 16:00, and the 16:00 CT halt daily."""
+    idx = pd.date_range("2026-02-22 17:00", "2026-04-10 15:00", freq="h", tz=CT)
+    keep = [t for t in idx if not (t.weekday() == 5 or (t.weekday() == 6 and t.hour < 17)
+                                   or (t.weekday() == 4 and t.hour >= 16) or t.hour == 16)]
+    ts = np.array([int(t.timestamp()) for t in keep], dtype="int64")
+    n = len(ts)
+    return pd.DataFrame({"ts": ts, "open": np.arange(n, dtype="float64"),
+                         "high": np.arange(n) + 0.5, "low": np.arange(n) - 0.5,
+                         "close": np.arange(n, dtype="float64"),
+                         "volume": np.ones(n, dtype="int64")})
+
+
+@pytest.mark.parametrize(("rule", "period"), [
+    ("W", "W-SUN"), ("ME", "M"), ("MS", "M"), ("QE", "Q"), ("QS", "Q"), ("YE", "Y"),
+    ("YS", "Y"),
+])
+def test_resample_longer_rules_hold_exactly_their_trading_days(rule, period):
+    # Review fix: closed="left" on an end-anchored rule ("ME") put a month's last trading
+    # day into the next month, and weekly bars were stamped Saturday 17:00 CT. Each bucket
+    # now holds its own CME trading days, stamped at the 17:00 CT open of the first one.
+    df = _cme_week_hours()
+    ct = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(CT)
+    tdate = (ct.dt.tz_localize(None) + pd.Timedelta(hours=7)).dt.normalize()
+    groups = df.assign(day=tdate).groupby(tdate.dt.to_period(period))
+    exp = groups.agg(open=("open", "first"), close=("close", "last"),
+                     volume=("volume", "sum"), day=("day", "first"))
+    out = resample(df, rule)
+    assert out["open"].tolist() == exp["open"].tolist()
+    assert out["close"].tolist() == exp["close"].tolist()
+    assert out["volume"].tolist() == exp["volume"].tolist()
+    opens = [_ct_ts(d.year, d.month, d.day, 17, 0) - 86400 for d in exp["day"]]
+    assert out["ts"].tolist() == opens
+
+
+def test_resample_weekly_bars_open_sunday_17_00_ct():
+    out = resample(_cme_week_hours(), "W")
+    opens = pd.to_datetime(out["ts"], unit="s", utc=True).dt.tz_convert(CT)
+    assert set(opens.dt.weekday) == {6} and set(opens.dt.hour) == {17}
