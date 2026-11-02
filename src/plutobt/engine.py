@@ -8,6 +8,7 @@ import math
 import numbers
 from dataclasses import asdict, dataclass, field, replace
 
+import numpy as np
 import pandas as pd
 
 from plutobt import __version__
@@ -92,6 +93,35 @@ def _session_problem(frame: pd.DataFrame) -> str | None:
     return None
 
 
+def _warm_up_end(df: pd.DataFrame, data: pd.DataFrame, signal_cols: list) -> int:
+    """The row of the first bar with every signal column set (len(data) if none is):
+    the bars before it are the warm-up, where on_bar is skipped. A NaN after it is
+    refused, naming the column and ts: a plain ValueError when the caller's frame
+    already held it, a FrameError when the strategy's precompute made it."""
+    if not signal_cols:
+        return 0
+    nan = data[signal_cols].isna().to_numpy()
+    valid = ~nan.any(axis=1)
+    if not valid.any():
+        return len(data)
+    start = int(np.argmax(valid))
+    late = nan[start:].any(axis=1)
+    if not late.any():
+        return start
+    row = start + int(np.argmax(late))
+    col = signal_cols[int(np.argmax(nan[row]))]
+    ts = data["ts"].tolist()
+    problem = (
+        f"column {col!r} is NaN at row {row} (ts {ts[row]}), after the warm-up ended at "
+        f"row {start} (ts {ts[start]}). NaN is allowed only in the leading warm-up, where "
+        "on_bar is skipped; skipping it later would silently block that bar's exits. "
+        "Fill the gap (say, ffill) or fix the column"
+    )
+    if col in df.columns and pd.isna(df[col].iloc[row]):
+        raise ValueError(problem)
+    raise FrameError(f"the strategy's precompute left a NaN: {problem}")
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -129,7 +159,11 @@ class Engine:
         Equity at t: the book after bar t's own fills (the open fill, then stops
             against bar t's range), marked at close t; a fill at bar t+1's open
             first shows at t+1, never on the bar that decided it.
-        Warm-up: ``on_bar`` is skipped while any derived signal column is NaN.
+        Warm-up: ``on_bar`` is skipped on the leading bars where any signal column
+            (any column but the base ones) is NaN, up to the first bar with all of
+            them set. A NaN after that bar is refused before any bar runs, naming the
+            column and ts (a FrameError when the precompute made it): skipping
+            ``on_bar`` there would silently block that bar's exits.
         Breaks: at a break the pending order is cancelled (``carry_overnight=False``,
             the default) or carried to the next bar (``carry_overnight=True``); a
             resting protective stop is never touched. ``break_on="gap"`` (default):
@@ -172,6 +206,7 @@ class Engine:
                 ) from leak
         session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
+        warm_up_end = _warm_up_end(df, data, signal_cols)
 
         portfolio = Portfolio(starting_cash=_STARTING_CASH, instrument=self.instrument)
         broker = Broker(self.instrument, self.config, portfolio)
@@ -225,10 +260,9 @@ class Engine:
                 broker.fill_pending(bar)
             prev = bar
 
-            # Warm-up: skip on_bar while ANY required signal col is NaN (§5.9).
-            warm = any(pd.isna(getattr(bar, c)) for c in signal_cols)
-
-            if not warm:
+            # Warm-up: skip on_bar until every signal col is set (§5.9); a NaN after
+            # that was refused above.
+            if t >= warm_up_end:
                 ctx = Context(
                     bar=bar,
                     # A copy for this bar: a strategy writing it (qty = 0 to "exit", or

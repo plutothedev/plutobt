@@ -514,3 +514,99 @@ def test_demo_strategy_is_long_only_on_every_demo_config():
         assert [(t.entry_ts, t.exit_ts, t.pnl) for t in refused.trades] == [
             (t.entry_ts, t.exit_ts, t.pnl) for t in allowed.trades]
         assert list(refused.equity_curve) == list(allowed.equity_curve)
+
+
+# ---------------------------------------------------------------------------
+# Film-ready audit (2026-11-02): NaN is a warm-up only. A NaN after the first fully
+# valid row used to skip on_bar silently on that bar, blocking exits (probe p06).
+# ---------------------------------------------------------------------------
+
+class _VolRatio(Strategy):
+    """Buys once, exits when the close drops under 95; 'vr' is 0/0 on a zero-volume bar."""
+
+    def precompute(self, df):
+        df = df.copy()
+        df["vr"] = df["volume"] / df["volume"].rolling(1).sum()
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.position.qty == 0 and not ctx.state.get("in"):
+            ctx.state["in"] = True
+            ctx.broker.buy(contracts=1)
+        elif ctx.position.qty != 0 and ctx.bar.close < 95:
+            ctx.broker.close()
+
+
+_FALL = [(100, 101, 99, 100)] * 4 + [(90, 91, 80, 82), (82, 83, 70, 72),
+                                     (72, 73, 60, 62), (62, 63, 61, 62)]
+
+
+def test_a_nan_after_the_warm_up_is_refused_naming_column_and_ts():
+    df = _ohlc(_FALL)
+    df.loc[3:6, "volume"] = 0                        # vendor zero-volume bars: vr = 0/0
+    nq = get_instrument("NQ")
+    with pytest.raises(ValueError,
+                       match=r"column 'vr' is NaN at row 3 \(ts 900\), after the warm-up"):
+        Engine(nq, BacktestConfig(slippage_ticks=0.0)).run(df, _VolRatio())
+
+
+def test_the_same_strategy_without_the_nan_exits_control():
+    # Control: nonzero volume, so no NaN; the exit decided on bar 4 (close 82) fills at
+    # bar 5's open, 82.
+    nq = get_instrument("NQ")
+    eng = Engine(nq, BacktestConfig(slippage_ticks=0.0, commission_per_side=0.0))
+    (t,) = eng.run(_ohlc(_FALL), _VolRatio()).trades
+    assert (t.exit_ts, t.exit_price, t.pnl) == (1500, 82.0, pytest.approx(-360.0))
+
+
+def test_a_nan_from_the_precompute_is_a_frame_error_one_from_the_caller_is_not():
+    from plutobt.broker import FrameError
+
+    nq = get_instrument("NQ")
+    df = _ohlc([(100, 101, 99, 100)] * 5)
+    df["vwap"] = [100.0, 100.0, float("nan"), 100.0, 100.0]    # the caller's own column
+    with pytest.raises(ValueError, match="column 'vwap' is NaN at row 2") as e:
+        Engine(nq, BacktestConfig()).run(df, Strategy())
+    assert not isinstance(e.value, FrameError)
+
+    class Gappy(Strategy):
+        def precompute(self, d):
+            return d.assign(sig=np.where(d.index == 2, np.nan, 1.0))
+
+    with pytest.raises(FrameError, match="column 'sig' is NaN at row 2"):
+        Engine(nq, BacktestConfig()).run(df.drop(columns=["vwap"]), Gappy())
+
+
+def test_a_leading_warm_up_of_different_lengths_still_skips_on_bar():
+    # Unchanged: a 2-bar and a 4-bar warm-up; on_bar first runs on row 4.
+    seen = []
+
+    class Warm(Strategy):
+        def precompute(self, d):
+            d = d.copy()
+            d["a"] = d["close"].rolling(3).mean()
+            d["b"] = d["close"].rolling(5).mean()
+            return d
+
+        def on_bar(self, ctx):
+            seen.append(int(ctx.bar.ts))
+
+    nq = get_instrument("NQ")
+    Engine(nq, BacktestConfig()).run(_ohlc([(100, 101, 99, 100)] * 7), Warm())
+    assert seen == [1200, 1500, 1800]
+
+
+def test_a_column_that_never_warms_up_never_runs_on_bar():
+    # Unchanged: all warm-up, no fully valid row, so no error and no decisions.
+    seen = []
+
+    class Never(Strategy):
+        def precompute(self, d):
+            return d.assign(sig=float("nan"))
+
+        def on_bar(self, ctx):
+            seen.append(ctx.bar.ts)
+
+    nq = get_instrument("NQ")
+    result = Engine(nq, BacktestConfig()).run(_ohlc([(100, 101, 99, 100)] * 4), Never())
+    assert seen == [] and len(result.equity_curve) == 4
