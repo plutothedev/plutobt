@@ -118,6 +118,16 @@ def test_notice_states_synthetic_provenance_and_redistribution():
     assert "as-of" in text or "as of" in text
 
 
+def test_notice_as_of_date_is_the_vintage_the_manifest_stamps():
+    # The sample was regenerated on 2026-11-02; NOTICE and the manifest stamp must name
+    # the same vintage (both used to say 2026-06-07 after the regeneration).
+    from plutobt.engine import _ROLL_AS_OF_DEFAULT
+
+    text = NOTICE.read_text(encoding="utf-8")
+    assert f"**As-of date:** {_ROLL_AS_OF_DEFAULT} " in text
+    assert _ROLL_AS_OF_DEFAULT == "2026-11-02"
+
+
 def test_notice_disclaims_mit_covering_data():
     text = NOTICE.read_text(encoding="utf-8").lower()
     assert "mit" in text  # explicitly notes MIT covers code, not this data

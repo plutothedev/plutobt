@@ -23,7 +23,8 @@ real calendar dates and real exchange hours; the prices and volumes are not.
   opens the following trading day, with an overnight price gap.
 - **Generator:** `scripts/gen_sample.py`, deterministic (one seed per file).
   Regenerating reproduces every byte; `tests/test_sample_data.py` pins that.
-- **As-of date:** 2026-06-07 (the sample vintage stamped in run manifests).
+- **As-of date:** 2026-11-02 (the sample vintage stamped in run manifests: the date
+  the three files were regenerated on the RTH session grid).
 
 ### nq_5m.json: NQ E-mini Nasdaq-100
 

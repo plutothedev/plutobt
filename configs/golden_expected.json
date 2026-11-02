@@ -3245,7 +3245,7 @@
   ],
   "manifest": {
     "adjustment_method": "backwards_difference",
-    "as_of_date": "2026-06-07",
+    "as_of_date": "2026-11-02",
     "data_sha256": "6b6e0227d4c6cd6de39a3cd71f7c062a859001d6668e168e939f51019dc8d3b1",
     "roll_trigger": "none_single_expiry",
     "splice_method": "none_single_expiry"

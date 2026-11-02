@@ -57,7 +57,7 @@ def test_manifest_roll_metadata_documents_v1_defaults():
     assert m["adjustment_method"] == "backwards_difference"  # additive Panama (§5.6 default)
     assert m["splice_method"] == "none_single_expiry"        # synthetic single expiry
     assert m["roll_trigger"] == "none_single_expiry"
-    assert m["as_of_date"] == "2026-06-07"
+    assert m["as_of_date"] == "2026-11-02"   # the sample regeneration date
 
 
 _ROLL_KEYS = ("roll_trigger", "splice_method", "adjustment_method", "as_of_date")
@@ -74,11 +74,11 @@ def test_every_shipped_sample_gets_the_sample_vintage_roll_metadata():
             load_bars(str(root / name)), GoldenStrategy()).manifest
         assert _SAMPLE_SHA256[m["data_sha256"]] == name    # the constant is the file's hash
         assert [m[k] for k in _ROLL_KEYS] == ["none_single_expiry", "none_single_expiry",
-                                              "backwards_difference", "2026-06-07"]
+                                              "backwards_difference", "2026-11-02"]
 
 
 def test_a_user_frame_gets_unknown_roll_metadata():
-    # Unchecked, the sample's single-expiry/back-adjusted/2026-06-07 vintage was stamped
+    # Unchecked, the sample's single-expiry/back-adjusted/2026-11-02 vintage was stamped
     # on ANY frame (probe p10 d). A slice of the sample is no longer the shipped file.
     import pandas as pd
 

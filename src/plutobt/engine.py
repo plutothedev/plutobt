@@ -54,7 +54,7 @@ _STARTING_CASH = 100_000.0
 # v1 default roll/sample vintage; NOT the run date (back-adjustment construction
 # is out of v1, §5.6). Stamped into the manifest's roll metadata only for a run on a
 # shipped sample file, recognized by its data_sha256 (load_bars of data/sample/*).
-_ROLL_AS_OF_DEFAULT = "2026-06-07"
+_ROLL_AS_OF_DEFAULT = "2026-11-02"   # the date the samples were regenerated
 _SAMPLE_SHA256 = {
     "6b6e0227d4c6cd6de39a3cd71f7c062a859001d6668e168e939f51019dc8d3b1": "nq_5m.json",
     "47b1add21432e3980ca2bcd40d32695aed6494a603a17f067218b4befa409b15": "es_5m.json",
