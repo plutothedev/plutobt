@@ -14,6 +14,7 @@ from plutobt import __version__
 from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
 from plutobt.instruments import Instrument
+from plutobt.lookahead import _ROW_RULE, LookaheadError, _first_mismatch, assert_causal
 from plutobt.portfolio import MarginCall, Portfolio, Trade
 from plutobt.strategy import Context, Strategy
 
@@ -110,7 +111,17 @@ class Engine:
             that do not strictly increase; in session mode, a bad ``session``
             column) are refused with a ValueError before the strategy's
             ``precompute`` runs. The same frame checks run on what ``precompute``
-            returns, and a frame it broke raises FrameError, naming it.
+            returns, and a frame it broke raises FrameError, naming it; so does a
+            precompute that drops, adds or reorders rows, or changes a base column
+            (ts, open, high, low, close, volume, session) the caller's frame holds,
+            since the fills read those columns.
+        Look-ahead guard (``check_causality``, on by default): the precompute is run
+            on every prefix ``df[:t+1]`` (or ``causality_sample`` evenly spaced ones)
+            and each bar's values must match the full run's; a leak (a ``.shift(-1)``,
+            a whole-sample mean) raises LookaheadError naming the column, before any
+            bar runs. ``on_bar`` sees only bar t's row; a strategy that keeps the
+            precompute frame and reads ahead in it from ``on_bar`` breaks the
+            Strategy contract in a way no check here can see (see strategy.py).
         Decision-at-t: ``on_bar`` is called with bar t's data. ``ctx.position`` is
             a copy of the position for the bar: a strategy's writes to it never
             reach the book (stops move with ``ctx.broker.amend_stop``).
@@ -148,6 +159,17 @@ class Engine:
         self._check_frame(df, precomputed=False)       # the caller's own frame
         data = strategy.precompute(df.copy()).reset_index(drop=True)
         self._check_frame(data, precomputed=True)      # what the strategy made of it
+        self._check_precompute_kept_the_bars(df, data)
+        if self.config.check_causality:
+            try:
+                assert_causal(strategy.precompute, df, sample=self.config.causality_sample)
+            except LookaheadError as leak:
+                raise LookaheadError(
+                    f"the strategy's precompute looks ahead: {leak}. Each bar's values "
+                    "must come from that bar and the ones before it. Fix the precompute "
+                    "(check_causality = false skips this guard; use it only to study a "
+                    "known leak)"
+                ) from leak
         session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
 
@@ -273,6 +295,26 @@ class Engine:
                 )
             raise ValueError(f"{rule}; {problem}")
 
+    @staticmethod
+    def _check_precompute_kept_the_bars(df: pd.DataFrame, data: pd.DataFrame) -> None:
+        """Refuse a precompute that dropped or added rows, or changed a base column the
+        caller's frame holds: the loop fills orders against these bars as given."""
+        if len(data) != len(df):
+            raise FrameError(f"the strategy's precompute returned {len(data)} rows for "
+                             f"{len(df)} input bars: {_ROW_RULE}")
+        given = df.reset_index(drop=True)
+        for col in sorted(_BASE_COLS & set(given.columns)):
+            if col not in data.columns:
+                raise FrameError(f"the strategy's precompute removed column {col!r}")
+            bad = _first_mismatch(data[col], given[col])
+            if bad is not None:
+                raise FrameError(
+                    f"the strategy's precompute changed column {col!r} at row {bad} "
+                    f"(ts {given['ts'].iloc[bad]}): {given[col].iloc[bad]!r} became "
+                    f"{data[col].iloc[bad]!r}. Orders fill against the bars as given; "
+                    "put a derived value in a new column"
+                )
+
     def _check_config(self) -> None:
         """Refuse a config the engine cannot honour, before any strategy code runs."""
         cfg = self.config
@@ -294,6 +336,11 @@ class Engine:
                 # None is each one's default: the instrument's slippage, and a
                 # periods_per_year derived from the data (TOML can hold nan and inf).
                 raise ValueError(f"{name} must be a finite number or None, got {value!r}")
+        sample = cfg.causality_sample
+        if sample is not None and (isinstance(sample, bool) or not isinstance(sample, int)
+                                   or sample < 1):
+            raise ValueError("causality_sample must be None (check every bar) or a whole "
+                             f"number of bars >= 1, got {sample!r}")
 
     def _build_manifest(self, df: pd.DataFrame) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the

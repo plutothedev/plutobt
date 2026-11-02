@@ -18,6 +18,8 @@ def test_backtestconfig_is_dataclass_with_exact_fields():
         "allow_short",
         "break_on",  # wave 1 (2026-09-26): session-based breaks
         "on_margin_call",  # 2026-11-02: margin calls run in the engine
+        "check_causality",  # 2026-11-02: Engine.run checks precompute for look-ahead
+        "causality_sample",
     }
 
 

@@ -28,6 +28,15 @@ class BacktestConfig:
     #   next bar's open; its Trade carries margin_liquidation=True.
     # "record": the event only; the position is kept, so the breach can be studied.
     on_margin_call: str = "liquidate"
+    # Look-ahead guard: before the bar loop, Engine.run checks the strategy's precompute
+    # with lookahead.assert_causal (each bar's values must not change when the later bars
+    # are removed) and refuses a leak with a LookaheadError naming the column.
+    check_causality: bool = True
+    # The truncation grid: None (default) checks at every bar, exhaustive (about 0.2 s on
+    # each 324-bar demo sample; the cost grows with the square of the bar count, so a long
+    # history may want a sample). An int k checks k evenly spaced bars only and CAN MISS a
+    # leak that touches a few rows between them.
+    causality_sample: int | None = None
 
 
 def load_config(path: str) -> BacktestConfig:

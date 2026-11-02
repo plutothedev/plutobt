@@ -32,18 +32,37 @@ class Context:
 
 
 class Strategy:
-    """Base strategy: vectorized causal ``precompute`` + stateful ``on_bar``."""
+    """Base strategy: vectorized causal ``precompute`` + stateful ``on_bar``.
+
+    The look-ahead contract, which "no look-ahead by construction" rests on:
+
+    - ``precompute(df)`` returns ``df`` with derived columns added: one row per bar, in
+      order, base columns (ts, open, high, low, close, volume, session) unchanged. Row
+      t's values may use bars 0..t only. ``Engine.run`` enforces all of this before
+      the first bar (``check_causality``).
+    - ``on_bar(ctx)`` may use only what ``ctx`` holds: bar t's row (``ctx.bar``), the
+      position, equity and the ``ctx.state`` it wrote on earlier bars.
+    - Neither keeps the frame: ``precompute`` is STATELESS, so it never stores ``df``
+      (or anything built from it) on ``self`` for ``on_bar`` to read later. A strategy
+      that does can index past bar t, and no check can see it: the causality check
+      tests what ``precompute`` returns, not what ``on_bar`` reads.
+    """
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
         """Vectorized, CAUSAL, STATELESS indicator/signal computation.
 
-        Base implementation is identity passthrough; subclasses override.
+        Add columns to ``df`` and return it (see the class docstring for the rules).
+        The engine calls it more than once: on the full frame, then on prefixes
+        ``df[:t+1]`` for the causality check. Base implementation is identity
+        passthrough; subclasses override.
         """
         return df
 
     def on_bar(self, ctx: Context) -> None:
         """Per-bar event hook; place orders via ``ctx.broker``. No-op by default.
 
+        Decide from ``ctx`` only (bar t's row, position, equity, ``ctx.state``); never
+        from a frame kept from ``precompute``, which holds the bars after t.
         ``ctx.position`` is a read-only snapshot: stops move with
         ``ctx.broker.amend_stop(...)`` and exits go through ``ctx.broker.close()``
         (or an order), never through writes to the position.

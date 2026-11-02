@@ -9,7 +9,10 @@ PlutoBT is a single-instrument futures backtesting engine built for correctness
 and auditability. Key properties:
 
 - **Decision-at-t / fill-at-t+1**: strategy sees bar t; the market order fills at
-  bar t+1's open. No look-ahead by construction.
+  bar t+1's open. No look-ahead by construction, and checked: before the first bar,
+  `Engine.run` re-runs the strategy's `precompute` on every prefix of the data and
+  refuses any column whose value at bar t changes when the later bars are removed
+  (`check_causality`, on by default), or a precompute that rewrites the price bars.
 - **Realistic fills**: directional slippage, gap-through stops, GTC protective
   stops, limit order fill-or-carry.
 - **Performance-bond accounting**: MTM equity, initial/maintenance margin, open-at-end
