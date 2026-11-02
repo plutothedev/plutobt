@@ -5,6 +5,7 @@ import pathlib
 
 import numpy as np
 import pandas as pd
+import pytest
 from numpy.testing import assert_allclose
 
 from plutobt.metrics import (
@@ -87,9 +88,42 @@ def test_sharpe_annualizes_by_sqrt_periods_per_year():
     assert_allclose(got, expected, rtol=1e-12, atol=0)
 
 
-def test_sharpe_zero_std_returns_zero():
+def test_sharpe_zero_std_is_nan_not_zero():
+    # Was 0.0, pinned here. Zero volatility makes the Sharpe 0/0: there is no number,
+    # and 0.000 on screen read as a measured "no edge" beside "SE n/a" (review,
+    # 2026-11-02). NaN, which the report prints as "n/a (zero return volatility)".
     r = pd.Series([0.0, 0.0, 0.0, 0.0])
-    assert sharpe(r, periods_per_year=1.0) == 0.0
+    assert math.isnan(sharpe(r, periods_per_year=1.0))
+    assert math.isnan(sharpe(pd.Series([], dtype=float), periods_per_year=1.0))
+
+
+def _constant_growth_returns(rate=0.001, n=50):
+    """Bar returns of a curve compounding a constant ``rate`` per bar, via pct_change
+    as compute_metrics takes them: float noise leaves a std of about 1e-16."""
+    eq = pd.Series(100_000.0 * np.cumprod(np.r_[1.0, np.full(n, 1.0 + rate)]))
+    return eq, eq.pct_change().dropna()
+
+
+def test_a_constant_return_curve_has_zero_volatility():
+    # Review finding (2026-11-02): the check was exact std > 0, so a constant
+    # 0.1%/bar curve printed an annualized Sharpe of about 1e15 from float noise.
+    eq, r = _constant_growth_returns()
+    assert r.std(ddof=0) > 0.0                    # positive control: exact check misses
+    assert math.isnan(sharpe(r, periods_per_year=20412.0))
+    assert math.isnan(psr(r, sr0=0.0))
+    out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
+    assert math.isnan(out["sharpe"]) and math.isnan(out["sharpe_raw"])
+    assert math.isnan(out["sharpe_se"]) and all(map(math.isnan, out["sharpe_ci"]))
+    assert math.isnan(out["psr"])
+    assert out["sortino"] == math.inf             # no downside, positive mean: honest
+
+
+def test_volatility_just_above_the_tolerance_still_counts():
+    # The tolerance is relative, std <= 1e-12 * max(1, mean |r|): it only swallows
+    # float noise. A real 1e-9 wobble on a 0.1%/bar mean is volatility.
+    r = pd.Series([0.001 + 1e-9, 0.001 - 1e-9] * 25)
+    assert sharpe(r, periods_per_year=1.0) == pytest.approx(1e6, rel=1e-6)
+    assert not math.isnan(psr(r, sr0=0.0))
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +627,8 @@ def test_compute_metrics_flat_curve_has_no_defined_ratios():
     eq = pd.Series([100_000.0] * 50)
     out = compute_metrics(_result_with(eq, []), periods_per_year=20412.0)
     assert out["T"] == 49
-    for key in ("sortino", "calmar", "profit_factor", "expectancy", "win_rate", "sharpe_se"):
+    for key in ("sharpe", "sharpe_raw", "psr", "sortino", "calmar", "profit_factor",
+                "expectancy", "win_rate", "sharpe_se"):
         assert math.isnan(out[key]), key
     lo, hi = out["sharpe_ci"]
     assert math.isnan(lo) and math.isnan(hi)

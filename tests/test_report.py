@@ -260,6 +260,11 @@ def test_flat_zero_trade_report_prints_na_never_a_fake_number():
     se = _line(text, "Sharpe SE")
     assert "n/a" in se and "95% CI n/a" in se and "zero return volatility" in se
     assert "CI includes 0" not in text  # no interval, so no claim about it
+    # The Sharpe itself is 0/0 here: it used to print 0.000 next to "SE n/a".
+    assert _line(text, "Sharpe        =").split("=", 1)[1].strip() == (
+        "n/a (zero return volatility)")
+    assert _line(text, "Sharpe/bar").split("=", 1)[1].strip() == (
+        "n/a (zero return volatility)")
     assert _line(text, "Sortino").split("=", 1)[1].strip().startswith("n/a")
     assert _line(text, "Calmar").split("=", 1)[1].strip().startswith("n/a")
     assert _line(text, "Win rate").split("=", 1)[1].strip() == "n/a (no trades)"
@@ -275,3 +280,23 @@ def test_report_labels_an_infinite_sortino_or_calmar(key, expected):
     res.metrics[key] = float("inf")
     text = format_report(res, symbol="NQ")
     assert _line(text, key.capitalize()).split("=", 1)[1].strip() == expected
+
+
+def test_a_constant_return_curve_reports_zero_volatility_not_a_huge_sharpe():
+    # Review finding (2026-11-02): a constant 0.1%/bar curve has a float-noise std of
+    # about 1e-16, which the exact std > 0 check turned into a Sharpe of about 1e15.
+    import numpy as np
+
+    from plutobt.metrics import compute_metrics
+
+    eq = pd.Series(100_000.0 * np.cumprod(np.r_[1.0, np.full(50, 1.001)]),
+                   index=range(0, 51 * 300, 300))
+    res = BacktestResult(equity_curve=eq, trades=[], metrics={},
+                         manifest={"data_sha256": "deadbeef", "version": "0.1.0"})
+    res.metrics = compute_metrics(res, periods_per_year=20412.0)
+    text = format_report(res, symbol="NQ")
+    for prefix in ("Sharpe/bar", "Sharpe        =", "Sharpe SE"):
+        assert "n/a (zero return volatility)" in _line(text, prefix), prefix
+    assert _line(text, "PSR").split("=", 1)[1].strip().startswith(
+        "n/a (zero return volatility)")
+    assert "e+" not in text and "nan" not in text

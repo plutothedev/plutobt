@@ -54,8 +54,9 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     pf_nan = no_trades if n_trades == 0 else "n/a (no winning or losing trades)"
     ci_known = not (math.isnan(ci_lo) or math.isnan(ci_hi))
     ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if ci_known else "n/a"
-    # compute_metrics leaves SE/CI NaN with no returns or zero return volatility (a flat
-    # curve), and Sortino/Calmar NaN for the 0/0 of a flat curve: say why, not "nan".
+    # compute_metrics leaves the Sharpe, its SE/CI and PSR NaN with no returns or zero
+    # return volatility (a flat or constant-growth curve), and Sortino/Calmar NaN for
+    # the 0/0 of a flat curve: say why, not "nan" (and never a 0.000 Sharpe).
     no_vol = "n/a (no returns)" if t_obs == 0 else "n/a (zero return volatility)"
 
     lines = [
@@ -63,8 +64,10 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         _LABEL,
         f"Observations T = {t_obs}   (periods_per_year = {ppy})",
         f"Annualization = sqrt(periods_per_year) = sqrt({ppy:g}) = {factor:.3f}",
-        f"Sharpe/bar    = {sharpe_raw:.5f}   (raw, per bar)",
-        f"Sharpe        = {sharpe:.3f}   (annualized: Sharpe/bar x {factor:.3f})",
+        f"Sharpe/bar    = {_num(sharpe_raw, '.5f', nan=no_vol)}"
+        + ("" if math.isnan(sharpe_raw) else "   (raw, per bar)"),
+        f"Sharpe        = {_num(sharpe, '.3f', nan=no_vol)}"
+        + ("" if math.isnan(sharpe) else f"   (annualized: Sharpe/bar x {factor:.3f})"),
         f"Sharpe SE     = {_num(sharpe_se, '.3f', nan=no_vol)}   (iid, skew/kurtosis-"
         f"adjusted; no autocorrelation adjustment)   95% CI {ci_str}",
     ]
@@ -73,7 +76,8 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     if ci_known and ci_lo <= 0.0 <= ci_hi:
         lines.append("⚠ Sharpe CI includes 0: not statistically distinguishable from zero")
     lines += [
-        f"PSR           = {_num(psr, '.3f')}   (P[true Sharpe > 0], skew/kurtosis-"
+        f"PSR           = {_num(psr, '.3f', nan=no_vol if math.isnan(sharpe) else 'n/a')}"
+        "   (P[true Sharpe > 0], skew/kurtosis-"
         "adjusted, Bailey & Lopez de Prado)",
         f"Sortino       = {_num(sortino, '.3f', nan=no_vol, inf='inf (no downside)')}",
         f"Calmar        = {_num(calmar, '.3f', nan=no_vol, inf='inf (no drawdown)')}",

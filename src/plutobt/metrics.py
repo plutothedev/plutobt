@@ -36,19 +36,34 @@ MIN_TRADE_SAMPLE = 30
 NET_ZERO_TOL_USD = 1e-6
 
 
+# Zero return volatility, for every ratio over the std: a std at or below
+# VOL_REL_TOL * max(1, mean |r|) is float noise, not volatility. A curve compounding a
+# constant 0.1% a bar leaves a std of about 1e-16 after pct_change, which an exact
+# std > 0 check divided by into an annualized Sharpe of about 1e15.
+VOL_REL_TOL = 1e-12
+
+
+def has_volatility(returns) -> bool:
+    """True when ``returns`` has a spread a ratio can divide by: at least one return
+    and a population std above ``VOL_REL_TOL * max(1, mean |r|)``."""
+    r = np.asarray(returns, dtype=float)
+    if r.size == 0:
+        return False
+    return float(r.std(ddof=0)) > VOL_REL_TOL * max(1.0, float(np.abs(r).mean()))
+
+
 def sharpe(returns: pd.Series, periods_per_year: float) -> float:
     """Annualized Sharpe from per-bar returns (risk-free already removed upstream).
 
     Uses population std (ddof=0). Annualization factor = sqrt(periods_per_year),
-    which is printed by ``compute_metrics``. Returns 0.0 when std is 0.
+    which is printed by ``compute_metrics``. NaN with no returns or zero return
+    volatility (``has_volatility``): 0/0 has no number, and 0.0 would read as a
+    measured "no edge".
     """
     r = np.asarray(returns, dtype=float)
-    if r.size == 0:
-        return 0.0
-    std = r.std(ddof=0)
-    if std == 0.0:
-        return 0.0
-    sr_bar = r.mean() / std
+    if not has_volatility(r):
+        return float("nan")
+    sr_bar = r.mean() / r.std(ddof=0)
     return float(sr_bar * math.sqrt(periods_per_year))
 
 
@@ -100,7 +115,8 @@ def psr(
 
     Conventions (stated per §9 item 10): per-bar (non-annualized) SR_hat;
     sqrt(n-1) scaling; non-excess (Pearson) kurtosis g4; population (biased)
-    skew g3 and kurtosis g4. Returns NaN when std is 0.
+    skew g3 and kurtosis g4. Returns NaN with zero return volatility
+    (``has_volatility``) or fewer than 2 returns.
 
     ``skew`` / ``kurtosis`` override the sample g3 / g4 (testing hook for the
     variance-adjustment guard; the kurtosis-skew inequality makes a non-positive
@@ -110,10 +126,9 @@ def psr(
     """
     r = np.asarray(returns, dtype=float)
     n = r.size
-    std = r.std(ddof=0)
-    if std == 0.0 or n < 2:
+    if n < 2 or not has_volatility(r):
         return float("nan")
-    sr_hat = r.mean() / std
+    sr_hat = r.mean() / r.std(ddof=0)
     g3, g4 = _skew_kurtosis(r)                  # population skew, Pearson kurtosis
     g3 = g3 if skew is None else skew
     g4 = g4 if kurtosis is None else kurtosis
@@ -400,11 +415,11 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # not adjusted for (Lo's eta(q) is not applied). The raw-unit statistics stay
     # available through the pinned pure functions and sharpe_raw.
     scale = math.sqrt(periods_per_year)
-    # Zero return volatility: the Sharpe is 0/0 (sharpe() reports it as 0.0), and Lo's
-    # SE at sr = 0 is a fixed sqrt(1/T) that would print a fake interval around it
+    # Zero return volatility (has_volatility): the Sharpe is 0/0 (NaN), and the SE at
+    # sr = 0 is a fixed sqrt(1/T) that would print a fake interval around it
     # ([-15.58, 15.58] at T = 323, ppy = 20412). NaN, like the T = 0 case.
     r_arr = np.asarray(returns, dtype=float)
-    has_vol = t_count > 0 and float(r_arr.std(ddof=0)) > 0.0
+    has_vol = has_volatility(r_arr)
     if has_vol:
         g3, g4 = _skew_kurtosis(r_arr)
         se = sharpe_se(sr_raw, t_count, skew=g3, kurtosis=g4) * scale
