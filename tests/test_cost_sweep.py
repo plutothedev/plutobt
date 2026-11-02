@@ -54,7 +54,8 @@ def test_the_one_tick_row_is_the_nq_demo_run(table):
     assert table.loc[1.0, "sharpe"] == res.metrics["sharpe"]
 
 
-def test_the_printed_table_says_what_it_is():
+def test_the_printed_table_says_what_it_is(table, monkeypatch):
+    monkeypatch.setattr(demo, "run", lambda: table)     # print the swept table, once
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         demo.main()
