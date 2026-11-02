@@ -144,6 +144,41 @@ def test_class_state_is_not_checked_with_the_check_off():
     assert cls.mu is not None
 
 
+def test_a_write_to_the_strategy_base_class_is_refused_and_removed():
+    # Strategy itself is shared by every copy too: it used to be left out of the scan.
+    class OnBase(Strategy):
+        def precompute(self, d):
+            Strategy.cache = float(d.close.mean())
+            return d.assign(x=d.close - Strategy.cache)
+
+    try:
+        with pytest.raises(LookaheadError, match=r"class attribute Strategy\.cache"):
+            _eng().run(_bars(), OnBase())
+        assert "cache" not in vars(Strategy)
+    finally:
+        if "cache" in vars(Strategy):
+            del Strategy.cache
+
+
+SHARED = [1, 2]
+
+
+def test_a_shared_list_edited_in_place_is_restored_in_place():
+    # The class attribute is an alias of a module list: restoring it by assignment
+    # would leave the module's list grown. A list, dict or set is put back in place.
+    class Hist(Strategy):
+        hist = SHARED
+
+        def precompute(self, d):
+            self.hist.append(len(d))
+            return d.assign(x=d.close.diff())
+
+    with pytest.raises(LookaheadError, match=r"class attribute Hist\.hist"):
+        _eng().run(_bars(), Hist())
+    assert Hist.hist is SHARED
+    assert SHARED == [1, 2]
+
+
 # ---------------------------------------------------------------------------
 # 6. Instance attributes precompute sets: warned, naming each, at the run call.
 # ---------------------------------------------------------------------------

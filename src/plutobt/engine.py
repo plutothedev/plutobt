@@ -188,15 +188,34 @@ def _set_since(before: dict, after: dict) -> list:
 
 
 def _class_state(strategy: Strategy) -> list:
-    """The attributes of each class the strategy is built from (its MRO but Strategy
-    and object): shared by every copy the look-ahead check runs, so none may change."""
+    """The attributes of each class the strategy is built from (its MRO, Strategy
+    included, but object): shared by every copy the look-ahead check runs, so none may
+    change."""
     return [(cls, _state(vars(cls))) for cls in type(strategy).__mro__
-            if cls not in (Strategy, object)]
+            if cls is not object]
+
+
+def _restore_in_place(value, old) -> bool:
+    """Put ``old``'s contents back into ``value`` itself when its type allows (a list,
+    dict or set, exactly), so every alias of it sees the restore. False otherwise."""
+    if type(value) is not type(old) or type(value) not in (list, dict, set):
+        return False
+    if isinstance(value, list):
+        value[:] = old
+    else:
+        value.clear()
+        value.update(old)
+    return True
 
 
 def _refuse_class_changes(saved: list) -> None:
     """Refuse a precompute that changed a class attribute since ``saved`` (set, added,
-    removed or edited in place), after putting every one back as it was."""
+    removed or edited in place), after putting every one back as it was.
+
+    The restore is best-effort for an object edited in place: a list, dict or set gets
+    its old contents back in place (so aliases of it are restored too); any other
+    object is replaced by a copy rebuilt from its pickle, which leaves other references
+    to it holding the edit. The run is refused either way."""
     changed = []
     for cls, before in saved:
         after = _state(vars(cls))
@@ -207,7 +226,10 @@ def _refuse_class_changes(saved: list) -> None:
                 continue
             value, raw = before[name]
             if name in after and after[name][0] is value and raw is not None:
-                value = pickle.loads(raw)      # edited in place: its old contents
+                old = pickle.loads(raw)        # edited in place: its old contents
+                if _restore_in_place(value, old):
+                    continue
+                value = old
             setattr(cls, name, value)
     if changed:
         raise LookaheadError(
@@ -215,8 +237,11 @@ def _refuse_class_changes(saved: list) -> None:
             "A class attribute is shared by every copy the look-ahead check runs, so a "
             "value fitted on the full frame (the first call) would reach every prefix "
             "and pass unseen. Keep fitted state on self (each call gets its own copy) "
-            "or compute it as a column. Restored to its value before the run. Module-"
-            "level globals are out of the check's reach: keep them out of precompute")
+            "or compute it as a column. Restored to its value before the run (best-effort "
+            "for an object edited in place: a list, dict or set is restored in place; "
+            "other objects are replaced, and other references to them keep the edit). "
+            "Module-level globals are out of the check's reach: keep them out of "
+            "precompute")
 
 
 def _warn_set_attributes(before: dict, strategy: Strategy) -> None:
