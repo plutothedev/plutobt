@@ -1120,3 +1120,23 @@ def test_stop_set_while_flat_is_dropped_when_nothing_fills():  # positive contro
     broker.amend_stop(14_900.0)
     assert broker.fill_pending(Bar(1, 15_000.0, 15_010.0, 14_850.0, 14_950.0)) == []
     assert broker.resting_stop is None
+
+
+# ---------------------------------------------------------------------------
+# The margin boundary is exact to the cent: float noise in the slippage cost (an
+# open + 2 ticks that is not exactly representable) never refuses an account holding
+# exactly initial margin + slippage + commission.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("symbol, open_px", [("CL", 60.0), ("GC", 2000.3)])
+def test_margin_boundary_is_exact_to_the_cent(symbol, open_px):
+    inst = get_instrument(symbol)
+    slip_cost = inst.slippage_ticks * inst.tick_value          # 2 ticks x $10 = $20
+    exact = inst.initial_margin + slip_cost + 2.5
+    for cash, status in ((exact, "filled"), (exact - 0.01, "rejected")):
+        cfg = BacktestConfig(slippage_ticks=None, commission_per_side=2.5)
+        pf = Portfolio(starting_cash=cash, instrument=inst)
+        broker = Broker(inst, cfg, pf)
+        order = broker.buy(contracts=1)
+        broker.fill_pending(_flat_bar(1, open_px))
+        assert order.status == status, (symbol, cash)

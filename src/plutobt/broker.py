@@ -328,7 +328,11 @@ class Broker:
             resulting = opening if reducing else held + opening
             after = self.portfolio.equity_after_fill(
                 order.side, order.contracts, price, self._commission(order.contracts), mark)
-            if after < self.instrument.initial_margin * resulting:
+            # Compared in cents: an open plus slippage that is not exactly representable
+            # (GC 2000.3 + 0.2) would otherwise leave an exact-boundary account a
+            # femto-dollar short and refuse it.
+            required = self.instrument.initial_margin * resulting
+            if round(after, 2) < round(required, 2):
                 if not reducing:
                     return self._reject(order)
                 # A flip whose new side fails margin keeps only its closing
