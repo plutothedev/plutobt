@@ -19,6 +19,39 @@ def _num(x: float, spec: str, *, nan: str = "n/a", inf: str | None = None) -> st
     return format(x, spec)
 
 
+def _fixed_sig(x: float, sig: int) -> str:
+    """``x`` in fixed point with ``sig`` significant digits, trailing zeros kept
+    (0.0125479, never 1.25479e-02: it is read off the screen)."""
+    if x == 0.0:
+        return format(x, f".{sig - 1}f")
+    return format(x, f".{max(0, sig - 1 - math.floor(math.log10(abs(x))))}f")
+
+
+def _sharpe_texts(sharpe_raw: float, factor: float, sharpe: float) -> tuple[str, str]:
+    """The per-bar Sharpe and the annualization factor as printed, with digits enough
+    (at least 6 significant, and 3 decimals of the factor) that the printed per-bar
+    times the printed factor rounds to the printed Sharpe (3 decimals): a viewer can
+    redo the multiplication from the screen. sharpe is sharpe_raw x factor, so a few
+    more digits always get there."""
+    want = format(sharpe, ".3f")
+    for extra in range(10):
+        bar = _fixed_sig(sharpe_raw, 6 + extra)
+        fac = format(factor, f".{3 + extra}f")
+        if format(float(bar) * float(fac), ".3f") == want:
+            break
+    return bar, fac
+
+
+def _signed(x: float) -> str:
+    """A CI bound with its sign and digits enough not to round to zero: 0.0004 prints
+    +0.0004, never 0.000, so a bound that looks like zero always shows its side."""
+    for decimals in range(3, 10):
+        text = f"{x:+.{decimals}f}"
+        if x == 0.0 or float(text) != 0.0:
+            return text
+    return f"{x:+.3e}"
+
+
 def format_report(result: BacktestResult, symbol: str) -> str:
     m = result.metrics
     man = result.manifest
@@ -50,10 +83,20 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     # The annualization factor: sharpe = sharpe_raw * sqrt(periods_per_year), and the SE
     # and CI carry the same factor (compute_metrics), so print it rather than hide it.
     factor = math.sqrt(ppy)
+    if math.isnan(sharpe_raw) or math.isnan(sharpe):
+        bar_str, factor_str = "", f"{factor:.3f}"
+    else:
+        bar_str, factor_str = _sharpe_texts(sharpe_raw, factor, sharpe)
     no_trades = "n/a (no trades)"
-    pf_nan = no_trades if n_trades == 0 else "n/a (no winning or losing trades)"
+    no_wins_or_losses = "n/a (no winning or losing trades)"
+    pf_nan = no_trades if n_trades == 0 else no_wins_or_losses
+    # Every closed trade a scratch: no winner and no loser, so profit factor is 0/0 and
+    # a 0.000 win rate would read as "lost them all".
+    all_scratch = n_trades > 0 and math.isnan(pf)
+    win_rate_str = (no_wins_or_losses if all_scratch
+                    else _num(win_rate, ".3f", nan=no_trades))
     ci_known = not (math.isnan(ci_lo) or math.isnan(ci_hi))
-    ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if ci_known else "n/a"
+    ci_str = f"[{_signed(ci_lo)}, {_signed(ci_hi)}]" if ci_known else "n/a"
     # compute_metrics leaves the Sharpe, its SE/CI and PSR NaN with no returns or zero
     # return volatility (a flat or constant-growth curve), and Sortino/Calmar NaN for
     # the 0/0 of a flat curve: say why, not "nan" (and never a 0.000 Sharpe).
@@ -63,16 +106,17 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"=== PlutoBT report: {symbol} ===",
         _LABEL,
         f"Observations T = {t_obs}   (periods_per_year = {ppy})",
-        f"Annualization = sqrt(periods_per_year) = sqrt({ppy:g}) = {factor:.3f}",
-        f"Sharpe/bar    = {_num(sharpe_raw, '.5f', nan=no_vol)}"
-        + ("" if math.isnan(sharpe_raw) else "   (raw, per bar)"),
-        f"Sharpe        = {_num(sharpe, '.3f', nan=no_vol)}"
-        + ("" if math.isnan(sharpe) else f"   (annualized: Sharpe/bar x {factor:.3f})"),
+        f"Annualization = sqrt(periods_per_year) = sqrt({ppy:g}) = {factor_str}",
+        f"Sharpe/bar    = {bar_str}   (raw, per bar)" if bar_str
+        else f"Sharpe/bar    = {no_vol}",
+        f"Sharpe        = {sharpe:.3f}   (annualized: Sharpe/bar x {factor_str})"
+        if bar_str else f"Sharpe        = {no_vol}",
         f"Sharpe SE     = {_num(sharpe_se, '.3f', nan=no_vol)}   (iid, skew/kurtosis-"
         f"adjusted; no autocorrelation adjustment)   95% CI {ci_str}",
     ]
     # Segment 8: an interval that straddles zero means the Sharpe cannot be told apart
-    # from no edge at all. Say so on its own line, next to the interval.
+    # from no edge at all. Say so on its own line, next to the interval. Decided on the
+    # unrounded bounds; _signed prints them so the screen never contradicts it.
     if ci_known and ci_lo <= 0.0 <= ci_hi:
         lines.append("⚠ Sharpe CI includes 0: not statistically distinguishable from zero")
     lines += [
@@ -83,7 +127,7 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"Calmar        = {_num(calmar, '.3f', nan=no_vol, inf='inf (no drawdown)')}",
         f"Profit factor = {_num(pf, '.3f', nan=pf_nan, inf='inf (no losing trades)')}",
         f"Expectancy    = {_num(expectancy, '.3f', nan=no_trades)}",
-        f"Win rate      = {_num(win_rate, '.3f', nan=no_trades)}",
+        f"Win rate      = {win_rate_str}",
         f"Avg R         = {avg_r_str}",
         f"Max DD depth  = {dd_depth:.6f}",
         f"Max DD duration = {dd_dur} bars",

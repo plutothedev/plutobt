@@ -172,8 +172,48 @@ def test_report_prints_the_annualization_factor_and_the_raw_sharpe():
     text = format_report(_fake_result(), symbol="NQ")
     ann = _line(text, "Annualization")
     assert "sqrt(20412)" in ann and "142.871" in ann
-    assert "0.00864" in _line(text, "Sharpe/bar")
+    assert "0.00863719" in _line(text, "Sharpe/bar")      # 6 significant digits
     assert "142.871" in _line(text, "Sharpe        =")
+
+
+def _printed_sharpe_parts(text):
+    """(per-bar, factor, annualized) as printed: the three numbers a viewer multiplies."""
+    bar = _line(text, "Sharpe/bar").split("=", 1)[1].split()[0]
+    factor = _line(text, "Annualization").rsplit("=", 1)[1].split()[0]
+    ann_line = _line(text, "Sharpe        =")
+    ann = ann_line.split("=", 1)[1].split()[0]
+    assert f"Sharpe/bar x {factor})" in ann_line          # the same factor, both lines
+    return bar, factor, ann
+
+
+def _check_the_arithmetic(text):
+    bar, factor, ann = _printed_sharpe_parts(text)
+    # per-bar x factor, from the PRINTED digits, is the printed Sharpe to its last digit
+    assert format(float(bar) * float(factor), ".3f") == ann, (bar, factor, ann)
+    digits = bar.replace("-", "").replace(".", "").lstrip("0")
+    assert len(digits) >= 6, bar                          # at least 6 significant
+
+
+@pytest.mark.parametrize("sharpe", [1.234, 1.7927259306154941, -0.0678878045, 77.03,
+                                    0.0004999, -12.3456789, 1e-7, 250.0])
+def test_printed_per_bar_sharpe_times_printed_factor_is_the_printed_sharpe(sharpe):
+    # Review finding (2026-11-02): Sharpe/bar printed to 5 decimals (0.01255) times
+    # 142.871 is 1.793..., which need not round to the printed Sharpe. The on-screen
+    # arithmetic must check out to the last printed digit.
+    res = _fake_result()
+    res.metrics["sharpe"] = sharpe
+    res.metrics["sharpe_raw"] = sharpe / 20412.0 ** 0.5
+    _check_the_arithmetic(format_report(res, symbol="NQ"))
+
+
+@pytest.mark.parametrize("sym", ["NQ", "ES", "CL"])
+def test_the_demo_reports_arithmetic_checks_out(sym):
+    from examples.run_demo import run_symbol
+
+    low = sym.lower()
+    res = run_symbol(sym, data_path=f"data/sample/{low}_5m.json",
+                     config_path=f"configs/{low}.toml")
+    _check_the_arithmetic(format_report(res, symbol=sym))
 
 
 def test_report_prints_sharpe_se_and_psr():
@@ -182,11 +222,30 @@ def test_report_prints_sharpe_se_and_psr():
     # normal-only formula, beside a PSR that adjusts for skew and kurtosis).
     text = format_report(_fake_result(), symbol="NQ")
     se = _line(text, "Sharpe SE")
-    assert "0.579" in se and "[0.100, 2.370]" in se
+    assert "0.579" in se and "[+0.100, +2.370]" in se
     assert "(iid, skew/kurtosis-adjusted; no autocorrelation adjustment)" in se
     assert "Lo 2002" not in se
     psr_line = _line(text, "PSR")
     assert "0.987" in psr_line and "skew/kurtosis-adjusted" in psr_line
+
+
+@pytest.mark.parametrize("lo,shown,flagged", [
+    (0.0004, "+0.0004", False),      # used to print as 0.000 with no flag
+    (-0.0004, "-0.0004", True),      # used to print as -0.000
+    (0.0, "+0.000", True),           # exactly 0 is included
+    (-3e-12, "-3.000e-12", True),
+    (0.1, "+0.100", False),
+])
+def test_the_ci_never_shows_a_rounded_zero_without_saying_which_side(lo, shown, flagged):
+    # Review finding (2026-11-02): the flag compared unrounded values but the CI printed
+    # to 3 decimals, so [0.000, ...] could appear with no flag. The bound now prints
+    # signed, with digits enough to show it is not zero.
+    flag = "Sharpe CI includes 0"
+    res = _fake_result()
+    res.metrics["sharpe_ci"] = (lo, 2.37)
+    text = format_report(res, symbol="NQ")
+    assert f"95% CI [{shown}, +2.370]" in _line(text, "Sharpe SE")
+    assert (flag in text) is flagged
 
 
 def test_report_flags_loudly_when_the_sharpe_ci_includes_zero():
@@ -238,7 +297,9 @@ def test_real_demo_report_shows_factor_se_and_the_zero_flag():
     assert "Sharpe CI includes 0" in text
     assert f"{m['sharpe_se']:.3f}" in _line(text, "Sharpe SE")
     assert f"{m['psr']:.3f}" in _line(text, "PSR")
-    assert f"{m['sharpe_raw']:.5f}" in _line(text, "Sharpe/bar")
+    bar, _, ann = _printed_sharpe_parts(text)
+    assert float(bar) == pytest.approx(m["sharpe_raw"], rel=1e-5)
+    assert ann == f"{m['sharpe']:.3f}"
 
 
 def _flat_result():
@@ -300,3 +361,16 @@ def test_a_constant_return_curve_reports_zero_volatility_not_a_huge_sharpe():
     assert _line(text, "PSR").split("=", 1)[1].strip().startswith(
         "n/a (zero return volatility)")
     assert "e+" not in text and "nan" not in text
+
+
+def test_an_all_scratch_run_has_no_win_rate():
+    # Review finding (2026-11-02): every closed trade a scratch (neither won nor lost)
+    # printed "Win rate = 0.000", as if every trade had lost.
+    res = _fake_result()
+    res.metrics.update(win_rate=0.0, profit_factor=float("nan"), n_trades=3)
+    text = format_report(res, symbol="NQ")
+    assert _line(text, "Win rate").split("=", 1)[1].strip() == (
+        "n/a (no winning or losing trades)")
+    # A real 0% (losers, no winners) still prints its number.
+    res.metrics.update(profit_factor=0.0)
+    assert _line(format_report(res, symbol="NQ"), "Win rate").endswith("= 0.000")
