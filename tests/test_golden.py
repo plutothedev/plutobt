@@ -189,3 +189,18 @@ def test_in_sample_label_is_stable_string():
         "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
     )
     assert label == expected
+
+
+def test_data_sha256_is_the_same_on_every_os(monkeypatch):
+    # pandas ends CSV lines with os.linesep unless told otherwise, so a Windows run
+    # hashed the same bars to a different value than Linux (CI failed on Linux only).
+    import os
+
+    df = load_bars(str(SAMPLE))
+    eng = Engine(get_instrument("NQ"), BacktestConfig())
+    shas = []
+    for sep in ("\n", "\r\n"):
+        monkeypatch.setattr(os, "linesep", sep)
+        shas.append(eng._build_manifest(df)["data_sha256"])
+    assert shas[0] == shas[1]
+    assert shas[0].startswith("123af852")   # the hash Linux CI computed for nq_5m.json

@@ -61,9 +61,9 @@ _STARTING_CASH = 100_000.0
 # shipped sample file, recognized by its data_sha256 (load_bars of data/sample/*).
 _ROLL_AS_OF_DEFAULT = "2026-11-02"   # the date the samples were regenerated
 _SAMPLE_SHA256 = {
-    "6b6e0227d4c6cd6de39a3cd71f7c062a859001d6668e168e939f51019dc8d3b1": "nq_5m.json",
-    "47b1add21432e3980ca2bcd40d32695aed6494a603a17f067218b4befa409b15": "es_5m.json",
-    "187a2f7097b399d966ad5c653fb1abba91074de43d0d778e0a4f392c3fcc42f1": "cl_5m.json",
+    "123af852f8fb1364e02b5761d048a397adb5b87a53301567c85410b139fc8ca7": "nq_5m.json",
+    "24f31941d385678f0a4f8acd12e16b602b777263ea726222f1a948a6b8716daf": "es_5m.json",
+    "fb019e9fd374e5c12e0ff173627fa21a2fb83831a8ecd05eec7e8cdce9e887c7": "cl_5m.json",
 }
 _ROLL_UNKNOWN = "unknown/user-supplied"
 
@@ -689,7 +689,9 @@ class Engine:
         ``periods_per_year`` lives ONLY inside ``manifest["config"]`` (single
         source = config); consumers read it from there, never a top-level dup.
         """
-        raw = df.to_csv(index=False).encode("utf-8")
+        # lineterminator pinned: pandas defaults to os.linesep, so the same bars
+        # hashed differently on Windows and Linux.
+        raw = df.to_csv(index=False, lineterminator="\n").encode("utf-8")
         sha = hashlib.sha256(raw).hexdigest()
         if sha in _SAMPLE_SHA256:
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry

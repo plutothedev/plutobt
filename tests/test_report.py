@@ -502,7 +502,7 @@ def test_the_hash_line_says_what_it_hashes():
 
 
 def test_the_documented_hash_recipe_reproduces_the_manifest():
-    # ONBOARDING's one-liner: sha256 of load_bars(path).to_csv(index=False).
+    # ONBOARDING's one-liner: sha256 of load_bars(path).to_csv(index=False, lineterminator="\n").
     import hashlib
 
     from examples.run_demo import run_symbol
@@ -511,5 +511,6 @@ def test_the_documented_hash_recipe_reproduces_the_manifest():
 
     path = "data/sample/nq_5m.json"
     res = run_symbol("NQ", data_path=path, config_path="configs/nq.toml")
-    recipe = hashlib.sha256(load_bars(path).to_csv(index=False).encode()).hexdigest()
+    recipe = hashlib.sha256(
+        load_bars(path).to_csv(index=False, lineterminator="\n").encode()).hexdigest()
     assert recipe == res.manifest["data_sha256"]
