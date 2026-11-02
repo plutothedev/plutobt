@@ -1,7 +1,8 @@
 # PlutoBT
 
 Hybrid futures backtesting engine in Python. Vectorized signals + event-driven
-execution, realistic futures fills/margin, verified CME contract specs. MIT.
+execution, realistic futures fills/margin, CME contract specs with representative
+margins. MIT.
 
 ## What it is
 
@@ -24,8 +25,10 @@ and auditability. Key properties:
   marking — the way futures actually work.
 - **Van Tharp R-multiples**: attach a stop on entry and every trade's r_multiple
   and the portfolio avg_r populate automatically.
-- **Verified contract specs**: NQ, ES, CL, GC, ZN, YM, RTY, MNQ, MES — all
-  point values, tick sizes, and margins from CME Group publications.
+- **Contract specs**: NQ, ES, CL, GC, ZN, YM, RTY, MNQ, MES point values and tick
+  sizes per the CME contract specs. Margins are representative defaults (as of
+  2026-06-07), not live exchange or broker margins: they vary by broker,
+  volatility and date, so check yours before relying on a margin call.
 
 ## Look-ahead check
 
@@ -54,7 +57,7 @@ checks it before the first bar (`check_causality`, on by default):
   (`causality_sample = "auto"`) checks 250 evenly spaced prefixes plus the first and
   last 20 and warns at your `Engine.run` line how many it checked; `None` checks all
   (the cost grows with the square of the bar count).
-- **Proof, not a reviewer's word.** `tests/test_lookahead_property.py` sweeps seeded
+- **A randomized property sweep, not a reviewer's word.** `tests/test_lookahead_property.py` sweeps seeded
   synthetic bars from 1e-3 to 1e5 in price and 50 to 400 bars long: every honest
   feature (rolling, EWM and expanding statistics, returns, RSI, session sums, an
   expanding z-score, skew and kurtosis of returns, a seeded RNG) must pass, and every
@@ -139,7 +142,7 @@ are freely redistributable. They are NOT real market data and are NOT predictive
 The bars sit on each instrument's real regular-trading-hours session from the
 registry (America/Chicago clock), 5 minutes apart, over the 20 trading days
 2026-03-02 to 2026-03-27: no bars outside RTH, an overnight gap between sessions,
-four weekends, and the US DST change on 2026-03-08 (the CT open stays put, the UTC
+three weekends, and the US DST change on 2026-03-08 (the CT open stays put, the UTC
 open moves an hour). Each file is under 2,000 bars, so the default look-ahead check
 runs every prefix.
 
@@ -156,4 +159,9 @@ See `data/sample/NOTICE.md` for the full data license.
 
 ## Contract specs
 
-Verified against CME Group (NQ, ES, CL, GC, ZN, etc.). See `docs/superpowers/specs/`.
+Point values and tick sizes follow the CME contract specs (NQ, ES, CL, GC, ZN,
+etc.; `src/plutobt/instruments.py`). Initial and maintenance margins are
+representative defaults as of 2026-06-07, not live values: check your broker's
+before relying on margin behaviour. Contracts never roll: each run is one
+continuous series as given (the samples are a single synthetic expiry), and the
+manifest says so (`adjustment_method`).
