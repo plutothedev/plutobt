@@ -13,9 +13,13 @@ and auditability. Key properties:
   bar t+1's open. No look-ahead by construction, and checked before the first bar
   (see [Look-ahead check](#look-ahead-check)).
 - **Realistic fills**: directional slippage, gap-through stops, GTC protective
-  stops, limit order fill-or-carry. Inside a bar the price walks a conservative
-  path: the open, then the held position's adverse extreme (a long's low, a short's
-  high), then the other; stops and resting limits fill in the order it crosses them.
+  stops, limit order fill-or-carry. Inside a bar the engine runs worst
+  case: it tries both monotone paths (open, low, high and open, high, low), each with
+  both orders for a stop and a limit at the same price, and books the one that leaves
+  the lowest equity at the bar's close (the worst-case mode of Löw, Maier-Paape and
+  Platen 2015, arXiv:1509.08248). Stops and resting limits fill in the order that path
+  crosses them. Real intrabar paths can wiggle more than this, so it is a conservative
+  convention, not a guarantee against every path.
   A limit already through the market at the open fills there like a market order,
   slippage included (capped by its limit).
 - **Session breaks**: with `carry_overnight = false` (the default), entries never

@@ -6,6 +6,9 @@ its limit); a stop the open is already beyond fills at the open before them. The
 path: from the open to the held position's adverse extreme (a long's low, a short's
 high), then to the other extreme. Each resting order (a limit, the held stop, a stop
 armed by a fill on the way) triggers where the path first crosses its price.
+That is the DEFAULT ordering; where the bar allows a worse one (the other extreme
+first, or the limit first at an equal price) the engine books that instead: see
+test_worst_case_path.py.
 """
 from collections import namedtuple
 

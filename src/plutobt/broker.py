@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import numbers
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from plutobt.config import BacktestConfig
 from plutobt.instruments import Instrument, ticks_to_price
@@ -389,25 +390,65 @@ class Broker:
             return cur
         return level if end >= level else None
 
-    def _next_on_leg(self, cur: float, end: float,
-                     order: Order | None) -> tuple[float, str] | None:
+    def _next_on_leg(self, cur: float, end: float, order: Order | None,
+                     stop_first: bool = True) -> tuple[float, str] | None:
         """The first resting order the move from ``cur`` to ``end`` triggers, as (the
         price it triggers at, "stop" or "limit"); None if neither. At the same price
-        the stop goes first (adverse first)."""
+        ``stop_first`` picks which goes first."""
         hits = []
         side = self._position_side()
         if self.resting_stop is not None and side is not None:
             at = self._touch(cur, end, self.resting_stop, falling=side == "long")
             if at is not None:
-                hits.append((abs(at - cur), 0, at, "stop"))
+                hits.append((abs(at - cur), 0 if stop_first else 1, at, "stop"))
         if order is not None:
             at = self._touch(cur, end, order.price, falling=order.side == "buy")
             if at is not None:
-                hits.append((abs(at - cur), 1, at, "limit"))
+                hits.append((abs(at - cur), 1 if stop_first else 0, at, "limit"))
         if not hits:
             return None
         _, _, at, what = min(hits)
         return at, what
+
+    def _walk(self, ts, order: Order | None, open_px: float, low: float, high: float,
+              down_first: bool, stop_first: bool) -> list[Fill]:
+        """One monotone intrabar ordering: open -> one extreme -> the other, each
+        resting order triggering where the path first crosses its price."""
+        fills: list[Fill] = []
+        legs = [(open_px, low), (low, high)] if down_first else [(open_px, high), (high, low)]
+        for cur, end in legs:
+            while (hit := self._next_on_leg(cur, end, order, stop_first)) is not None:
+                cur, what = hit
+                if what == "stop":
+                    stopped = self._fire_stop(ts, cur)
+                    fills.append(stopped)
+                    order = self._after_stop(order, stopped)
+                else:
+                    fill = self._execute(order, ts, cur, cur)
+                    fills.extend([fill] if fill is not None else [])
+                    order = None
+        if self.portfolio.position.qty == 0:
+            self.resting_stop = None      # no orphan stop on a flat position
+        return fills
+
+    def _intrabar_candidates(self, default_down_first: bool) -> list[tuple[bool, bool]]:
+        """The orderings a bar allows, as (down_first, stop_first), the default first:
+        both monotone paths, each with both tie orders at an equal trigger price."""
+        d = default_down_first
+        return [(d, True), (not d, True), (d, False), (not d, False)]
+
+    def _shadow(self, order: Order | None) -> tuple[Broker, Order | None]:
+        """A throwaway copy of this broker, its portfolio and the pending order, to try
+        an ordering on without touching the real book. Trades are not copied: closing
+        only appends to them, and equity reads cash and the position."""
+        pf = copy.copy(self.portfolio)
+        pf.position = replace(self.portfolio.position)
+        pf.trades = []
+        shadow = copy.copy(self)
+        shadow.portfolio = pf
+        twin = None if order is None else replace(order)
+        shadow.pending = twin
+        return shadow, twin
 
     def fill_pending(self, next_bar) -> list[Fill]:
         """Fill against one bar: the pending order and the resting stop, walked along
@@ -421,17 +462,28 @@ class Broker:
            by its limit (a buy at min(limit, open + slip), a sell at
            max(limit, open - slip)). So a limit through the market is no free market
            order.
-        2. The path. From the open the price travels to the adverse extreme for the
-           position held after the open (down to the low for a long, up to the high
-           for a short), then to the other extreme. Flat, the first leg runs toward the
-           pending limit (down for a buy limit, up for a sell limit), which is also the
-           adverse direction for the position that limit would open. Along each leg
-           every resting order triggers in the order the path crosses its price: a
-           resting LIMIT fills at its price with no slippage (it waits in the book and
-           the market comes to it; one the open already trades through is marketable,
-           above), the held STOP fills at its price less slippage against the exit. A
-           stop and a limit at the same price: the stop first (adverse first). No
-           order can trigger twice: a fill consumes the order, a stop fills once.
+        2. The path: worst case. A bar's OHLC does not say whether the high or the low
+           came first, nor which of two orders at the same price traded first. So the
+           rest of the bar runs on the worst of the two monotone intrabar paths
+           (open -> low -> high and open -> high -> low), each with both tie orders (stop
+           before limit, limit before stop), judged by account equity marked at the
+           bar's close: every candidate runs on a copy of the book, and the one with the
+           lowest close equity is committed. This is the worst-case mode of Löw,
+           Maier-Paape and Platen, "Correctness of Backtest Engines" (2015,
+           arXiv:1509.08248). Real intrabar paths can wiggle more than this, so it is a
+           conservative convention, not a guarantee against every path. On a tie the
+           default ordering stands: the adverse extreme for the position held after the
+           open first (down to the low for a long, up to the high for a short); flat,
+           toward the pending limit (down for a buy limit, up for a sell limit), the
+           adverse direction for the position it would open; and at the same price the
+           stop first. Only a pending limit the bar's range reaches can make the
+           ordering matter, so every other bar walks the default once.
+           Along a path every resting order triggers in the order the path crosses its
+           price: a resting LIMIT fills at its price with no slippage (it waits in the
+           book and the market comes to it; one the open already trades through is
+           marketable, above), the held STOP fills at its price less slippage against
+           the exit. No order can trigger twice: a fill consumes the order, a stop
+           fills once.
 
         A fill can arm a stop on the way: an order's attached stop (or one set with
         amend_stop while flat) is live from that fill (from the open for an order
@@ -466,23 +518,26 @@ class Broker:
             fill = self._execute(order, ts, self._open_fill_price(order, open_px), open_px)
             fills.extend([fill] if fill is not None else [])
             order = None
-        # 2. The path: open -> the adverse extreme -> the other extreme.
+        # 2. The path. Only a pending limit the bar's range can reach makes the ordering
+        # matter: without one, the held stop is the only order left and fills at the
+        # same price on either path.
+        low, high = float(next_bar.low), float(next_bar.high)
         side = self._position_side()
         down_first = (side == "long") if side is not None else (
             order is None or order.side == "buy")
-        low, high = float(next_bar.low), float(next_bar.high)
-        legs = [(open_px, low), (low, high)] if down_first else [(open_px, high), (high, low)]
-        for cur, end in legs:
-            while (hit := self._next_on_leg(cur, end, order)) is not None:
-                cur, what = hit
-                if what == "stop":
-                    stopped = self._fire_stop(ts, cur)
-                    fills.append(stopped)
-                    order = self._after_stop(order, stopped)
-                else:
-                    fill = self._execute(order, ts, cur, cur)
-                    fills.extend([fill] if fill is not None else [])
-                    order = None
-        if self.portfolio.position.qty == 0:
-            self.resting_stop = None      # no orphan stop on a flat position
+        candidates = self._intrabar_candidates(down_first)
+        if order is not None and low <= order.price <= high and len(candidates) > 1:
+            close_px = float(next_bar.close)
+            best, worst = None, None
+            for cand in candidates:
+                shadow, twin = self._shadow(order)
+                shadow._walk(ts, twin, open_px, low, high, *cand)
+                eq = shadow.portfolio.equity(close_px)
+                # Strictly lower only: on a tie the earlier (default) ordering stands.
+                if worst is None or eq < worst - 1e-6:
+                    best, worst = cand, eq
+            chosen = best
+        else:
+            chosen = candidates[0]
+        fills.extend(self._walk(ts, order, open_px, low, high, *chosen))
         return fills
