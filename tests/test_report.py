@@ -42,7 +42,10 @@ def _fake_result():
     ]
     metrics = {
         "sharpe": 1.234,
+        "sharpe_raw": 1.234 / 20412.0 ** 0.5,
+        "sharpe_se": 0.579,
         "sharpe_ci": (0.10, 2.37),
+        "psr": 0.987,
         "sortino": 1.80,
         "calmar": 0.95,
         "profit_factor": 2.50,
@@ -161,3 +164,73 @@ def test_trades_line_agrees_with_low_sample_warning_on_real_es_run():
     assert _line(text, "Trades ").split("=")[1].split()[0] == str(n_closed)
     assert f"n_trades={n_closed} " in text
     assert _line(text, "Open at end").split("=")[1].strip().startswith(f"{n_open} ")
+
+
+def test_report_prints_the_annualization_factor_and_the_raw_sharpe():
+    # Segment 8: "print the factor". The per-bar Sharpe, the factor and the annualized
+    # Sharpe sit together so a reader can do the multiplication.
+    text = format_report(_fake_result(), symbol="NQ")
+    ann = _line(text, "Annualization")
+    assert "sqrt(20412)" in ann and "142.871" in ann
+    assert "0.00864" in _line(text, "Sharpe/bar")
+    assert "142.871" in _line(text, "Sharpe        =")
+
+
+def test_report_prints_sharpe_se_and_psr():
+    # "print the error bar": the Lo (2002) SE beside the CI it builds, and PSR.
+    text = format_report(_fake_result(), symbol="NQ")
+    se = _line(text, "Sharpe SE")
+    assert "0.579" in se and "Lo 2002" in se and "[0.100, 2.370]" in se
+    assert "0.987" in _line(text, "PSR")
+
+
+def test_report_flags_loudly_when_the_sharpe_ci_includes_zero():
+    flag = "Sharpe CI includes 0: not statistically distinguishable from zero"
+    assert flag not in format_report(_fake_result(), symbol="NQ")  # CI [0.10, 2.37]
+    res = _fake_result()
+    res.metrics["sharpe_ci"] = (-0.50, 2.97)
+    text = format_report(res, symbol="NQ")
+    assert "⚠ " + flag in text
+
+
+@pytest.mark.parametrize(
+    "pf,n_trades,expected",
+    [
+        (float("inf"), 3, "inf (no losing trades)"),
+        (float("nan"), 0, "n/a (no trades)"),
+        (float("nan"), 2, "n/a (no winning or losing trades)"),
+        (2.5, 3, "2.500"),
+    ],
+)
+def test_report_labels_a_non_finite_profit_factor(pf, n_trades, expected):
+    res = _fake_result()
+    res.metrics["profit_factor"] = pf
+    res.metrics["n_trades"] = n_trades
+    text = format_report(res, symbol="NQ")
+    assert _line(text, "Profit factor").split("=", 1)[1].strip() == expected
+    assert "nan" not in text
+    assert not any(ln.rstrip().endswith("= inf") for ln in text.splitlines())
+
+
+def test_report_labels_expectancy_with_no_trades():
+    res = _fake_result()
+    res.metrics["expectancy"] = float("nan")
+    res.metrics["n_trades"] = 0
+    text = format_report(res, symbol="NQ")
+    assert _line(text, "Expectancy").split("=", 1)[1].strip() == "n/a (no trades)"
+
+
+def test_real_demo_report_shows_factor_se_and_the_zero_flag():
+    # The NQ demo's CI straddles zero, so the flag must fire on the real pipeline, and
+    # the printed per-bar Sharpe times the printed factor is the printed Sharpe.
+    from examples.run_demo import run_symbol
+
+    res = run_symbol("NQ", data_path="data/sample/nq_5m.json", config_path="configs/nq.toml")
+    m = res.metrics
+    lo, hi = m["sharpe_ci"]
+    assert lo < 0.0 < hi
+    text = format_report(res, symbol="NQ")
+    assert "Sharpe CI includes 0" in text
+    assert f"{m['sharpe_se']:.3f}" in _line(text, "Sharpe SE")
+    assert f"{m['psr']:.3f}" in _line(text, "PSR")
+    assert f"{m['sharpe_raw']:.5f}" in _line(text, "Sharpe/bar")

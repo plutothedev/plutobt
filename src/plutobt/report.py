@@ -1,10 +1,22 @@
 """Human-readable IN-SAMPLE metrics report for a BacktestResult."""
 from __future__ import annotations
 
+import math
+
 from plutobt.engine import BacktestResult
 from plutobt.metrics import MIN_TRADE_SAMPLE
 
 _LABEL = "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
+
+
+def _num(x: float, spec: str, *, nan: str = "n/a", inf: str | None = None) -> str:
+    """Format a metric, naming why a non-finite value has no number (never a bare
+    nan/inf on screen)."""
+    if math.isnan(x):
+        return nan
+    if math.isinf(x) and inf is not None:
+        return inf
+    return format(x, spec)
 
 
 def format_report(result: BacktestResult, symbol: str) -> str:
@@ -12,7 +24,10 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     man = result.manifest
     # Direct indexing (not .get) so a missing required key raises KeyError, never blanks.
     sharpe = m["sharpe"]
+    sharpe_raw = m["sharpe_raw"]
+    sharpe_se = m["sharpe_se"]
     ci_lo, ci_hi = m["sharpe_ci"]
+    psr = m["psr"]
     sortino = m["sortino"]
     calmar = m["calmar"]
     pf = m["profit_factor"]
@@ -32,15 +47,34 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     avg_r_val = m.get("avg_r")
     avg_r_str = f"{avg_r_val:.3f}" if avg_r_val is not None else "n/a"
 
+    # The annualization factor: sharpe = sharpe_raw * sqrt(periods_per_year), and the SE
+    # and CI carry the same factor (compute_metrics), so print it rather than hide it.
+    factor = math.sqrt(ppy)
+    no_trades = "n/a (no trades)"
+    pf_nan = no_trades if n_trades == 0 else "n/a (no winning or losing trades)"
+    ci_known = not (math.isnan(ci_lo) or math.isnan(ci_hi))
+    ci_str = f"[{ci_lo:.3f}, {ci_hi:.3f}]" if ci_known else "n/a"
+
     lines = [
         f"=== PlutoBT report: {symbol} ===",
         _LABEL,
         f"Observations T = {t_obs}   (periods_per_year = {ppy})",
-        f"Sharpe        = {sharpe:.3f}   95% CI [{ci_lo:.3f}, {ci_hi:.3f}]",
+        f"Annualization = sqrt(periods_per_year) = sqrt({ppy:g}) = {factor:.3f}",
+        f"Sharpe/bar    = {sharpe_raw:.5f}   (raw, per bar)",
+        f"Sharpe        = {sharpe:.3f}   (annualized: Sharpe/bar x {factor:.3f})",
+        f"Sharpe SE     = {_num(sharpe_se, '.3f')}   (Lo 2002, annualized)"
+        f"   95% CI {ci_str}",
+    ]
+    # Segment 8: an interval that straddles zero means the Sharpe cannot be told apart
+    # from no edge at all. Say so on its own line, next to the interval.
+    if ci_known and ci_lo <= 0.0 <= ci_hi:
+        lines.append("⚠ Sharpe CI includes 0: not statistically distinguishable from zero")
+    lines += [
+        f"PSR           = {_num(psr, '.3f')}   (P[true Sharpe > 0], Bailey & Lopez de Prado)",
         f"Sortino       = {sortino:.3f}",
         f"Calmar        = {calmar:.3f}",
-        f"Profit factor = {pf:.3f}",
-        f"Expectancy    = {expectancy:.3f}",
+        f"Profit factor = {_num(pf, '.3f', nan=pf_nan, inf='inf (no losing trades)')}",
+        f"Expectancy    = {_num(expectancy, '.3f', nan=no_trades)}",
         f"Win rate      = {win_rate:.3f}",
         f"Avg R         = {avg_r_str}",
         f"Max DD depth  = {dd_depth:.6f}",
