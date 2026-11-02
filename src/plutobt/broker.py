@@ -502,17 +502,19 @@ class Broker:
            candidates in step 2: the stop first (its exit cancels a now stale order; a
            flip keeps its new side), or the order first (the stop then fills at the open
            too if it is still beyond the open for the position the order leaves).
-        2. The path: worst case. A bar's OHLC does not say whether the high or the low
-           came first, nor which of two orders at the same price traded first. So the
-           rest of the bar runs on the worst of the two monotone intrabar paths
-           (open -> low -> high and open -> high -> low), each with both tie orders (stop
-           before limit, limit before stop) and, when step 1 has a tie at the open, both
-           orders there, judged by account equity marked at the bar's close: every
-           candidate runs on a copy of the book, and the one with the lowest close
-           equity is committed. This is the worst-case mode of Löw,
-           Maier-Paape and Platen, "Correctness of Backtest Engines" (2015,
-           arXiv:1509.08248). Real intrabar paths can wiggle more than this, so it is a
-           conservative convention, not a guarantee against every path. On a tie the
+        2. The path: worst case, per bar. A bar's OHLC does not say whether the high or
+           the low came first, nor which of two orders at the same price traded first.
+           So each bar is decided on its own: the engine tries the two monotone
+           intrabar paths (open -> low -> high and open -> high -> low), each with both
+           tie orders (stop before limit, limit before stop) and, when step 1 has a tie
+           at the open, both orders there. Every candidate runs on a copy of the book,
+           and the one that leaves the lowest equity marked at THIS bar's close is
+           committed. This is the worst-case mode of Löw, Maier-Paape and Platen,
+           "Correctness of Backtest Engines" (2015, arXiv:1509.08248). The choice is
+           per bar, among those orderings only: it is not a worst case over the whole
+           run (an ordering that is worse at this close can turn out better later), nor
+           over all the ways a real bar could have moved (it can wiggle more than two
+           monotone legs). A conservative convention, not a guarantee. On a tie the
            default ordering stands: the adverse extreme for the position held after the
            open first (down to the low for a long, up to the high for a short); flat,
            toward the pending limit (down for a buy limit, up for a sell limit), the

@@ -2,13 +2,14 @@
 
 At the open: the pending MARKET order, and a LIMIT already at or through the market
 there (marketable), fill first, at the open, with slippage (a marketable limit capped by
-its limit); a stop the open is already beyond fills at the open before them. Then the
+its limit); by default a stop the open is already beyond fills at the open before them
+(when both act there, the order between them is a tie the engine branches on). Then the
 path: from the open to the held position's adverse extreme (a long's low, a short's
 high), then to the other extreme. Each resting order (a limit, the held stop, a stop
 armed by a fill on the way) triggers where the path first crosses its price.
-That is the DEFAULT ordering; where the bar allows a worse one (the other extreme
-first, or the limit first at an equal price) the engine books that instead: see
-test_worst_case_path.py.
+That is the DEFAULT ordering; where the bar allows a worse one by that bar's close (the
+other extreme first, the limit first at an equal price, or the order first at the open)
+the engine books that instead, bar by bar: see test_worst_case_path.py.
 """
 from collections import namedtuple
 
