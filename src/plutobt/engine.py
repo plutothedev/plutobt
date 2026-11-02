@@ -213,8 +213,8 @@ class Engine:
             ``.shift(-1)``, a whole-sample mean) raises LookaheadError naming the
             column, before any bar runs. ``on_bar`` runs on the strategy passed in,
             which then runs the full frame itself so its state is the traded call's
-            (its frame must match the traded one); a refused strategy is left as it
-            was passed in. A strategy that cannot be deep-copied is refused with a
+            (its frame must match the traded one); a leak found in the prefixes
+            leaves it as it was passed in. A strategy that cannot be deep-copied is refused with a
             TypeError naming the switch. The guard checks precompute only: ``on_bar``
             must decide from ``ctx`` alone, and no check can stop strategy code written
             to read ahead some other way (see strategy.py).
@@ -393,7 +393,7 @@ class Engine:
         checked is exactly what is traded. Then the strategy passed in, still in the
         snapshot's state (only copies have run), runs the full frame itself: on_bar runs
         on it, so its state must be the traded call's, and its frame must match ``data``.
-        A refused strategy is left as it was passed in."""
+        A leak found in the prefixes leaves the strategy as it was passed in."""
         hint = ("Each bar's values must come from that bar and the ones before it. Fix "
                 "the precompute (check_causality = false skips this guard; use it only to "
                 "study a known leak)")

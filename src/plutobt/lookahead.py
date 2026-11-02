@@ -204,11 +204,13 @@ def assert_causal(
     a tiny feature (realized variance near 1e-10) as visible as one in a price. So a
     change smaller than about a part per million of the column is out of reach, by
     design. Integer, bool, text, categorical and datetime columns (by the full frame's
-    dtype) match exactly. pandas' rolling skew and kurt of raw PRICE LEVELS over short
-    windows (kurt under about 50 bars, skew under about 10) on a series that wanders far
-    from its mean can move by far more than that, up to about 1% of the column, between
-    a prefix and the full frame: such a column is refused although honest. Compute them
-    on returns, where pandas' result does not move at all.
+    dtype) match exactly. Known false refusal: pandas' rolling skew and kurt of raw
+    PRICE LEVELS subtract round(mean of the whole input) first, so on a series that
+    wanders far from its mean (or sits near 0.5, where the rounding flips) honest values
+    can move by far more than a part per million between a prefix and the full frame,
+    up to about 1% of the column on short windows, and such a column is refused. On
+    realistic futures bars at rolling(20) they pass; on returns they do not move at all,
+    so compute them on returns.
 
     ``sample=None`` (or >= n-1) truncates at every bar: exhaustive, at a cost that grows
     with the square of the bar count. ``sample=k`` truncates at k evenly spaced bars
