@@ -117,6 +117,102 @@ def test_sharpe_ci_is_sr_plus_minus_196_se():
     assert lo < 0.0 < hi
 
 
+def _skew_kurt(r):
+    """Population skew g3 and Pearson (non-excess) kurtosis g4, by hand."""
+    r = np.asarray(r, dtype=float)
+    d = r - r.mean()
+    m2 = (d**2).mean()
+    return (d**3).mean() / m2**1.5, (d**4).mean() / m2**2
+
+
+def test_sharpe_se_adjusts_for_skew_and_kurtosis():
+    # Mertens (2002) / Opdyke (2007), iid non-normal returns:
+    # SE^2 = (1 - g3*SR + (g4 - 1)/4 * SR^2) / n, per-bar SR, Pearson kurtosis g4:
+    # the same variance term PSR divides by.
+    sr, n = 0.39528470752104744, 10
+    g3, g4 = _skew_kurt(REF_RETURNS)
+    got = sharpe_se(sr, n, skew=g3, kurtosis=g4)
+    expected = math.sqrt((1.0 - g3 * sr + (g4 - 1.0) / 4.0 * sr**2) / n)
+    assert_allclose(got, expected, rtol=0, atol=1e-15)
+    assert got < sharpe_se(sr, n) - 0.004    # thin tails (g4 = 1.77 < 3) shrink it
+    # Normal moments (g3 = 0, g4 = 3) reduce it to Lo's iid-normal formula exactly.
+    assert sharpe_se(sr, n, skew=0.0, kurtosis=3.0) == sharpe_se(sr, n)
+
+
+def test_sharpe_ci_carries_the_moments():
+    sr, n = 0.39528470752104744, 10
+    g3, g4 = _skew_kurt(REF_RETURNS)
+    lo, hi = sharpe_ci(sr, n, skew=g3, kurtosis=g4)
+    se = sharpe_se(sr, n, skew=g3, kurtosis=g4)
+    assert_allclose(lo, sr - 1.96 * se, rtol=0, atol=1e-15)
+    assert_allclose(hi, sr + 1.96 * se, rtol=0, atol=1e-15)
+
+
+def test_sharpe_se_is_nan_when_the_variance_term_is_not_positive():
+    # Same guard as psr: 1 - 5*0.395 + 0 < 0 has no square root, so no SE.
+    assert math.isnan(sharpe_se(0.39528470752104744, 10, skew=5.0, kurtosis=1.0))
+    lo, hi = sharpe_ci(0.39528470752104744, 10, skew=5.0, kurtosis=1.0)
+    assert math.isnan(lo) and math.isnan(hi)
+
+
+def _lottery(n, k):
+    """n per-bar returns: k evenly spaced +2% bars, the rest -0.08%. Strongly
+    right-skewed (g3 about 3.4 at k = 14 of 200)."""
+    r = np.full(n, -0.0008)
+    r[np.linspace(0, n - 1, k).astype(int)] = 0.02
+    return r
+
+
+def _metrics_of_returns(r, ppy=20412.0):
+    eq = pd.Series(100_000.0 * np.concatenate([[1.0], np.cumprod(1.0 + r)]))
+    return compute_metrics(_result_with(eq, []), periods_per_year=ppy)
+
+
+def test_skewed_series_ci_and_psr_tell_the_same_story():
+    # Review finding (2026-11-02): the CI used Lo's iid-normal SE while PSR adjusts for
+    # skew and kurtosis, so on a right-skewed series the report printed "CI includes 0"
+    # next to "PSR = 0.986". Positive control: Lo's interval really did include 0 here.
+    r = _lottery(200, 14)
+    out = _metrics_of_returns(r)
+    sr = out["sharpe_raw"]
+    assert sr - 1.96 * sharpe_se(sr, 200) < 0.0          # the old interval: includes 0
+    lo, hi = out["sharpe_ci"]
+    assert lo > 0.0 and out["psr"] > 0.975              # now both say "Sharpe > 0"
+    # The SE is the non-normal one, annualized like the Sharpe.
+    g3, g4 = _skew_kurt(r)
+    raw = math.sqrt((1.0 - g3 * sr + (g4 - 1.0) / 4.0 * sr**2) / 200)
+    assert_allclose(out["sharpe_se"], raw * math.sqrt(20412.0), rtol=1e-6, atol=0)
+
+
+def test_ci_excludes_zero_exactly_when_psr_exceeds_975_on_skewed_series():
+    # Agreement on both sides of the line: k = 13 (PSR 0.970, CI includes 0) through
+    # k = 19 (PSR 0.9999, CI excludes 0).
+    for k in range(10, 20):
+        out = _metrics_of_returns(_lottery(200, k))
+        assert (out["sharpe_ci"][0] > 0.0) == (out["psr"] > 0.975), k
+
+
+def test_ci_and_psr_disagree_only_in_the_t_versus_t_minus_1_sliver():
+    # The CI excludes 0 when z_T = SR*sqrt(T)/sqrt(V) > 1.96; PSR > 0.975 when
+    # z_(T-1) = SR*sqrt(T-1)/sqrt(V) > 1.959964 (Bailey & Lopez de Prado scale PSR by
+    # sqrt(T-1)). Same V, so they can only disagree when z_(T-1) sits in
+    # (1.96*sqrt((T-1)/T), 1.959964]: a sliver under 0.2% wide at T = 300.
+    rng = np.random.default_rng(20261102)
+    disagreements = 0
+    for _ in range(400):
+        T = int(rng.integers(30, 300))
+        r = rng.lognormal(0.0, 1.0, T) * 1e-3 - rng.uniform(1.0e-3, 2.2e-3)
+        out = _metrics_of_returns(r)
+        sr = out["sharpe_raw"]
+        g3, g4 = _skew_kurt(r)
+        v = 1.0 - g3 * sr + (g4 - 1.0) / 4.0 * sr**2
+        z_prev = sr * math.sqrt(T - 1) / math.sqrt(v)
+        if (out["sharpe_ci"][0] > 0.0) != (out["psr"] > 0.975):
+            disagreements += 1
+            assert 1.96 * math.sqrt((T - 1) / T) - 1e-9 < z_prev <= 1.959964 + 1e-6, T
+    assert disagreements <= 4
+
+
 # ---------------------------------------------------------------------------
 # M7.3 — psr (Probabilistic Sharpe Ratio, PSR(0))
 # ---------------------------------------------------------------------------
@@ -431,10 +527,11 @@ def test_compute_metrics_ci_brackets_the_sharpe_it_sits_beside():
     # The interval IS sharpe +/- 1.96 se, in the same annualized units.
     assert_allclose(lo, out["sharpe"] - 1.96 * out["sharpe_se"], rtol=1e-9, atol=0)
     assert_allclose(hi, out["sharpe"] + 1.96 * out["sharpe_se"], rtol=1e-9, atol=0)
-    # And both scale from the raw Lo-2002 quantities by sqrt(ppy), so the pure
+    # And both scale from the raw skew/kurtosis-adjusted SE by sqrt(ppy), so the pure
     # functions (pinned above) remain the single source of the statistics.
     rets = eq.pct_change().dropna()
-    raw_se = sharpe_se(sharpe(rets, 1.0), int(rets.size))
+    g3, g4 = _skew_kurt(rets)
+    raw_se = sharpe_se(sharpe(rets, 1.0), int(rets.size), skew=g3, kurtosis=g4)
     assert_allclose(out["sharpe_se"], raw_se * math.sqrt(20412.0), rtol=1e-9, atol=0)
 
 

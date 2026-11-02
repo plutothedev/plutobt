@@ -65,15 +65,16 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"Annualization = sqrt(periods_per_year) = sqrt({ppy:g}) = {factor:.3f}",
         f"Sharpe/bar    = {sharpe_raw:.5f}   (raw, per bar)",
         f"Sharpe        = {sharpe:.3f}   (annualized: Sharpe/bar x {factor:.3f})",
-        f"Sharpe SE     = {_num(sharpe_se, '.3f', nan=no_vol)}   (Lo 2002, annualized)"
-        f"   95% CI {ci_str}",
+        f"Sharpe SE     = {_num(sharpe_se, '.3f', nan=no_vol)}   (iid, skew/kurtosis-"
+        f"adjusted; no autocorrelation adjustment)   95% CI {ci_str}",
     ]
     # Segment 8: an interval that straddles zero means the Sharpe cannot be told apart
     # from no edge at all. Say so on its own line, next to the interval.
     if ci_known and ci_lo <= 0.0 <= ci_hi:
         lines.append("⚠ Sharpe CI includes 0: not statistically distinguishable from zero")
     lines += [
-        f"PSR           = {_num(psr, '.3f')}   (P[true Sharpe > 0], Bailey & Lopez de Prado)",
+        f"PSR           = {_num(psr, '.3f')}   (P[true Sharpe > 0], skew/kurtosis-"
+        "adjusted, Bailey & Lopez de Prado)",
         f"Sortino       = {_num(sortino, '.3f', nan=no_vol, inf='inf (no downside)')}",
         f"Calmar        = {_num(calmar, '.3f', nan=no_vol, inf='inf (no drawdown)')}",
         f"Profit factor = {_num(pf, '.3f', nan=pf_nan, inf='inf (no losing trades)')}",

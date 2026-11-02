@@ -52,14 +52,35 @@ def sharpe(returns: pd.Series, periods_per_year: float) -> float:
     return float(sr_bar * math.sqrt(periods_per_year))
 
 
-def sharpe_se(sr: float, n: int) -> float:
-    """Standard error of the Sharpe ratio, Lo (2002): sqrt((1 + 0.5*sr**2)/n)."""
-    return math.sqrt((1.0 + 0.5 * sr**2) / n)
+def _skew_kurtosis(r: np.ndarray) -> tuple[float, float]:
+    """Population (biased) skew g3 and Pearson (non-excess) kurtosis g4 of ``r``; the
+    moments both the Sharpe SE and PSR use. ``r`` must have a nonzero spread."""
+    d = r - r.mean()
+    m2 = (d**2).mean()
+    return float((d**3).mean() / m2**1.5), float((d**4).mean() / m2**2)
 
 
-def sharpe_ci(sr: float, n: int) -> tuple[float, float]:
-    """95% confidence interval for the Sharpe ratio: sr +/- 1.96 * SE."""
-    se = sharpe_se(sr, n)
+def sharpe_se(sr: float, n: int, *, skew: float = 0.0, kurtosis: float = 3.0) -> float:
+    """Standard error of a per-bar Sharpe ratio ``sr`` over ``n`` iid returns.
+
+    Mertens (2002) / Opdyke (2007), for iid returns that need not be normal:
+    SE^2 = (1 - g3*sr + (g4 - 1)/4 * sr^2) / n, with population skew g3 and Pearson
+    (non-excess) kurtosis g4: the same variance term ``psr`` divides by. The defaults
+    (g3 = 0, g4 = 3, normal returns) reduce it to Lo (2002), sqrt((1 + 0.5*sr^2)/n).
+    No autocorrelation adjustment (Lo's eta(q) is not applied). NaN when the variance
+    term is not positive (unreachable from real sample moments; see ``psr``).
+    """
+    variance = 1.0 - skew * sr + ((kurtosis - 1.0) / 4.0) * sr**2
+    if variance <= 0.0:
+        return float("nan")
+    return math.sqrt(variance / n)
+
+
+def sharpe_ci(sr: float, n: int, *, skew: float = 0.0,
+              kurtosis: float = 3.0) -> tuple[float, float]:
+    """95% confidence interval for the Sharpe ratio: sr +/- 1.96 * SE (``sharpe_se``,
+    same moments)."""
+    se = sharpe_se(sr, n, skew=skew, kurtosis=kurtosis)
     return (sr - 1.96 * se, sr + 1.96 * se)
 
 
@@ -93,10 +114,9 @@ def psr(
     if std == 0.0 or n < 2:
         return float("nan")
     sr_hat = r.mean() / std
-    d = r - r.mean()
-    m2 = (d**2).mean()
-    g3 = (d**3).mean() / m2**1.5 if skew is None else skew      # population skew
-    g4 = (d**4).mean() / m2**2 if kurtosis is None else kurtosis  # Pearson kurtosis
+    g3, g4 = _skew_kurtosis(r)                  # population skew, Pearson kurtosis
+    g3 = g3 if skew is None else skew
+    g4 = g4 if kurtosis is None else kurtosis
     # The variance-adjustment term can go non-positive for extreme
     # skew/kurtosis; sqrt of it would raise. Guard with NaN instead.
     variance_adj = 1.0 - g3 * sr_hat + ((g4 - 1.0) / 4.0) * sr_hat**2
@@ -371,23 +391,27 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     # 0.13])" - a point estimate outside its own interval - live on pluto's
     # screen. `sharpe` is exactly sqrt(periods_per_year) times `sharpe_raw`,
     # and a constant times an estimator has that constant times its standard
-    # error (sharpe_se is Lo 2002's iid-normal result for the per-bar SR), so
-    # the same sqrt(periods_per_year) factor scales sharpe_se and sharpe_ci.
-    # Neither the sqrt(q) annualization nor Lo's SE is exact once returns are
-    # serially correlated or far from normal (Mertens 2002 adds the skew and
-    # kurtosis terms psr uses): Lo's own eta(q) correction is not applied
-    # here. The raw-unit statistics stay available through the
-    # pinned pure functions and sharpe_raw.
+    # error, so the same sqrt(periods_per_year) factor scales sharpe_se and
+    # sharpe_ci. The SE is the iid non-normal one (Mertens 2002 / Opdyke 2007),
+    # with the sample skew and kurtosis psr uses, so the CI and PSR tell the same
+    # story: Lo's normal-only SE printed "CI includes 0" beside "PSR = 0.986" on a
+    # right-skewed series (review, 2026-11-02). They can still differ in a sliver,
+    # since PSR scales by sqrt(T-1) and the SE by sqrt(T). Serial correlation is
+    # not adjusted for (Lo's eta(q) is not applied). The raw-unit statistics stay
+    # available through the pinned pure functions and sharpe_raw.
     scale = math.sqrt(periods_per_year)
     # Zero return volatility: the Sharpe is 0/0 (sharpe() reports it as 0.0), and Lo's
     # SE at sr = 0 is a fixed sqrt(1/T) that would print a fake interval around it
     # ([-15.58, 15.58] at T = 323, ppy = 20412). NaN, like the T = 0 case.
-    has_vol = t_count > 0 and float(np.asarray(returns, dtype=float).std(ddof=0)) > 0.0
-    se = sharpe_se(sr_raw, t_count) * scale if has_vol else float("nan")
+    r_arr = np.asarray(returns, dtype=float)
+    has_vol = t_count > 0 and float(r_arr.std(ddof=0)) > 0.0
     if has_vol:
-        raw_lo, raw_hi = sharpe_ci(sr_raw, t_count)
+        g3, g4 = _skew_kurtosis(r_arr)
+        se = sharpe_se(sr_raw, t_count, skew=g3, kurtosis=g4) * scale
+        raw_lo, raw_hi = sharpe_ci(sr_raw, t_count, skew=g3, kurtosis=g4)
         ci = (raw_lo * scale, raw_hi * scale)
     else:
+        se = float("nan")
         ci = (float("nan"), float("nan"))
     psr_val = psr(returns, sr0=0.0) if t_count > 1 else float("nan")
 

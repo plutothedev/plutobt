@@ -177,11 +177,16 @@ def test_report_prints_the_annualization_factor_and_the_raw_sharpe():
 
 
 def test_report_prints_sharpe_se_and_psr():
-    # "print the error bar": the Lo (2002) SE beside the CI it builds, and PSR.
+    # "print the error bar": the SE beside the CI it builds, and PSR, each labelled
+    # with what it does and does not adjust for (the SE used to say "Lo 2002", the
+    # normal-only formula, beside a PSR that adjusts for skew and kurtosis).
     text = format_report(_fake_result(), symbol="NQ")
     se = _line(text, "Sharpe SE")
-    assert "0.579" in se and "Lo 2002" in se and "[0.100, 2.370]" in se
-    assert "0.987" in _line(text, "PSR")
+    assert "0.579" in se and "[0.100, 2.370]" in se
+    assert "(iid, skew/kurtosis-adjusted; no autocorrelation adjustment)" in se
+    assert "Lo 2002" not in se
+    psr_line = _line(text, "PSR")
+    assert "0.987" in psr_line and "skew/kurtosis-adjusted" in psr_line
 
 
 def test_report_flags_loudly_when_the_sharpe_ci_includes_zero():
