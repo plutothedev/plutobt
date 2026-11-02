@@ -172,3 +172,12 @@ def test_the_engine_trades_on_its_own_full_frame_precompute():
 
     _eng().run(_bars(), Fn(record))
     assert seen[0] == 60 and seen[-1] == 60
+
+
+def test_engine_refuses_a_backfilled_first_return():
+    # Review fix: row 0 = close1/close0 - 1 leaked into on_bar(0) past the old grid.
+    def bfill(df):
+        return _honest(df).assign(r=df["close"].pct_change().bfill())
+
+    with pytest.raises(LookaheadError, match="non-causal column 'r' at t=0"):
+        _eng().run(_bars(), Fn(bfill))

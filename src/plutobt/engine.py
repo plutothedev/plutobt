@@ -249,6 +249,10 @@ class Engine:
                     "(check_causality = false skips this guard; use it only to study a "
                     "known leak)"
                 ) from leak
+            # The check's last call was a prefix: call the full frame once more, so a
+            # strategy's own state from precompute (against the contract, but common)
+            # matches the frame the loop runs. The loop keeps the first call's result.
+            strategy.precompute(df.copy())
         session_breaks = self.config.break_on == "session"
         signal_cols = [c for c in data.columns if c not in _BASE_COLS]
         warm_up_end = _warm_up_end(df, data, signal_cols)

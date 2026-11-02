@@ -1,6 +1,6 @@
 """Expanding-window (prefix-consistency) causality detector (§5.1, §10.2).
 
-For each sampled bar t, ``precompute(df.iloc[:t+1])`` MUST equal
+For each sampled bar t from 0 to n-2, ``precompute(df.iloc[:t+1])`` MUST equal
 ``precompute(df).iloc[:t+1]`` on every column, the base columns included. A
 mismatch means a value at or before t depended on data at index > t (a lookahead
 leak). This is the Lopez de Prado / Freqtrade truncation detector; the injected
@@ -65,11 +65,13 @@ def assert_causal(
     Every column of the output is checked, the base ones (ts, open, high, low, close,
     volume, session) too, so a precompute that rewrites ``close`` with the next bar's
     close is caught like a new column would be. At each truncation point t the whole
-    prefix result is compared with the full result's first t+1 rows.
+    prefix result is compared with the full result's first t+1 rows. The truncation
+    points run from t=0 (the 1-bar prefix, which catches a leak into row 0 such as a
+    backfilled first return) to t=n-2; the n-bar prefix is the full frame itself.
 
-    ``sample=None`` (or >= the bar count) truncates at every bar: exhaustive, at a cost
-    that grows with the square of the bar count. ``sample=k`` truncates at k evenly
-    spaced bars only, and CAN MISS a sparse leak: one that touches a few rows (say, the
+    ``sample=None`` (or >= n-1) truncates at every bar: exhaustive, at a cost that grows
+    with the square of the bar count. ``sample=k`` truncates at k evenly spaced bars
+    from t=0 to t=n-2 only, and CAN MISS a sparse leak: one that touches a few rows (say, the
     last bar of each session) between two truncation points is never seen.
 
     A precompute that drops, adds or reorders rows is refused with a FrameError (a
@@ -81,11 +83,11 @@ def assert_causal(
     if n < 2:
         return None
 
-    if sample is None or sample >= n:
-        grid = range(1, n)
+    if sample is None or sample >= n - 1:
+        grid = range(0, n - 1)
     else:
-        # Evenly spaced truncation points across [1, n-1].
-        grid = np.unique(np.linspace(1, n - 1, num=sample, dtype="int64"))
+        # Evenly spaced truncation points across [0, n-2]: prefixes df[:1] .. df[:n-1].
+        grid = np.unique(np.linspace(0, n - 2, num=sample, dtype="int64"))
 
     expected = {col: _values(full[col]) for col in full.columns}
     for t in grid:

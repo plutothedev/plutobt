@@ -145,3 +145,46 @@ def test_lookahead_error_is_an_assertion_and_a_frame_error():
     with pytest.raises(LookaheadError) as e:
         assert_causal(_leaky, _frame())
     assert isinstance(e.value, AssertionError) and isinstance(e.value, FrameError)
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02): the grid covers every prefix df[:1] .. df[:n-1].
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fn", [
+    lambda d: d.assign(x=d["close"].pct_change().bfill()),
+    lambda d: d.assign(x=d["close"].diff().bfill()),
+    lambda d: d.assign(x=np.r_[d["close"].to_numpy()[1:2], d["close"].to_numpy()[1:]]
+                       if len(d) > 1 else d["close"].to_numpy()),
+], ids=["pct_change-bfill", "diff-bfill", "row0-is-close1"])
+def test_assert_causal_catches_a_leak_into_row_zero(fn):
+    # The grid started at the 2-bar prefix, so row 0 was never computed alone: a
+    # backfilled first return (row 0 = close1/close0 - 1) passed and on_bar(0) saw it.
+    with pytest.raises(AssertionError, match="non-causal column 'x' at t=0"):
+        assert_causal(fn, _frame())
+
+
+def test_assert_causal_row_zero_control_passes():
+    # Control: the same return without the backfill is NaN on row 0 in every prefix.
+    assert assert_causal(lambda d: d.assign(x=d["close"].pct_change()), _frame()) is None
+
+
+def _prefix_lengths(n, sample):
+    calls = []
+
+    def record(d):
+        calls.append(len(d))
+        return d.assign(x=d["close"].cumsum())
+
+    assert_causal(record, _frame(n), sample=sample)
+    return calls
+
+
+def test_full_grid_computes_every_proper_prefix_once():
+    # The full frame once, then df[:1] .. df[:n-1]; df[:n] again could never mismatch.
+    assert _prefix_lengths(10, None) == [10] + list(range(1, 10))
+
+
+def test_sampled_grid_spans_the_first_and_last_proper_prefix():
+    calls = _prefix_lengths(60, 5)
+    assert calls[0] == 60 and calls[1] == 1 and calls[-1] == 59 and len(calls) == 6
