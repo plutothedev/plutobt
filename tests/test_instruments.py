@@ -280,3 +280,30 @@ def test_equity_one_dollar_move_is_one_dollar_per_share():
     one_tick = ticks_to_price(1, aapl)
     assert pnl_points(0.0, one_tick, 1, aapl) == pytest.approx(aapl.tick_value)
     assert pnl_points(0.0, one_tick, 1, aapl) == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "110'087",   # third digit 7: not a half-32nd (was 17.4 ticks, off the 1/64 grid)
+        "110'081",   # third digit 1
+        "110'990",   # 99/32 (was accepted as 113.09)
+        "110'320",   # 32/32 is the next handle, not a fraction
+        "110'325",
+    ],
+)
+def test_parse_price_zn_refuses_a_quote_zn_cannot_trade_at(quote):
+    # ZN trades in halves of a 32nd: fractional part 000..315, last digit 0 or 5.
+    zn = get_instrument("ZN")
+    with pytest.raises(ValueError, match="ZN|32nd"):
+        parse_price(quote, zn)
+
+
+def test_parse_price_zn_accepts_every_half_32nd_on_the_grid():
+    # Every valid fractional part still parses exactly as before: n/64 of a point.
+    zn = get_instrument("ZN")
+    for whole in range(32):
+        for half in (0, 5):
+            got = parse_price(f"110'{whole:02d}{half}", zn)
+            assert got == 110 + (whole + half / 10.0) / 32.0
+            assert (got - 110) / zn.tick_size == pytest.approx(round((got - 110) / zn.tick_size))

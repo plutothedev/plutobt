@@ -119,8 +119,10 @@ def parse_price(raw: str | float, instrument: Instrument) -> float:
 
     Decimal instruments pass through. For ``thirty_seconds`` (Treasury 32nds),
     a string ``"<handle>'<32nds>[half]"`` like ``"110'085"`` parses to
-    ``110 + 8.5/32`` (the optional 3rd digit is a half-32nd). Numeric input on a
-    32nds instrument is treated as already-decimal points (spec §5.3).
+    ``110 + 8.5/32`` (the 3rd digit is the half-32nd: 0 or 5). Only prices the
+    contract can trade at parse: whole 32nds 00..31 and a 3rd digit of 0 or 5, so the
+    fractional part runs 000..315 on ZN's 1/64 grid; anything else raises ValueError.
+    Numeric input on a 32nds instrument is treated as already-decimal points (spec §5.3).
     """
     if instrument.price_format != "thirty_seconds":
         return float(raw)
@@ -135,6 +137,15 @@ def parse_price(raw: str | float, instrument: Instrument) -> float:
     if not handle_str or len(frac_str) != 3 or not frac_str.isdigit():
         raise ValueError(
             f"malformed 32nds quote {raw!r}: fractional part must be exactly 3 digits"
+        )
+
+    # Refuse quotes off the half-32nd grid: "110'087" is not a ZN price (17.4 ticks),
+    # and "110'990" is not 99/32 of a point but a typo.
+    if int(frac_str[:2]) > 31 or frac_str[2] not in "05":
+        raise ValueError(
+            f"off-grid 32nds quote {raw!r}: {instrument.symbol} trades in halves of a "
+            f"32nd, so the fractional part must be 000..315 ending in 0 or 5 "
+            f"(e.g. 110'085 = 110 + 8.5/32)"
         )
 
     handle = float(handle_str)
