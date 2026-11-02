@@ -71,6 +71,9 @@ _ROLL_UNKNOWN = "unknown/user-supplied"
 _TIME_RULE = ("bar timestamps (the 'ts' column, in whole unix seconds) must strictly "
               "increase, since the engine runs the bars in row order")
 
+# The unit rule, quoted by every refusal of a ts that is not whole unix seconds.
+_TS_UNIT_RULE = "bar timestamps (the 'ts' column) must be whole unix seconds"
+
 # The column-name rule, quoted by every refusal of a frame's column names.
 _COLUMN_RULE = ("every column name must be a Python identifier that does not start with "
                 "an underscore and is not a keyword (e.g. 'ema_20', not 'ema-20'), since "
@@ -99,13 +102,20 @@ def _time_problem(frame: pd.DataFrame) -> str | None:
                     "of unix seconds")
         if i and not value > ts[i - 1]:      # written so that a NaN ts is refused too
             return f"row {i} (ts {value}) is not after row {i - 1} (ts {ts[i - 1]})"
-    for i, value in enumerate(ts):
+    return None
+
+
+def _ts_unit_problem(frame: pd.DataFrame) -> str | None:
+    """The first ts that is not whole unix seconds (a fraction, or another unit such as
+    milliseconds), naming its row; None if every one is. Runs after _time_problem, so
+    every ts is a number."""
+    for i, value in enumerate(frame["ts"].tolist()):
         # Whole seconds, so a Fill's int ts is exact; and seconds, not milliseconds.
         if not (math.isfinite(value) and float(value).is_integer()):
             return f"row {i} holds ts {value!r}, not a whole number of unix seconds"
         unit = ts_unit_problem(value)
         if unit is not None:
-            return f"row {i} holds {unit}"
+            return f"row {i}: {unit}"
     return None
 
 
@@ -605,11 +615,13 @@ class Engine:
 
     def _check_frame(self, frame: pd.DataFrame, *, precomputed: bool) -> None:
         """Refuse a frame the loop cannot run: bar timestamps that do not strictly
-        increase (checked first: out-of-order bars also scramble the session IDs) and,
+        increase (checked first: out-of-order bars also scramble the session IDs) or
+        are not whole unix seconds (each under its own rule) and,
         in session mode, a broken session column. A problem in the caller's frame is a
         plain ValueError; one in what the strategy's precompute returned is a FrameError
         naming it."""
-        rules = [(_time_problem, _TIME_RULE, "removed or broke the bar timestamps")]
+        rules = [(_time_problem, _TIME_RULE, "removed or broke the bar timestamps"),
+                 (_ts_unit_problem, _TS_UNIT_RULE, "removed or broke the bar timestamps")]
         if self.config.break_on == "session":
             rules.append((_session_problem, _SESSION_RULE,
                           "removed or broke the session column"))

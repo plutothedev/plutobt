@@ -774,9 +774,14 @@ def test_a_bar_that_touches_its_body_is_consistent():  # positive control
 def test_a_millisecond_ts_is_refused_naming_the_unit():
     nq = get_instrument("NQ")
     df = _ohlc([(100, 101, 99, 100)] * 3, ts0=1_772_461_800_000, step=300_000)
-    with pytest.raises(ValueError, match=r"row 0 holds ts 1772461800000 looks like "
-                                         r"milliseconds.*divide the ts by 1,000"):
+    with pytest.raises(ValueError) as e:
         Engine(nq, BacktestConfig()).run(df, Strategy())
+    text = str(e.value)
+    # Its own rule, not the ordering rule's text (the ts do strictly increase).
+    assert text.startswith("bar timestamps (the 'ts' column) must be whole unix seconds; ")
+    assert "strictly increase" not in text
+    assert ("row 0: ts 1772461800000 looks like milliseconds, not unix seconds "
+            "(seconds stay below 1e11 until the year 5138): divide the ts by 1,000") in text
 
 
 def test_a_fractional_ts_is_refused():
