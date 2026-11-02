@@ -54,7 +54,9 @@ def test_manifest_records_roll_metadata_keys():
 def test_manifest_roll_metadata_documents_v1_defaults():
     result = _golden_result()
     m = result.manifest
-    assert m["adjustment_method"] == "backwards_difference"  # additive Panama (§5.6 default)
+    # Single expiry: nothing was rolled, so nothing was back-adjusted (it used to be
+    # stamped "backwards_difference", an adjustment never applied; final audit item 10).
+    assert m["adjustment_method"] == "none (single expiry, no roll)"
     assert m["splice_method"] == "none_single_expiry"        # synthetic single expiry
     assert m["roll_trigger"] == "none_single_expiry"
     assert m["as_of_date"] == "2026-11-02"   # the sample regeneration date
@@ -74,7 +76,8 @@ def test_every_shipped_sample_gets_the_sample_vintage_roll_metadata():
             load_bars(str(root / name)), GoldenStrategy()).manifest
         assert _SAMPLE_SHA256[m["data_sha256"]] == name    # the constant is the file's hash
         assert [m[k] for k in _ROLL_KEYS] == ["none_single_expiry", "none_single_expiry",
-                                              "backwards_difference", "2026-11-02"]
+                                              "none (single expiry, no roll)",
+                                              "2026-11-02"]
 
 
 def test_a_user_frame_gets_unknown_roll_metadata():
