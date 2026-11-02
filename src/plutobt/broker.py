@@ -374,7 +374,11 @@ class Broker:
             else:
                 raise ValueError(f"unknown order kind: {order.kind!r}")
             if price is not None:
-                order = self._admit(order, float(next_bar.open))
+                # Margin is marked where the order trades: the open for a market order
+                # (its fill moment), the limit's own fill price for a limit, never the
+                # open for a limit that fills deeper in the bar.
+                mark = float(next_bar.open) if order.kind == "market" else float(price)
+                order = self._admit(order, mark)
             if order is not None and price is not None:
                 prior_side = self._position_side()
                 fills.append(

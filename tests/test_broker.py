@@ -964,3 +964,38 @@ def test_unfilled_limit_short_entry_is_not_rejected_by_allow_short():
     broker.fill_pending(Bar(2, 16_000.0, 16_600.0, 16_000.0, 16_500.0))
     assert order.status == "rejected"
     assert pf.position.qty == 0
+
+
+# ---------------------------------------------------------------------------
+# A limit order's margin is checked at its own fill price, not the bar's open.
+# ---------------------------------------------------------------------------
+
+def test_limit_scale_in_margin_is_checked_at_the_fill_price():
+    # Long 1 from 15,000 on 50,000. At the open (14,900) equity is 48,000 and covers
+    # 2 lots (46,000), but the buy limit fills at 14,000, where equity is 30,000.
+    broker, inst, pf = _long_one_at_15000(50_000.0)
+    order = broker.buy(contracts=1, limit=14_000.0)
+    fills = broker.fill_pending(Bar(2, 14_900.0, 14_900.0, 13_900.0, 14_000.0))
+    assert fills == []
+    assert order.status == "rejected"
+    assert pf.position.qty == 1
+
+
+def test_limit_scale_in_accepted_when_equity_at_the_fill_covers_it():  # positive control
+    broker, inst, pf = _long_one_at_15000(70_000.0)        # 50,000 at 14,000
+    order = broker.buy(contracts=1, limit=14_000.0)
+    fills = broker.fill_pending(Bar(2, 14_900.0, 14_900.0, 13_900.0, 14_000.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("buy", 1, 14_000.0)]
+    assert order.status == "filled"
+    assert pf.position.qty == 2
+
+
+def test_limit_flip_margin_counts_the_profit_up_to_its_fill():
+    # Long 1 from 15,000 on 30,000. The sell(3) limit fills at 16,000, where equity is
+    # 50,000 and covers short 2 (46,000); at the 15,000 open it would not (30,000).
+    broker, inst, pf = _long_one_at_15000(30_000.0)
+    order = broker.sell(contracts=3, limit=16_000.0)
+    fills = broker.fill_pending(Bar(2, 15_000.0, 16_100.0, 14_990.0, 16_000.0))
+    assert [(f.side, f.contracts, f.price) for f in fills] == [("sell", 3, 16_000.0)]
+    assert (order.status, order.contracts) == ("filled", 3)
+    assert pf.position.qty == -2
