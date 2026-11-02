@@ -216,3 +216,49 @@ def test_an_object_column_that_cannot_be_compared_is_a_frame_error():
 
     with pytest.raises(FrameError, match="column 'v' holds Vague values"):
         _eng().run(_bars(), Fn(vague))
+
+
+# ---------------------------------------------------------------------------
+# Review fix (2026-11-02): a strategy may not keep the bar frame for on_bar.
+# ---------------------------------------------------------------------------
+
+class Keeps(Strategy):
+    """Stores ``keep(df)`` on self as ``name``, then reads ahead from it in on_bar."""
+
+    def __init__(self, name, keep):
+        self.name, self.keep = name, keep
+
+    def precompute(self, df):
+        setattr(self, self.name, self.keep(df))
+        return df
+
+
+@pytest.mark.parametrize(("name", "keep", "kind"), [
+    ("df", lambda d: d.reset_index(drop=True), "DataFrame"),
+    ("closes", lambda d: d["close"], "Series"),
+    ("raw", lambda d: d["close"].to_numpy(), "ndarray"),
+    ("cache", lambda d: [d], "DataFrame"),
+    ("memo", lambda d: {"frame": d}, "DataFrame"),
+], ids=["frame", "series", "ndarray", "in-list", "in-dict"])
+def test_a_strategy_that_keeps_the_bar_frame_is_refused(name, keep, kind):
+    # Probe p03's Hoard: on_bar indexed self.df[k + 2] and made money from the future,
+    # past every check. A kept frame as long as the bars is now refused up front.
+    with pytest.raises(FrameError, match=f"attribute {name!r} holds a {kind} of 60 rows"):
+        _eng().run(_bars(), Keeps(name, keep))
+    with pytest.raises(FrameError, match="on_bar must decide from ctx"):
+        _eng(check_causality=False).run(_bars(), Keeps(name, keep))
+
+
+def test_honest_strategies_with_attributes_still_run():
+    # Parameters, a short lookup table and the demo strategy are not the bar frame.
+    class Params(Fn):
+        def __init__(self):
+            super().__init__(_honest)
+            self.spans = [20, 50]
+            self.table = pd.Series([1.0, 2.0, 3.0])
+            self.weights = np.ones(5)
+            self.opts = {"stop": 20, "levels": np.arange(3)}
+
+    assert len(_eng().run(_bars(), Params()).equity_curve) == 60
+    df = load_bars(str(ROOT / "data" / "sample" / "nq_5m.json"))
+    assert len(_eng().run(df, EMACross()).equity_curve) == len(df)

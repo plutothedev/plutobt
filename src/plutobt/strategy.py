@@ -43,9 +43,10 @@ class Strategy:
     - ``on_bar(ctx)`` may use only what ``ctx`` holds: bar t's row (``ctx.bar``), the
       position, equity and the ``ctx.state`` it wrote on earlier bars.
     - Neither keeps the frame: ``precompute`` is STATELESS, so it never stores ``df``
-      (or anything built from it) on ``self`` for ``on_bar`` to read later. A strategy
-      that does can index past bar t, and no check can see it: the causality check
-      tests what ``precompute`` returns, not what ``on_bar`` reads.
+      (or anything built from it) on ``self`` for ``on_bar`` to read later: it could
+      index past bar t. ``Engine.run`` refuses a strategy left holding a DataFrame,
+      Series or array as long as the bars (directly, or in a list, tuple or dict
+      attribute); a frame hidden deeper is still outside what any check can see.
     """
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
