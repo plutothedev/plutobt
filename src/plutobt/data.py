@@ -235,13 +235,15 @@ def assert_positive_prices(df: pd.DataFrame) -> None:
     push historical prices to zero or negative, making percentage and log
     returns undefined or sign-flipped. Points/dollar P&L is still valid, but
     callers must not compute ratio returns on such a series. Raises ValueError
-    naming the first offending (column, row).
+    naming the first offending (column, row); the row is the position (0 = first
+    bar), whatever the frame's index holds.
     """
     for col in _PRICE_COLS:
-        bad = df.index[df[col] <= 0]
-        if len(bad) > 0:
+        values = df[col].to_numpy()
+        bad = np.flatnonzero(values <= 0)
+        if bad.size > 0:
             row = int(bad[0])
-            val = df[col].iloc[df.index.get_loc(bad[0])]
+            val = values[row].item() if hasattr(values[row], "item") else values[row]
             raise ValueError(
                 f"non-positive price in column '{col}' at row {row} "
                 f"(value={val!r}); percentage/log returns are undefined on "

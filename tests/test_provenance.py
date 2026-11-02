@@ -51,6 +51,23 @@ def test_assert_positive_prices_message_names_offending_column_and_row():
         assert_positive_prices(df)
 
 
+def test_assert_positive_prices_reports_the_position_on_a_datetime_index():
+    # Review fix: int() of the index label raised TypeError on a DatetimeIndex.
+    df = _bars([100.0] * 8)
+    df.index = pd.to_datetime(df["ts"], unit="s")
+    df.iloc[5, df.columns.get_loc("low")] = -1.0
+    with pytest.raises(ValueError, match=r"column 'low' at row 5 \(value=-1.0\)"):
+        assert_positive_prices(df)
+
+
+def test_assert_positive_prices_reports_the_position_on_a_slice():
+    # A slice keeps its labels (100..); the row named is the position, as everywhere else.
+    df = _bars([100.0] * 120).iloc[100:]
+    df.iloc[5, df.columns.get_loc("close")] = 0.0
+    with pytest.raises(ValueError, match=r"column 'close' at row 5 \(value=0.0\)"):
+        assert_positive_prices(df)
+
+
 # ---------------------------------------------------------------------------
 # M8.3: frozen synthetic sample
 # ---------------------------------------------------------------------------
