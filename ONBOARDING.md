@@ -29,8 +29,7 @@ plutobt/
 ├─ examples/run_demo.py  ← the end-to-end demo (the "video payoff")
 ├─ scripts/              ← gen_sample.py (synthetic data), freeze_golden.py
 ├─ configs/              ← per-symbol cost configs (nq/es/cl.toml) + golden
-├─ data/sample/          ← synthetic NQ/ES/CL bars (seeded, redistributable)
-└─ docs/superpowers/     ← the design spec, the 9-milestone build plan, video plan
+└─ data/sample/          ← synthetic NQ/ES/CL bars (seeded, redistributable)
 ```
 
 ## 5. The modules (build order = dependency order)
@@ -101,11 +100,10 @@ The demo is the thesis in code: **same engine + strategy, swap symbol & cost con
 2. **`parse_price` requires exactly-3-digit 32nds** (`"110'085"` works, `"110'08"` raises). Resolves a contradiction in the build plan. Harmless in practice — the real data path is decimal floats; 32nds strings are a display/edge case.
 
 ## 10. Status
-**v1 is complete; pre-film audit fixes landed 2026-11-02** on branch `film/ready`. A pre-film audit found and fixed look-ahead in the equity curve, entry-bar stops, margin calls that never ran, scale-in margin, stale stops after flips, allow_short, overnight exits, the look-ahead check itself (now run by `Engine.run`, verified by a randomized property sweep), off-session sample data, and report honesty (CI and PSR on the same skew/kurtosis-adjusted basis). Every fix was reviewed by an independent agent with executable probes.
+**v1 is complete; pre-film audit fixes landed 2026-11-02.** A pre-film audit found and fixed look-ahead in the equity curve, entry-bar stops, margin calls that never ran, scale-in margin, stale stops after flips, allow_short, overnight exits, the look-ahead check itself (now run by `Engine.run`, verified by a randomized property sweep), off-session sample data, and report honesty (CI and PSR on the same skew/kurtosis-adjusted basis). Every fix was reviewed by an independent agent with executable probes.
 
-**What's left** (none is engine code): record the YouTube video (script in `docs/`); keep the data/no-sweep discipline; optional beyond-v1 (MinTRL, full continuous-contract back-adjustment — both deliberately cut from v1).
+**What's left** (none is engine code): keep the data/no-sweep discipline; optional beyond-v1 (MinTRL, full continuous-contract back-adjustment, both deliberately cut from v1).
 
 ## Where to go deeper
-- Design spec: `docs/superpowers/specs/2026-06-07-plutobt-engine-design.md`
-- Build plan (9 milestones, TDD): `docs/superpowers/plans/2026-06-07-plutobt-engine.md`
-- Video plan: `docs/superpowers/specs/2026-06-07-plutobt-video-plan.md`
+- `README.md`: usage, the look-ahead check, and every honesty caveat.
+- `tests/`: each trap the engine defends against has a test that pins it.
