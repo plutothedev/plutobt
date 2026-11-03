@@ -29,4 +29,4 @@ Max DD duration = 803 bars   (longest time below a prior peak)   (not recovered 
 Trades        = 391   (closed)
 Open at end   = 0
 data_sha256   = 123af852f8fb1364e02b5761d048a397adb5b87a53301567c85410b139fc8ca7   (of the loaded bars as CSV, not the file)
-engine version = 0.2.0
+engine version = 0.3.0

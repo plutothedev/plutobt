@@ -40,12 +40,17 @@ from plutobt.strategy import Context, Strategy
 @dataclass
 class BacktestResult:
     """Backtest output: equity curve, closed/open-at-end trades, metrics, manifest, and
-    every margin call the run hit (spec §5.2), in bar order."""
+    every margin call the run hit (spec §5.2), in bar order.
+
+    ``margin_refusals`` counts the orders the margin check refused outright or cut
+    down to their closing half, each order once: a thin run can then say why it is
+    thin instead of reading as "the signal never fired"."""
     equity_curve: pd.Series
     trades: list[Trade]
     metrics: dict
     manifest: dict
     margin_calls: list[MarginCall] = field(default_factory=list)
+    margin_refusals: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +564,7 @@ class Engine:
             metrics={},
             manifest=manifest,
             margin_calls=margin_calls,
+            margin_refusals=len(broker._margin_refused),
         )
 
     def _check_causality(self, df: pd.DataFrame, strategy: Strategy, snapshot: Strategy,

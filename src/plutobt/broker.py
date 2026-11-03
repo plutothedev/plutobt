@@ -80,6 +80,9 @@ class Broker:
         self.portfolio = portfolio
         self.pending: Order | None = None          # single queued order or None
         self.resting_stop: float | None = None     # GTC protective stop level
+        # Orders the margin check refused or cut, by id; the Order itself is held so no
+        # id is reused mid-run. Engine.run reports the count as margin_refusals.
+        self._margin_refused: dict[int, Order] = {}
 
     def _slippage_ticks(self) -> float:
         st = self.config.slippage_ticks
@@ -363,6 +366,7 @@ class Broker:
             # femto-dollar short and refuse it.
             required = self.instrument.initial_margin * resulting
             if round(after, 2) < round(required, 2):
+                self._margin_refused[id(order)] = order    # each order counted once
                 if not reducing:
                     return self._reject(order)
                 # A flip whose new side fails margin keeps only its closing
@@ -483,6 +487,9 @@ class Broker:
         pf.trades = []
         shadow = copy.copy(self)
         shadow.portfolio = pf
+        # A refusal on an ordering that is tried and thrown away never happened: only the
+        # committed path, run on the real book, counts.
+        shadow._margin_refused = {}
         twin = None if order is None else replace(order)
         shadow.pending = twin
         return shadow, twin

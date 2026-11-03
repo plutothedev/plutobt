@@ -18,7 +18,7 @@ Public API
     format_report   — render a human-readable IN-SAMPLE report
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Import individual names to populate the package namespace.
 # Order matters for readability; keep lowest-level modules first.
