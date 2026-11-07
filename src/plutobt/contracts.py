@@ -18,6 +18,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
+import numpy as np
+import pandas as pd
+
 MONTH_CODES: dict[str, int] = {
     "F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
     "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12,
@@ -148,3 +151,140 @@ def calendar_roll_day(contract: Contract) -> date:
     exp = expiry(contract)
     return _ROLL_DAY_EXCEPTIONS.get(contract.code,
                                     exp - timedelta(days=ROLL_DAYS_BEFORE_EXPIRY))
+
+
+# ---------------------------------------------------------------------------
+# Contract sets
+# ---------------------------------------------------------------------------
+
+_BAR_COLUMNS = ("ts", "open", "high", "low", "close", "volume")
+
+
+@dataclass
+class ContractSet:
+    """One root's contracts, validated, sorted by expiry (spec §5).
+
+    ``frames`` maps each canonical code (``NQH2026``) to its bars; ``interval`` is the
+    shared bar interval in seconds; ``file_sha256`` maps each code to the sha256 of the
+    file it was read from (empty when built from frames).
+    """
+
+    root: str
+    contracts: list[Contract]
+    frames: dict[str, object]
+    interval: int
+    file_sha256: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_frames(cls, frames: dict, file_sha256: dict[str, str] | None = None
+                    ) -> ContractSet:
+        """Validate and sort ``{code: bars}``. Each frame needs the canonical bar columns
+        (ts in unix seconds of the bar open). Refuses, naming the problem: fewer than two
+        contracts, mixed roots, a duplicate contract, an empty contract, a bad bar, a
+        price off the tick grid, mixed bar intervals, a gap in an equity-index quarterly
+        chain, and (other roots) consecutive contracts whose data never overlap."""
+        from plutobt.data import ohlcv_problem  # local: data imports instruments
+        from plutobt.instruments import REGISTRY
+
+        if len(frames) < 2:
+            raise ValueError(
+                f"a contract set needs at least two contracts to roll between, got "
+                f"{len(frames)}"
+            )
+        parsed: dict[str, tuple[Contract, object]] = {}
+        sources: dict[str, str] = {}
+        for key, df in frames.items():
+            near = None
+            if len(df) and "ts" in df.columns:
+                near = date(1970, 1, 1) + timedelta(seconds=int(df["ts"].iloc[0]))
+            c = parse_contract(key, near=near)
+            if c.code in parsed:
+                raise ValueError(
+                    f"{c.code} appears twice in the contract set (as {sources[c.code]!r} "
+                    f"and {key!r}); keep one file per contract"
+                )
+            parsed[c.code] = (c, df)
+            sources[c.code] = key
+        roots = sorted({c.root for c, _ in parsed.values()})
+        if len(roots) > 1:
+            raise ValueError(
+                f"a contract set holds one root, got {roots}: "
+                + ", ".join(sorted(parsed)) + ". Build one set per root"
+            )
+        root = roots[0]
+        if root not in REGISTRY:
+            raise ValueError(
+                f"no instrument spec for root {root!r} (its tick size is needed to check "
+                f"and adjust prices); known roots: {sorted(REGISTRY)}"
+            )
+        tick = REGISTRY[root].tick_size
+        ordered = sorted(parsed.values(), key=lambda pair: pair[0])
+        intervals: dict[str, int] = {}
+        for c, df in ordered:
+            missing = [col for col in _BAR_COLUMNS if col not in df.columns]
+            if missing:
+                raise ValueError(f"{c.code}: missing column(s) {missing}")
+            if len(df) == 0:
+                raise ValueError(f"{c.code} has no bars")
+            if "contract" in df.columns:
+                held = set(df["contract"].astype(str))
+                if held != {c.code}:
+                    raise ValueError(
+                        f"{c.code}: its 'contract' column holds {sorted(held)}, not "
+                        f"{c.code}"
+                    )
+            problem = ohlcv_problem(df)
+            if problem is not None:
+                raise ValueError(f"{c.code}: {problem}")
+            ts = df["ts"].to_numpy()
+            if len(ts) > 1 and not (ts[1:] > ts[:-1]).all():
+                i = int(np.flatnonzero(ts[1:] <= ts[:-1])[0]) + 1
+                raise ValueError(f"{c.code}: bar timestamps must strictly increase "
+                                 f"(row {i}, ts {int(ts[i])})")
+            for col in ("open", "high", "low", "close"):
+                v = df[col].to_numpy(dtype="float64") / tick
+                off = np.flatnonzero(np.abs(v - np.rint(v)) > 1e-6)
+                if off.size:
+                    i = int(off[0])
+                    raise ValueError(
+                        f"{c.code}: {col} at row {i} is {float(df[col].iloc[i])!r}, not "
+                        f"on the {root} tick grid ({tick}); adjustment works in whole "
+                        "ticks"
+                    )
+            if len(ts) > 1:
+                diffs = pd.Series(ts[1:] - ts[:-1])
+                intervals[c.code] = int(diffs.mode().iloc[0])
+        distinct = sorted(set(intervals.values()))
+        if len(distinct) > 1:
+            listing = ", ".join(f"{code}={sec}s" for code, sec in intervals.items())
+            raise ValueError(
+                f"the contracts have different bar intervals ({listing}); resample them "
+                "to one interval first"
+            )
+        contracts = [c for c, _ in ordered]
+        for a, b in zip(contracts, contracts[1:], strict=False):
+            if root in CALENDAR_ROOTS:
+                y, m = a.year, a.month + 3
+                if m > 12:
+                    y, m = y + 1, m - 12
+                if (b.year, b.month) != (y, m):
+                    raise ValueError(
+                        f"the quarterly chain has a gap: {a.code} is followed by "
+                        f"{b.code}, so {Contract(root, m, y).code} is missing"
+                    )
+            else:
+                a_last = int(parsed[a.code][1]["ts"].iloc[-1])
+                b_first = int(parsed[b.code][1]["ts"].iloc[0])
+                if b_first > a_last:
+                    raise ValueError(
+                        f"{a.code} and {b.code} do not overlap ({a.code} ends before "
+                        f"{b.code} starts), so there is no bar where both trade to roll "
+                        "at"
+                    )
+        return cls(
+            root=root,
+            contracts=contracts,
+            frames={c.code: parsed[c.code][1].reset_index(drop=True) for c in contracts},
+            interval=distinct[0] if distinct else 0,
+            file_sha256=dict(file_sha256 or {}),
+        )
