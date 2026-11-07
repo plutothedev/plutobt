@@ -31,6 +31,7 @@ from plutobt.lookahead import (
     _ROW_RULE,
     LookaheadError,
     LookaheadWarning,
+    PriceLevelWarning,
     _first_mismatch,
     assert_causal,
     first_difference,
@@ -473,6 +474,8 @@ class Engine:
         if self.config.check_causality:
             try:
                 self._check_causality(df, strategy, snapshot, data)
+                if "contract" in df.columns:
+                    self._check_price_levels(df, snapshot, data)
             finally:
                 _refuse_class_changes(classes)  # by a prefix call, or the last one
         session_breaks = self.config.break_on == "session"
@@ -727,6 +730,38 @@ class Engine:
                 isinstance(sample, bool) or not isinstance(sample, int) or sample < 1):
             raise ValueError("causality_sample must be 'auto', None (check every bar) or "
                              f"a whole number of bars >= 1, got {sample!r}")
+
+    def _check_price_levels(self, df: pd.DataFrame, snapshot: Strategy,
+                            data: pd.DataFrame) -> None:
+        """The price-level guard (2.0 §7.4), on a continuous series only. Precompute
+        runs once more, on a fresh copy of the strategy as passed in, with open, high,
+        low and close all raised by 1,000 ticks. A signal column that comes out the same
+        (RSI, a cross flag, ATR) or raised by exactly that much (a moving average) does
+        not depend on the price level. Anything else (a fixed threshold, a percentage or
+        log return) draws a PriceLevelWarning naming it: on a back-adjusted series those
+        levels are not prices that traded."""
+        shift = 1000 * self.instrument.tick_size
+        moved = df.copy()
+        for col in ("open", "high", "low", "close"):
+            moved[col] = moved[col] + shift
+        out = copy.deepcopy(snapshot).precompute(moved).reset_index(drop=True)
+        for col in data.columns:
+            if col in _BASE_COLS or col not in out.columns:
+                continue
+            a, b = data[col], out[col]
+            if _first_mismatch(a, b) is None:
+                continue
+            numeric = (pd.api.types.is_numeric_dtype(a.dtype)
+                       and not pd.api.types.is_bool_dtype(a.dtype))
+            if numeric and _first_mismatch(a + shift, b) is None:
+                continue
+            warnings.warn(
+                f"signal column {col!r} depends on the absolute price level: on a "
+                "back-adjusted continuous series the old prices are shifted by the "
+                "later roll gaps, so a fixed level (close > 18000) or a percentage or log "
+                "return reads the adjustment, not the market. Use distances (points, "
+                "ATR, a moving average) or raw_close, which holds the real close",
+                PriceLevelWarning, stacklevel=4)
 
     @staticmethod
     def _check_roll_meta(df: pd.DataFrame, roll_meta: RollMeta | None) -> None:

@@ -31,6 +31,12 @@ class LookaheadWarning(UserWarning):
     strategy's precompute set on ``self`` from the full frame, which on_bar may read."""
 
 
+class PriceLevelWarning(UserWarning):
+    """A signal column on a back-adjusted continuous series depends on the absolute
+    price level (a fixed threshold, a percentage or log return): adjusted prices are not
+    the prices that traded, so such a column reads the adjustment, not the market."""
+
+
 # How two numbers of a float column match (the full frame's value b, a prefix's a):
 #     |a - b| <= RTOL * |b| + SCALE_TOL * scale
 # where scale is that column's largest finite |value| in the full frame. Why both terms:
