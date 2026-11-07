@@ -54,6 +54,22 @@ real calendar dates and real exchange hours; the prices and volumes are not.
   session hours and its own costs. This seed's path happens to fall from 70 to
   about 44 over the month; it is a random walk, not a forecast.
 
+### nq_contracts/: four NQ 2026 quarterly contracts (PlutoBT 2.0)
+
+- **Files:** `NQH2026.csv`, `NQM2026.csv`, `NQU2026.csv`, `NQZ2026.csv`, also
+  **SYNTHETIC**: one seeded random walk in whole NQ ticks, plus a constant basis
+  per contract (0, 100, 40, 160 ticks), so the gaps at the three rolls are
+  +25.00, -15.00 and +30.00 points.
+- **Session:** 08:30-15:15 CT, 15-minute bars (27 a day), weekdays from
+  2026-03-02 to 2026-10-02; exchange holidays are not modelled.
+- **Overlap:** each pair trades side by side for at least five trading days
+  around CME's roll day (the Monday before the third Friday). The volume lead
+  passes two trading days before each calendar roll.
+- **Format:** CSV in PlutoBT's `generic` layout, `ts,open,high,low,close,volume`,
+  `ts` = unix seconds of the bar OPEN, LF line endings.
+- **Generator:** `scripts/make_sample_contracts.py`, seed `20261106`;
+  `tests/test_sample_contracts.py` pins every byte.
+
 ## Redistribution
 
 You may freely use, copy, modify, and redistribute the files in `data/sample/`,
@@ -62,6 +78,6 @@ unrestricted.
 
 ## Format
 
-All files are JSON arrays of `[ts, open, high, low, close, volume]` rows, one
+The three `*_5m.json` files are JSON arrays of `[ts, open, high, low, close, volume]` rows, one
 bar per line, LF line endings. `ts` is unix seconds marking the bar OPEN (§5.5).
 Prices are snapped to each instrument's tick grid and are strictly positive.
