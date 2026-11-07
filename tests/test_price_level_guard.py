@@ -93,3 +93,16 @@ def test_pandas_frame_untouched():
     before = df.copy()
     guard_warnings(make("sig", ema), df=df, meta=meta)
     pd.testing.assert_frame_equal(df, before)
+
+
+def test_emacross_on_the_sample_passes():
+    """Regression: an EMA of shifted prices differs from the shifted EMA by float noise
+    (about 1e-11 at NQ levels), so the guard must compare with the causality guard's
+    tolerance, not exactly (it once warned on EMACross's ema_f and ema_s)."""
+    from plutobt.contracts import ContractSet
+    from plutobt.roll import build_continuous
+    from plutobt.strategies.ema_cross import EMACross
+
+    cs = ContractSet.from_folder("data/sample/nq_contracts", "generic", "NQ", ts_is="open")
+    df, meta = build_continuous(cs)
+    assert guard_warnings(EMACross(), df=df, meta=meta, causality_sample=50) == []

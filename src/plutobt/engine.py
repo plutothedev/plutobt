@@ -33,6 +33,8 @@ from plutobt.lookahead import (
     LookaheadWarning,
     PriceLevelWarning,
     _first_mismatch,
+    _mismatch_at,
+    _values,
     assert_causal,
     first_difference,
 )
@@ -749,11 +751,13 @@ class Engine:
             if col in _BASE_COLS or col not in out.columns:
                 continue
             a, b = data[col], out[col]
-            if _first_mismatch(a, b) is None:
+            # The causality guard's tolerance, not exact: an EMA of shifted prices
+            # differs from the shifted EMA by float noise (~1e-11 at NQ levels).
+            if _mismatch_at(_values(b), _values(a), col) is None:
                 continue
             numeric = (pd.api.types.is_numeric_dtype(a.dtype)
                        and not pd.api.types.is_bool_dtype(a.dtype))
-            if numeric and _first_mismatch(a + shift, b) is None:
+            if numeric and _mismatch_at(_values(b), _values(a + shift), col) is None:
                 continue
             warnings.warn(
                 f"signal column {col!r} depends on the absolute price level: on a "
