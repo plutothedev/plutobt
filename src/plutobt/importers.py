@@ -201,7 +201,7 @@ def _databento_prices(raw: pd.DataFrame, name: str) -> pd.DataFrame:
 
 def _read_databento(path: str) -> dict[str | None, pd.DataFrame]:
     name = Path(path).name
-    raw = pd.read_csv(path)
+    raw = pd.read_csv(path, float_precision="round_trip")
     missing = [c for c in ("ts_event", *_BAR) if c not in raw.columns]
     if missing:
         raise ValueError(f"{name}: not a Databento OHLCV CSV, missing column(s) {missing}")
@@ -218,7 +218,7 @@ def _read_databento(path: str) -> dict[str | None, pd.DataFrame]:
 
 def _read_tradingview(path: str, ts_is: str | None, tz: str | None) -> tuple:
     name = Path(path).name
-    raw = pd.read_csv(path)
+    raw = pd.read_csv(path, float_precision="round_trip")
     raw.columns = [str(c).strip().lower() for c in raw.columns]
     missing = [c for c in ("time", "open", "high", "low", "close") if c not in raw.columns]
     if missing:
@@ -235,7 +235,7 @@ def _read_tradingview(path: str, ts_is: str | None, tz: str | None) -> tuple:
 def _read_ninjatrader(path: str, ts_is: str | None) -> tuple:
     name = Path(path).name
     raw = pd.read_csv(path, sep=";", header=None, dtype={0: str},
-                      names=["stamp", *_BAR])
+                      names=["stamp", *_BAR], float_precision="round_trip")
     stamp = raw["stamp"].astype(str).str.strip()
     if not stamp.str.fullmatch(r"\d{8} \d{6}").all():
         i = int(np.flatnonzero(~stamp.str.fullmatch(r"\d{8} \d{6}").to_numpy())[0])
@@ -259,7 +259,7 @@ def _read_generic(path: str, columns: dict | None, ts_is: str | None, tz: str | 
         )
     mapping = {c: c for c in ("ts", *_BAR)}
     mapping.update(columns or {})
-    raw = pd.read_csv(path)
+    raw = pd.read_csv(path, float_precision="round_trip")
     missing = [f"{k} (column {v!r})" for k, v in mapping.items() if v not in raw.columns]
     if missing:
         raise ValueError(f"{name}: missing {missing}; map them with columns={{...}}")

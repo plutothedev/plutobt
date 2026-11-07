@@ -20,14 +20,18 @@ its date, so a bar at or after 17:00 CT belongs to the next day.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import warnings
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from plutobt.contracts import ContractSet, calendar_roll_day, parse_contract
-from plutobt.data import CT
+from plutobt.data import CT, frame_sha256
+from plutobt.instruments import REGISTRY
 
 TRIGGERS = ("calendar", "volume", "dates")
 _DAY_SHIFT = timedelta(hours=7)          # 17:00 CT + 7 h = 00:00 of the trading day
@@ -128,3 +132,175 @@ def roll_schedule(cs: ContractSet, trigger: str = "calendar",
                              f"previous roll at ts {rolls[-1].roll_ts}")
         rolls.append(Roll(a.code, b.code, int(ts), trigger))
     return rolls
+
+
+# ---------------------------------------------------------------------------
+# Adjustment (spec §6.3) and metadata (spec §6.4)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RollMeta:
+    """How a continuous series was built. Saved as ``<name>.roll.json`` beside it.
+
+    ``rolls`` holds one ``{from, to, roll_ts, gap_ticks, gap_points, gap_dollars}`` per
+    roll; ``inputs`` the sha256 of each contract's source file; ``frame_sha256`` the
+    canonical hash of the series itself (``data.frame_sha256``), which ``Engine.run``
+    checks; ``window`` the ``[first_ts, last_ts]`` of a slice (None for a full build)."""
+
+    root: str
+    roll_trigger: str
+    splice_method: str
+    adjustment_method: str
+    as_of_date: str
+    rolls: list[dict]
+    inputs: dict[str, str]
+    frame_sha256: str
+    min_adjusted_price: float
+    plutobt_version: str
+    window: list[int] | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2, sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text: str) -> RollMeta:
+        return cls(**json.loads(text))
+
+
+def _decimals(tick: float) -> int:
+    text = repr(float(tick))
+    return len(text.split(".")[1]) if "." in text else 0
+
+
+def _adjust(cs: ContractSet, rolls: list[Roll]) -> tuple[pd.DataFrame, list[dict], float]:
+    """Splice ``cs`` at ``rolls`` and back-adjust additively, in whole ticks. The newest
+    contract keeps its raw floats exactly; an older one is rebuilt from integer ticks."""
+    inst = REGISTRY[cs.root]
+    tick, dec = inst.tick_size, _decimals(inst.tick_size)
+    codes = [c.code for c in cs.contracts]
+    gaps: list[int] = []
+    rows: list[dict] = []
+    for r in rolls:
+        a, b = cs.frames[r.from_code], cs.frames[r.to_code]
+        a_open = float(a.loc[a["ts"] == r.roll_ts, "open"].iloc[0])
+        b_open = float(b.loc[b["ts"] == r.roll_ts, "open"].iloc[0])
+        gap = int(np.rint(b_open / tick)) - int(np.rint(a_open / tick))
+        gaps.append(gap)
+        rows.append({"from": r.from_code, "to": r.to_code, "roll_ts": int(r.roll_ts),
+                     "gap_ticks": gap, "gap_points": round(gap * tick, dec),
+                     "gap_dollars": round(gap * inst.tick_value, 6)})
+    parts = []
+    for i, code in enumerate(codes):
+        f = cs.frames[code]
+        ts = f["ts"].to_numpy()
+        keep = np.ones(len(f), dtype=bool)
+        if i > 0:
+            keep &= ts >= rolls[i - 1].roll_ts
+        if i < len(rolls):
+            keep &= ts < rolls[i].roll_ts
+        part = f.loc[keep, ["ts", "open", "high", "low", "close", "volume"]].copy()
+        offset = sum(gaps[i:])
+        raw_close = part["close"].to_numpy(dtype="float64").copy()
+        if offset:
+            for col in ("open", "high", "low", "close"):
+                ticks = np.rint(part[col].to_numpy(dtype="float64") / tick).astype(np.int64)
+                part[col] = np.round((ticks + offset) * tick, dec)
+        part["contract"] = code
+        part["adj_offset"] = round(offset * tick, dec) if offset else 0.0
+        part["raw_close"] = raw_close
+        parts.append(part)
+    df = pd.concat(parts, ignore_index=True)
+    df["ts"] = df["ts"].astype("int64")
+    df["volume"] = df["volume"].astype("int64")
+    df["adj_offset"] = df["adj_offset"].astype("float64")
+    min_price = float(min(df["low"].min(), df["open"].min(), df["close"].min()))
+    if min_price <= 0:
+        for col in ("low", "open", "close", "high"):
+            bad = np.flatnonzero(df[col].to_numpy() <= 0)
+            if bad.size:
+                i = int(bad[0])
+                warnings.warn(
+                    f"back-adjustment pushed the history to or below zero: {col} "
+                    f"{float(df[col].iloc[i])!r} at ts {int(df['ts'].iloc[i])} "
+                    f"({df['contract'].iloc[i]}). Point and dollar P&L stay exact; "
+                    "Engine.run refuses this frame unless allow_nonpositive_prices = true",
+                    UserWarning, stacklevel=3)
+                break
+    return df, rows, min_price
+
+
+def build_continuous(cs: ContractSet, trigger: str = "calendar",
+                     roll_dates: dict[str, str] | None = None
+                     ) -> tuple[pd.DataFrame, RollMeta]:
+    """Build a back-adjusted continuous series from ``cs`` (spec §6).
+
+    Columns: ``ts, open, high, low, close, volume`` (adjusted; the active contract's
+    volume), ``contract``, ``adj_offset`` (adjusted minus raw, constant within a
+    contract) and ``raw_close``. The newest contract keeps its raw prices; each older
+    one is shifted by the sum of the later gaps, each gap measured at the roll bar's
+    open from both contracts. Warns if the history goes to or below zero."""
+    from plutobt import __version__
+
+    rolls = roll_schedule(cs, trigger, roll_dates)
+    df, rows, min_price = _adjust(cs, rolls)
+    meta = RollMeta(
+        root=cs.root, roll_trigger=trigger, splice_method="backward",
+        adjustment_method="additive",
+        as_of_date=trading_day(int(df["ts"].iloc[-1])).isoformat(),
+        rolls=rows, inputs=dict(cs.file_sha256), frame_sha256=frame_sha256(df),
+        min_adjusted_price=min_price, plutobt_version=__version__,
+    )
+    return df, meta
+
+
+def _meta_path(path: str) -> str:
+    p = Path(path)
+    return str(p.with_name(p.stem + ".roll.json"))
+
+
+def save_continuous(df: pd.DataFrame, meta: RollMeta, path: str) -> tuple[str, str]:
+    """Write the series to ``path`` (CSV) and its metadata to ``<stem>.roll.json``."""
+    df.to_csv(path, index=False, lineterminator=chr(10))
+    json_path = _meta_path(path)
+    Path(json_path).write_text(meta.to_json(), encoding="utf-8")
+    return str(path), json_path
+
+
+def load_continuous(path: str) -> tuple[pd.DataFrame, RollMeta]:
+    """Read a series written by ``save_continuous``. Refuses a series whose hash no
+    longer matches its metadata (edited, or saved by something else)."""
+    df = pd.read_csv(path, dtype={"contract": str}, float_precision="round_trip")
+    df["ts"] = df["ts"].astype("int64")
+    df["volume"] = df["volume"].astype("int64")
+    for col in ("open", "high", "low", "close", "adj_offset", "raw_close"):
+        df[col] = df[col].astype("float64")
+    meta = RollMeta.from_json(Path(_meta_path(path)).read_text(encoding="utf-8"))
+    actual = frame_sha256(df)
+    if actual != meta.frame_sha256:
+        raise ValueError(
+            f"{path}: its bars hash to sha256 {actual}, but its metadata pins "
+            f"{meta.frame_sha256}; the series was edited or does not belong to this "
+            "metadata. Rebuild it with build_continuous"
+        )
+    return df, meta
+
+
+def slice_continuous(df: pd.DataFrame, meta: RollMeta, start_ts: int | None = None,
+                     end_ts: int | None = None) -> tuple[pd.DataFrame, RollMeta]:
+    """The bars with ``start_ts <= ts <= end_ts`` and metadata re-pinned to them: only
+    the rolls inside the slice (a roll on its first bar is outside, since no contract
+    change is visible there), a fresh ``frame_sha256``, and ``window``."""
+    ts = df["ts"].to_numpy()
+    keep = np.ones(len(df), dtype=bool)
+    if start_ts is not None:
+        keep &= ts >= start_ts
+    if end_ts is not None:
+        keep &= ts <= end_ts
+    out = df.loc[keep].reset_index(drop=True)
+    if out.empty:
+        raise ValueError(f"no bars between {start_ts} and {end_ts}")
+    first, last = int(out["ts"].iloc[0]), int(out["ts"].iloc[-1])
+    rows = [r for r in meta.rolls if first < r["roll_ts"] <= last]
+    min_price = float(min(out["low"].min(), out["open"].min(), out["close"].min()))
+    return out, replace(meta, rolls=rows, frame_sha256=frame_sha256(out),
+                        min_adjusted_price=min_price, window=[first, last])

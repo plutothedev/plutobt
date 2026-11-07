@@ -5,7 +5,6 @@ from __future__ import annotations
 import collections
 import copy
 import functools
-import hashlib
 import inspect
 import keyword
 import math
@@ -20,7 +19,12 @@ import pandas as pd
 from plutobt import __version__
 from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
-from plutobt.data import assert_positive_prices, ohlcv_problem, ts_unit_problem
+from plutobt.data import (
+    assert_positive_prices,
+    frame_sha256,
+    ohlcv_problem,
+    ts_unit_problem,
+)
 from plutobt.instruments import Instrument
 from plutobt.lookahead import (
     _ROW_RULE,
@@ -695,10 +699,7 @@ class Engine:
         ``periods_per_year`` lives ONLY inside ``manifest["config"]`` (single
         source = config); consumers read it from there, never a top-level dup.
         """
-        # lineterminator pinned: pandas defaults to os.linesep, so the same bars
-        # hashed differently on Windows and Linux.
-        raw = df.to_csv(index=False, lineterminator="\n").encode("utf-8")
-        sha = hashlib.sha256(raw).hexdigest()
+        sha = frame_sha256(df)
         if sha in _SAMPLE_SHA256:
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
             # synthetic snapshot. These document the continuous-series policy;
