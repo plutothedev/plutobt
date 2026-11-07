@@ -78,6 +78,9 @@ class RollEvent:
     contracts: int
     gap_points: float
     cost: float
+    # The jump an unadjusted front-month chart shows at this roll for the position, in
+    # dollars (carry, not P&L): -side * contracts * gap_points * point_value.
+    roll_yield: float = 0.0
 
 
 @dataclass

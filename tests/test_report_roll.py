@@ -59,3 +59,22 @@ def test_metrics_without_roll_meta_have_no_roll_keys():
         load_bars("data/sample/nq_5m.json").iloc[:200].reset_index(drop=True), Strategy())
     m = compute_metrics(res, periods_per_year=20412.0)
     assert "rolls_taken" not in m and "roll_yield" not in m
+
+
+def test_roll_yield_with_an_unregistered_instrument():
+    """Review #7: compute_metrics looked the point value up in REGISTRY by symbol, so a
+    custom Instrument crashed it. The engine's own instrument prices the roll yield."""
+    from dataclasses import replace
+
+    from plutobt.engine import Engine
+    from plutobt.instruments import get_instrument
+    from tests.test_engine_roll import CFG, Script, series
+
+    df, meta = series()
+    feed = replace(get_instrument("NQ"), symbol="NQ_MYFEED")
+    res = Engine(feed, CFG).run(df, Script(hold("long")), roll_meta=meta)
+    m = metrics(res)
+    assert m["roll_yield"] == pytest.approx(-GAP * 20.0)
+    (ev,) = res.rolls
+    assert ev.roll_yield == pytest.approx(-GAP * 20.0)
+    assert "Roll yield" in format_report(res, "NQ_MYFEED")

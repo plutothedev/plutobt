@@ -550,11 +550,14 @@ class Engine:
                     n = abs(qty)
                     cost = (2 * self.config.commission_per_side * n
                             + 2 * broker._slippage_ticks() * self.instrument.tick_value * n)
+                    gap_points = gap_to.get(str(bar.contract), 0.0)
                     event = RollEvent(
                         ts=int(bar.ts), from_contract=str(prev.contract),
                         to_contract=str(bar.contract),
                         side="long" if qty > 0 else "short", contracts=n,
-                        gap_points=gap_to.get(str(bar.contract), 0.0), cost=cost)
+                        gap_points=gap_points, cost=cost,
+                        roll_yield=-(1 if qty > 0 else -1) * n * gap_points
+                        * self.instrument.point_value)
                     portfolio.apply_roll(event)
                     rolls.append(event)
                 broker.fill_pending(bar)
