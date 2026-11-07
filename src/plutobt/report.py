@@ -161,6 +161,18 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         f"Trades        = {n_trades}   (closed)",
         f"Open at end   = {n_open}"
         + (" (marked to last close, excluded from trade stats)" if n_open else ""),
+    ]
+    if "rolls_taken" in m:
+        lines += [
+            f"Rolls taken   = {m['rolls_taken']}   (contract rolls a position was held "
+            "through)",
+            f"Roll cost     = {m['roll_cost_total']:.2f}   ($, commission and slippage on "
+            "both legs, inside net P&L)",
+            f"Roll yield    = {m['roll_yield']:.2f}   ($)",
+            "Roll yield: the jump an unadjusted front-month chart would show at each "
+            "roll, which is carry, not P&L.",
+        ]
+    lines += [
         f"data_sha256   = {man['data_sha256']}   (of the loaded bars as CSV, not the file)",
         f"engine version = {man['version']}",
     ]

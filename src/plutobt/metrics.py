@@ -534,4 +534,17 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
     metrics["periods_per_year"] = float(periods_per_year)
     metrics["n_trades"] = n_closed
     metrics["exposure"] = exposure_val
+    if "rolls" in result.manifest:
+        # 2.0 §7.3, only for a continuous series: rolls the run held a position
+        # through, what they cost, and the roll yield: the jump an unadjusted
+        # front-month chart would show at each roll, i.e. carry, which an additively
+        # adjusted series correctly leaves out of P&L.
+        from plutobt.instruments import get_instrument
+
+        pv = get_instrument(result.manifest["instrument"]).point_value
+        metrics["rolls_taken"] = len(result.rolls)
+        metrics["roll_cost_total"] = float(sum(e.cost for e in result.rolls))
+        metrics["roll_yield"] = float(sum(
+            -(1 if e.side == "long" else -1) * e.contracts * e.gap_points * pv
+            for e in result.rolls))
     return metrics
