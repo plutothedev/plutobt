@@ -112,3 +112,27 @@ def test_contract_column_must_match_key():
     frames["NQM2026"]["contract"] = "NQU2026"
     with pytest.raises(ValueError, match="NQU2026"):
         ContractSet.from_frames(frames)
+
+
+def test_from_folder_hashes_files(tmp_path):
+    import hashlib
+
+    for code, df in quarter_frames("NQH2026", "NQM2026").items():
+        df.to_csv(tmp_path / f"{code}.csv", index=False)
+    cs = ContractSet.from_folder(str(tmp_path), "generic", "NQ", ts_is="open")
+    assert list(cs.frames) == ["NQH2026", "NQM2026"]
+    for code in cs.frames:
+        raw = (tmp_path / f"{code}.csv").read_bytes()
+        assert cs.file_sha256[code] == hashlib.sha256(raw).hexdigest()
+
+
+def test_from_folder_wrong_root_refused(tmp_path):
+    for code, df in quarter_frames("NQH2026", "NQM2026").items():
+        df.to_csv(tmp_path / f"{code}.csv", index=False)
+    with pytest.raises(ValueError, match="ES"):
+        ContractSet.from_folder(str(tmp_path), "generic", "ES", ts_is="open")
+
+
+def test_from_folder_empty_refused(tmp_path):
+    with pytest.raises(ValueError, match="no .csv or .txt"):
+        ContractSet.from_folder(str(tmp_path), "generic", "NQ", ts_is="open")

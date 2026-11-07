@@ -288,3 +288,34 @@ class ContractSet:
             interval=distinct[0] if distinct else 0,
             file_sha256=dict(file_sha256 or {}),
         )
+
+    @classmethod
+    def from_folder(cls, path: str, preset: str, root: str, **load_kwargs
+                    ) -> ContractSet:
+        """Load every ``.csv`` / ``.txt`` file in ``path`` with ``preset`` (keyword
+        arguments go to ``load_csv``) and build the set. Every contract must be ``root``.
+        ``file_sha256`` records the sha256 of each contract's source file."""
+        import hashlib
+        from pathlib import Path
+
+        from plutobt.importers import load_csv_contracts
+
+        files = sorted(p for p in Path(path).iterdir()
+                       if p.is_file() and p.suffix.lower() in (".csv", ".txt"))
+        if not files:
+            raise ValueError(f"{path}: no .csv or .txt files to load")
+        frames: dict[str, object] = {}
+        hashes: dict[str, str] = {}
+        for p in files:
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            for code, df in load_csv_contracts(str(p), preset, **load_kwargs).items():
+                if parse_contract(code).root != root:
+                    raise ValueError(
+                        f"{p.name} holds {code}, which is not root {root!r}; keep one "
+                        "root per folder"
+                    )
+                if code in frames:
+                    raise ValueError(f"{code} appears twice in {path} (again in {p.name})")
+                frames[code] = df
+                hashes[code] = digest
+        return cls.from_frames(frames, file_sha256=hashes)
