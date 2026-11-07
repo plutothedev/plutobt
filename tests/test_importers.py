@@ -168,3 +168,25 @@ def test_databento_fixed_point_is_exact_on_the_grid(tmp_path):
     want = [float(f"{t * 0.25:.2f}") for t in ticks]
     for col in ("open", "high", "low", "close"):
         assert df[col].tolist() == want, col
+
+
+def _day_first(tmp_path):
+    p = tmp_path / "dmy.csv"
+    rows = [f"0{d}/03/2026 08:30,1,1,1,1,1" for d in range(2, 7)]
+    p.write_text("ts,open,high,low,close,volume" + chr(10) + chr(10).join(rows) + chr(10))
+    return p
+
+
+def test_non_iso_text_needs_ts_format(tmp_path):
+    """Review #8: format='mixed' read day-first 02/03..06/03/2026 as Feb 3 .. Jun 3,
+    strictly increasing, so it loaded silently wrong."""
+    with pytest.raises(ValueError, match="ts_format"):
+        load_csv(str(_day_first(tmp_path)), ts_is="open", tz="America/Chicago")
+
+
+def test_ts_format_reads_day_first(tmp_path):
+    df = load_csv(str(_day_first(tmp_path)), ts_is="open", tz="America/Chicago",
+                  ts_format="%d/%m/%Y %H:%M")
+    local = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(CT)
+    assert [t.day for t in local] == [2, 3, 4, 5, 6]
+    assert {t.month for t in local} == {3}

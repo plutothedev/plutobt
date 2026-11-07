@@ -25,7 +25,8 @@ Presets (formats from the vendors' own docs, 2026-11-06 fact-check):
 
 Time rules, refused rather than guessed: numeric timestamps are unix time (seconds,
 milliseconds, microseconds or nanoseconds, told apart by size) and need no zone; text
-timestamps without a zone need ``tz`` (an IANA name such as "America/Chicago"); a bar
+timestamps without a zone need ``tz`` (an IANA name such as "America/Chicago"); text
+timestamps are ISO 8601 unless ``ts_format`` gives the exact strftime format; a bar
 stamped at its close is moved back by the file's bar interval, which must be clear (one
 interval covering at least half the gaps).
 """
@@ -70,7 +71,24 @@ def _epoch_seconds(values: np.ndarray, name: str) -> np.ndarray:
     return v.astype("int64")
 
 
-def _to_unix_seconds(col: pd.Series, tz: str | None, name: str) -> np.ndarray:
+def _parse_text(text: pd.Series, name: str, ts_format: str | None, utc: bool):
+    """Text timestamps: ISO 8601 by default, or exactly ``ts_format``. Never guessed
+    per row: format="mixed" read day-first 02/03..06/03 as Feb 3 .. Jun 3."""
+    try:
+        if ts_format is not None:
+            return pd.to_datetime(text, format=ts_format, utc=utc)
+        return pd.to_datetime(text, format="ISO8601", utc=utc)
+    except (ValueError, TypeError) as bad:
+        how = (f"ts_format={ts_format!r}" if ts_format is not None
+               else "ISO 8601 (e.g. 2026-03-05 08:30:00)")
+        raise ValueError(
+            f"{name}: timestamps such as {text.iloc[0]!r} do not parse as {how}. Pass "
+            "ts_format='%d/%m/%Y %H:%M' (or the file's exact strftime format): PlutoBT "
+            "never guesses whether 02/03 is February or March") from bad
+
+
+def _to_unix_seconds(col: pd.Series, tz: str | None, name: str,
+                     ts_format: str | None = None) -> np.ndarray:
     if pd.api.types.is_numeric_dtype(col.dtype):
         if col.isna().any():
             raise ValueError(f"{name}: row {int(np.flatnonzero(col.isna())[0])} has no "
@@ -79,7 +97,7 @@ def _to_unix_seconds(col: pd.Series, tz: str | None, name: str) -> np.ndarray:
     text = col.astype(str).str.strip()
     zoned = text.str.contains(_ZONED)
     if zoned.all():
-        stamps = pd.to_datetime(text, utc=True, format="ISO8601")
+        stamps = _parse_text(text, name, ts_format, utc=True)
     elif not zoned.any():
         if tz is None:
             raise ValueError(
@@ -87,7 +105,7 @@ def _to_unix_seconds(col: pd.Series, tz: str | None, name: str) -> np.ndarray:
                 "tz='America/Chicago' (or whatever zone the file was written in). "
                 "PlutoBT never guesses a zone: a wrong one shifts every bar"
             )
-        naive = pd.to_datetime(text, format="mixed")
+        naive = _parse_text(text, name, ts_format, utc=False)
         stamps = naive.dt.tz_localize(tz, ambiguous="raise", nonexistent="raise")
     else:
         i = int(np.flatnonzero(~zoned.to_numpy())[0])
@@ -219,7 +237,8 @@ def _read_databento(path: str) -> dict[str | None, pd.DataFrame]:
     return out
 
 
-def _read_tradingview(path: str, ts_is: str | None, tz: str | None) -> tuple:
+def _read_tradingview(path: str, ts_is: str | None, tz: str | None,
+                      ts_format: str | None = None) -> tuple:
     name = Path(path).name
     raw = pd.read_csv(path, float_precision="round_trip")
     raw.columns = [str(c).strip().lower() for c in raw.columns]
@@ -229,7 +248,7 @@ def _read_tradingview(path: str, ts_is: str | None, tz: str | None) -> tuple:
                          f"{missing}")
     if "volume" not in raw.columns:
         raw["volume"] = 0
-    ts = _to_unix_seconds(raw["time"], tz, name)
+    ts = _to_unix_seconds(raw["time"], tz, name, ts_format)
     if (ts_is or "open") == "close":
         ts = _shift_close_to_open(ts, name)
     return ts, raw
@@ -251,8 +270,8 @@ def _read_ninjatrader(path: str, ts_is: str | None) -> tuple:
     return ts, raw
 
 
-def _read_generic(path: str, columns: dict | None, ts_is: str | None, tz: str | None
-                  ) -> tuple:
+def _read_generic(path: str, columns: dict | None, ts_is: str | None, tz: str | None,
+                  ts_format: str | None = None) -> tuple:
     name = Path(path).name
     if ts_is not in ("open", "close"):
         raise ValueError(
@@ -267,7 +286,7 @@ def _read_generic(path: str, columns: dict | None, ts_is: str | None, tz: str | 
     if missing:
         raise ValueError(f"{name}: missing {missing}; map them with columns={{...}}")
     data = pd.DataFrame({k: raw[v] for k, v in mapping.items()})
-    ts = _to_unix_seconds(data["ts"], tz, name)
+    ts = _to_unix_seconds(data["ts"], tz, name, ts_format)
     if ts_is == "close":
         ts = _shift_close_to_open(ts, name)
     return ts, data
@@ -280,7 +299,7 @@ def _check_preset(preset: str) -> None:
 
 def load_csv(path: str, preset: str = "generic", *, tz: str | None = None,
              ts_is: str | None = None, columns: dict[str, str] | None = None,
-             symbol: str | None = None) -> pd.DataFrame:
+             symbol: str | None = None, ts_format: str | None = None) -> pd.DataFrame:
     """Load one contract's bars from a vendor file (see the module docstring)."""
     _check_preset(preset)
     path = str(path)
@@ -298,11 +317,11 @@ def load_csv(path: str, preset: str = "generic", *, tz: str | None = None,
             df["contract"] = parse_contract(symbol, near=_near(ts)).code
         return df
     if preset == "tradingview":
-        ts, data = _read_tradingview(path, ts_is, tz)
+        ts, data = _read_tradingview(path, ts_is, tz, ts_format)
     elif preset == "ninjatrader":
         ts, data = _read_ninjatrader(path, ts_is)
     else:
-        ts, data = _read_generic(path, columns, ts_is, tz)
+        ts, data = _read_generic(path, columns, ts_is, tz, ts_format)
     return _finish(ts, data, Path(path).name, _contract(symbol, path, ts))
 
 

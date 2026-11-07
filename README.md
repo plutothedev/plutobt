@@ -225,8 +225,10 @@ df = load_csv("bars.csv", preset="generic", tz="America/Chicago", ts_is="open",
 | `ninjatrader` | NinjaTrader 8 historical export, `yyyyMMdd HHmmss;o;h;l;c;v` | NinjaTrader exports in UTC with END-of-bar stamps, so each stamp moves back one bar to the open. Minute bars only. |
 | `generic` | Any CSV | Map the columns, and say `ts_is="open"` or `"close"`. |
 
-Two time rules are refused rather than guessed. Timestamps written without a zone
-need `tz=`: a wrong zone shifts every bar. And a close-stamped file read as
+Three time rules are refused rather than guessed. Text timestamps are read as ISO
+8601; any other layout needs `ts_format=` (`"%d/%m/%Y %H:%M"`), because 02/03 can
+be February or March. Timestamps written without a zone need `tz=`: a wrong zone
+shifts every bar. And a close-stamped file read as
 open-stamped puts every bar one interval early, which is look-ahead, so `generic`
 makes you say which it is. The contract (`NQZ2025`) comes from `symbol=`, the file's
 symbol column, or its name: `NQZ5`, `NQZ25`, `NQZ2025`, `NQ 12-25` and `NQ DEC25`

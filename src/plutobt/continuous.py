@@ -31,6 +31,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--ts-is", choices=("open", "close"), default=None,
                    help="whether each timestamp is the bar's open or close (required "
                         "for --preset generic)")
+    p.add_argument("--ts-format", default=None,
+                   help="strftime format of text timestamps that are not ISO 8601, e.g. "
+                        "'%%d/%%m/%%Y %%H:%%M'")
     p.add_argument("--trigger", choices=TRIGGERS, default="calendar")
     p.add_argument("--roll-dates", default=None,
                    help='JSON file mapping each outgoing contract to its roll day, e.g. '
@@ -43,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         load_kwargs = {"tz": args.tz, "ts_is": args.ts_is}
+        if args.ts_format:
+            load_kwargs["ts_format"] = args.ts_format
         cs = ContractSet.from_folder(args.folder, args.preset, args.root, **load_kwargs)
         roll_dates = None
         if args.roll_dates:
