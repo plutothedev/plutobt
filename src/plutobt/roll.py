@@ -39,6 +39,10 @@ from plutobt.data import CT, frame_sha256
 from plutobt.instruments import REGISTRY
 
 TRIGGERS = ("calendar", "volume", "dates")
+# The columns a continuous series' hash pins. Anything else (a signal column, the
+# 'session' label tag_sessions adds) may be added before Engine.run.
+PINNED_COLUMNS = ("ts", "open", "high", "low", "close", "volume", "contract",
+                  "adj_offset", "raw_close")
 _DAY_SHIFT = timedelta(hours=7)          # 17:00 CT + 7 h = 00:00 of the trading day
 
 
@@ -248,10 +252,29 @@ def build_continuous(cs: ContractSet, trigger: str = "calendar",
         root=cs.root, roll_trigger=trigger, splice_method="backward",
         adjustment_method="additive",
         as_of_date=trading_day(int(df["ts"].iloc[-1])).isoformat(),
-        rolls=rows, inputs=dict(cs.file_sha256), frame_sha256=frame_sha256(df),
+        rolls=rows, inputs=dict(cs.file_sha256), frame_sha256=series_sha256(df),
         min_adjusted_price=min_price, plutobt_version=__version__,
     )
     return df, meta
+
+
+def series_sha256(df: pd.DataFrame) -> str:
+    """The pin of a continuous series: ``frame_sha256`` of its ``PINNED_COLUMNS`` only,
+    so columns added later (signals, 'session') leave it unchanged."""
+    missing = [c for c in PINNED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"not a continuous series: missing column(s) {missing}")
+    return frame_sha256(df[list(PINNED_COLUMNS)])
+
+
+def check_pin(df: pd.DataFrame, meta: RollMeta, what: str) -> None:
+    """Refuse a series whose pinned columns no longer hash to ``meta.frame_sha256``."""
+    actual = series_sha256(df)
+    if actual != meta.frame_sha256:
+        raise ValueError(
+            f"{what}: its bars hash to sha256 {actual}, but its metadata pins "
+            f"{meta.frame_sha256}; the series was edited or does not belong to this "
+            "metadata. Rebuild it with build_continuous")
 
 
 def _meta_path(path: str) -> str:
@@ -276,13 +299,7 @@ def load_continuous(path: str) -> tuple[pd.DataFrame, RollMeta]:
     for col in ("open", "high", "low", "close", "adj_offset", "raw_close"):
         df[col] = df[col].astype("float64")
     meta = RollMeta.from_json(Path(_meta_path(path)).read_text(encoding="utf-8"))
-    actual = frame_sha256(df)
-    if actual != meta.frame_sha256:
-        raise ValueError(
-            f"{path}: its bars hash to sha256 {actual}, but its metadata pins "
-            f"{meta.frame_sha256}; the series was edited or does not belong to this "
-            "metadata. Rebuild it with build_continuous"
-        )
+    check_pin(df, meta, str(path))
     return df, meta
 
 
@@ -290,7 +307,9 @@ def slice_continuous(df: pd.DataFrame, meta: RollMeta, start_ts: int | None = No
                      end_ts: int | None = None) -> tuple[pd.DataFrame, RollMeta]:
     """The bars with ``start_ts <= ts <= end_ts`` and metadata re-pinned to them: only
     the rolls inside the slice (a roll on its first bar is outside, since no contract
-    change is visible there), a fresh ``frame_sha256``, and ``window``."""
+    change is visible there), a fresh ``frame_sha256``, and ``window``. The series must
+    still match ``meta`` first: slicing never launders an edited series."""
+    check_pin(df, meta, "slice_continuous")
     ts = df["ts"].to_numpy()
     keep = np.ones(len(df), dtype=bool)
     if start_ts is not None:
@@ -303,5 +322,5 @@ def slice_continuous(df: pd.DataFrame, meta: RollMeta, start_ts: int | None = No
     first, last = int(out["ts"].iloc[0]), int(out["ts"].iloc[-1])
     rows = [r for r in meta.rolls if first < r["roll_ts"] <= last]
     min_price = float(min(out["low"].min(), out["open"].min(), out["close"].min()))
-    return out, replace(meta, rolls=rows, frame_sha256=frame_sha256(out),
+    return out, replace(meta, rolls=rows, frame_sha256=series_sha256(out),
                         min_adjusted_price=min_price, window=[first, last])

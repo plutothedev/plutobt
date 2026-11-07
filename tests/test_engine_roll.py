@@ -179,3 +179,34 @@ def test_resting_stop_level_unchanged_across_roll():
     _, _, res = run({2: enter, ROLL_ROW + 2: look})
     assert len(res.rolls) == 1
     assert seen["stop"] == 17990.0
+
+
+def test_added_columns_do_not_break_the_pin():
+    """Review #5: the pin covers the series' own columns only, so a signal column or
+    tag_sessions' 'session' can be added before Engine.run."""
+    from plutobt.data import tag_sessions
+
+    df, meta = series()
+    df["sma"] = df["close"].rolling(3).mean()
+    df = tag_sessions(df, get_instrument("NQ"))
+    res = Engine(get_instrument("NQ"), CFG).run(df, Script(hold_long_2()), roll_meta=meta)
+    assert len(res.rolls) == 1
+
+
+def test_edited_bars_still_refused_with_extra_columns():
+    df, meta = series()
+    df["sma"] = 0.0
+    df.loc[3, "close"] += 1.0
+    with pytest.raises(ValueError, match="sha256"):
+        Engine(get_instrument("NQ"), CFG).run(df, Script(), roll_meta=meta)
+
+
+def test_slice_refuses_an_edited_series():
+    """Review #5: slice_continuous re-pinned whatever it was handed, so an edited series
+    passed after one documented call."""
+    from plutobt.roll import slice_continuous
+
+    df, meta = series()
+    df.loc[3, ["open", "high", "low", "close"]] += 500.0
+    with pytest.raises(ValueError, match="sha256"):
+        slice_continuous(df, meta, start_ts=int(df["ts"].iloc[1]))

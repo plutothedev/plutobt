@@ -780,13 +780,12 @@ class Engine:
             raise ValueError("roll_meta was given but the frame has no 'contract' column; "
                              "pass the series built with that metadata")
         if roll_meta is not None:
-            actual = frame_sha256(df)
-            if actual != roll_meta.frame_sha256:
-                raise ValueError(
-                    f"the frame hashes to sha256 {actual}, but roll_meta pins "
-                    f"{roll_meta.frame_sha256}: the series was edited or is not the one "
-                    "this metadata describes (slice it with roll.slice_continuous, which "
-                    "re-pins the metadata)")
+            from plutobt.roll import check_pin
+
+            # The pin covers the series' own columns (roll.PINNED_COLUMNS): added
+            # signal or 'session' columns are fine, edited bars are not. A date range
+            # comes from roll.slice_continuous, which re-pins after checking.
+            check_pin(df, roll_meta, "the frame passed to Engine.run")
 
     def _build_manifest(self, df: pd.DataFrame, roll_meta: RollMeta | None = None) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the
