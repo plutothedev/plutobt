@@ -98,7 +98,7 @@ class Replay(Strategy):
         (ctx.broker.buy if side == "buy" else ctx.broker.sell)(n, stop=stop)
 
 
-def one_case(seed: int) -> dict:
+def one_case(seed: int, roll_rule: str = "held_through_open") -> dict:
     rng, codes, frames, roll_dates = gen_case(seed)
     cs = ContractSet.from_frames({c: to_frame(frames[c]) for c in codes})
     df, meta = build_continuous(cs, "dates", roll_dates=roll_dates)
@@ -117,7 +117,7 @@ def one_case(seed: int) -> dict:
                     frames[c]["c"], strict=True)} for c in codes}
     rolls = [(r["roll_ts"], r["from"], r["to"]) for r in meta.rolls]
     sim = RawContractSim(bars, rolls, tick_value=TV, commission_per_side=COMM,
-                         slippage_ticks=SLIP)
+                         slippage_ticks=SLIP, roll_rule=roll_rule)
     state = sim.run(script)
 
     engine_ticks = sum(t.pnl for t in res.trades) / TV
@@ -128,6 +128,11 @@ def one_case(seed: int) -> dict:
                                                                    abs=1e-9), seed
     assert sum(e.cost for e in res.rolls) == pytest.approx(state.roll_cost, abs=1e-9), seed
     assert len(res.rolls) == state.counters["rolls_held"], seed
+    # Review: cash was really debited and every roll dollar reached a trade.
+    assert sum(t.roll_cost for t in res.trades) == pytest.approx(state.roll_cost,
+                                                                 abs=1e-9), seed
+    assert res.equity_curve.iloc[-1] - 100_000.0 == pytest.approx(
+        sim.equity(state, state.counters["last_close"]), abs=1e-6), seed
     c = dict(state.counters)
     c["negative_gap"] = any(r["gap_ticks"] < 0 for r in meta.rolls)
     c["zero_gap"] = any(r["gap_ticks"] == 0 for r in meta.rolls)
@@ -179,6 +184,19 @@ def test_fuzz_catches_a_one_tick_adjustment_error(monkeypatch):
     for seed in range(200):
         try:
             one_case(seed)
+        except AssertionError:
+            caught += 1
+    assert caught > 0
+
+
+def test_fuzz_sees_the_roll_rule():
+    """Positive control for review #3: a reference that charges a roll on every contract
+    held into the roll bar (even one exited at its open) must disagree with the engine
+    on some case, so the fuzz really pins which contracts roll."""
+    caught = 0
+    for seed in range(200):
+        try:
+            one_case(seed, roll_rule="all_held")
         except AssertionError:
             caught += 1
     assert caught > 0

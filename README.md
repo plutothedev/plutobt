@@ -283,9 +283,12 @@ hash of every input file and of the series itself.
 **What the engine does with it.** A frame with a `contract` column runs only with its
 `roll_meta`, and the hashes must match: an edited or stale series is refused
 (`slice_continuous` takes a date range and re-pins it). When the contract changes
-under an open position, the position is rolled at that bar's open: a `RollEvent`
-in `result.rolls`, one round trip of commission and slippage in cash and in the
-trade's `roll_cost`, stops and levels unchanged. The report adds the rolls taken,
+under an open position, the contracts still held after that bar's open are rolled:
+a `RollEvent` in `result.rolls`, one round trip of commission and slippage in cash
+and in the trade's `roll_cost`, stops and levels unchanged. An exit, a flip's closing
+half or a stop gapped through at that open trades the expiring contract at its open
+and never rolls; a stop hit later in the bar was held into the new contract, so it
+did. The report adds the rolls taken,
 their cost, and the **roll yield**: the jump an unadjusted front-month chart would
 show at each roll, which is carry, not P&L.
 

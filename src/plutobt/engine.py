@@ -430,9 +430,11 @@ class Engine:
             ``roll.build_continuous``) needs its ``roll_meta``, whose ``frame_sha256``
             must match the frame (an edited or stale series is refused, naming both
             hashes). On the bar where ``contract`` changes while a position is open,
-            the position is rolled at that bar's open, before any pending order fills:
-            a RollEvent in ``rolls``, cash debited one round trip of commission and
-            slippage, the Trade's ``roll_cost``. Levels and stops are unchanged.
+            the contracts still held after that bar's open fills are rolled: a
+            RollEvent in ``rolls``, cash debited one round trip of commission and
+            slippage, the Trade's ``roll_cost``. An exit, a flip's closing half or a
+            gap-through stop at that open trades the expiring contract and does not
+            roll. Levels and stops are unchanged.
         Open-at-end: a position still open on the last bar is marked-to-last via
             ``portfolio.mark_open_at_end`` (§0.6 — single source of truth).
         """
@@ -542,25 +544,12 @@ class Engine:
                     # used to drop it too, holding the position overnight and on;
                     # fixed 2026-11-02). A resting protective stop is untouched.
                     broker.cancel_pending_entry(keep_exits=True)
-                if (has_contract and bar.contract != prev.contract
-                        and portfolio.position.qty != 0):
-                    # 2.0 §7.2: roll the open position at this bar's open, before the
-                    # pending order fills against the new contract's bar.
-                    qty = portfolio.position.qty
-                    n = abs(qty)
-                    cost = (2 * self.config.commission_per_side * n
-                            + 2 * broker._slippage_ticks() * self.instrument.tick_value * n)
-                    gap_points = gap_to.get(str(bar.contract), 0.0)
-                    event = RollEvent(
-                        ts=int(bar.ts), from_contract=str(prev.contract),
-                        to_contract=str(bar.contract),
-                        side="long" if qty > 0 else "short", contracts=n,
-                        gap_points=gap_points, cost=cost,
-                        roll_yield=-(1 if qty > 0 else -1) * n * gap_points
-                        * self.instrument.point_value)
-                    portfolio.apply_roll(event)
-                    rolls.append(event)
-                broker.fill_pending(bar)
+                after_open = None
+                if has_contract and bar.contract != prev.contract:
+                    after_open = functools.partial(
+                        self._roll_held, portfolio, broker, rolls, gap_to, bar, prev,
+                        portfolio.position.qty)
+                broker.fill_pending(bar, after_open=after_open)
             prev = bar
 
             # Warm-up: skip on_bar until every signal col is set (§5.9); a NaN after
@@ -769,6 +758,34 @@ class Engine:
                 "return reads the adjustment, not the market. Use distances (points, "
                 "ATR, a moving average) or raw_close, which holds the real close",
                 PriceLevelWarning, stacklevel=4)
+
+    def _roll_held(self, portfolio: Portfolio, broker: Broker, rolls: list,
+                   gap_to: dict, bar, prev, qty_before: int) -> None:
+        """Book the roll of the contracts held THROUGH the roll bar's open (2.0 §7.2).
+
+        Called by the broker after the open's fills and before the intrabar path. An
+        exit, a flip's closing half or a gap-through stop filled at the open is a trade
+        on the expiring contract at its open, so those contracts never roll; contracts
+        added at the open open on the new contract, so they never roll either. What
+        rolls is the part of the position held both before and after the open:
+        min(|before|, |after|) on the same side. It costs one round trip of commission
+        and slippage. A stop or limit filling later in the bar was held into the new
+        contract, so it rolled first."""
+        qty_after = portfolio.position.qty
+        if qty_before == 0 or qty_after == 0 or (qty_before > 0) != (qty_after > 0):
+            return
+        n = min(abs(qty_before), abs(qty_after))
+        long = qty_before > 0
+        cost = (2 * self.config.commission_per_side * n
+                + 2 * broker._slippage_ticks() * self.instrument.tick_value * n)
+        gap_points = gap_to.get(str(bar.contract), 0.0)
+        event = RollEvent(
+            ts=int(bar.ts), from_contract=str(prev.contract),
+            to_contract=str(bar.contract), side="long" if long else "short",
+            contracts=n, gap_points=gap_points, cost=cost,
+            roll_yield=-(1 if long else -1) * n * gap_points * self.instrument.point_value)
+        portfolio.apply_roll(event)
+        rolls.append(event)
 
     @staticmethod
     def _check_roll_meta(df: pd.DataFrame, roll_meta: RollMeta | None) -> None:

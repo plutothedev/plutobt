@@ -27,7 +27,14 @@ only, no limits:
   extra contracts; any other pending order is cancelled.
 - Commission is ``commission_per_side`` per contract on every fill. Roll legs move no
   slippage into prices: the roll cost is 2 x commission + 2 x slippage ticks x tick
-  value, per contract.
+  value, per contract ROLLED.
+- What is rolled (``roll_rule="held_through_open"``): only contracts held both before
+  and after the roll bar's open fills. An exit, a flip's closing half or a gap-through
+  stop at that open is a trade on the expiring contract at its open (same P&L as the
+  adjusted series, since the gap is measured there), so those contracts never roll.
+  Contracts added at that open start on the new contract. A stop filling later in the
+  bar was held into the new contract, so it rolled. ``roll_rule="all_held"`` charges
+  every contract held into the bar (the 2.0 spec's first draft) for comparison.
 """
 from __future__ import annotations
 
@@ -51,18 +58,22 @@ class State:
     commission: float = 0.0
     roll_cost: float = 0.0
     pending: Order | None = None
+    after_open: int = 0                # position right after the open's fills
     counters: dict = field(default_factory=dict)
 
 
 class RawContractSim:
     def __init__(self, bars: dict[str, dict[int, tuple[int, int, int, int]]],
                  rolls: list[tuple[int, str, str]], *, tick_value: float,
-                 commission_per_side: float, slippage_ticks: int):
+                 commission_per_side: float, slippage_ticks: int,
+                 roll_rule: str = "held_through_open"):
         """``bars``: contract -> {ts: (open, high, low, close)} in ticks. ``rolls``:
         (roll_ts, from, to) in order. The first contract trades until the first roll,
         each next one from its roll_ts on."""
         self.bars, self.rolls = bars, rolls
         self.tv, self.comm, self.slip = tick_value, commission_per_side, slippage_ticks
+        assert roll_rule in ("held_through_open", "all_held"), roll_rule
+        self.roll_rule = roll_rule
         self.codes = [rolls[0][1]] + [r[2] for r in rolls] if rolls else list(bars)
         self.gap: dict[str, int] = {}         # to-contract -> gap at its roll (ticks)
         for ts, a, b in rolls:
@@ -127,6 +138,7 @@ class RawContractSim:
                     order = None
         if order is not None:
             self.execute(s, order, o, code)
+        s.after_open = s.qty
 
     def walk(self, s: State, o: int, h: int, lo: int) -> None:
         if s.stop is not None and s.qty != 0:
@@ -149,14 +161,16 @@ class RawContractSim:
         last_close = 0
         for ts, code in self.timeline():
             o, h, lo, c = self.bars[code][ts]
-            if prev_code is not None and code != prev_code and s.qty != 0:
+            roll_bar = prev_code is not None and code != prev_code
+            qty_before = s.qty
+            if roll_bar and s.qty != 0:
+                # Carry the held contracts onto the new one at the raw opens (no price
+                # slippage: price-neutral against the adjusted series). Any open-time
+                # exit then trades at the same economics as on the expiring contract.
                 old_open = self.bars[prev_code][ts][0]
-                n = abs(s.qty)
                 s.flow += s.qty * old_open - s.qty * o          # sell old, buy new
-                s.roll_cost += (2 * self.comm + 2 * self.slip * self.tv) * n
                 if s.stop is not None:
                     s.stop += self.gap[code]
-                s.counters["rolls_held"] += 1
                 if self.gap_through(s, o):
                     s.counters["roll_bar_gap_stops"] += 1
             if prev_code is not None:
@@ -172,6 +186,16 @@ class RawContractSim:
                 else:
                     self.open_step(s, o, code, True)
                     self.walk(s, o, h, lo)
+            if roll_bar and qty_before != 0:
+                if self.roll_rule == "all_held":
+                    n = abs(qty_before)
+                elif s.after_open != 0 and (s.after_open > 0) == (qty_before > 0):
+                    n = min(abs(qty_before), abs(s.after_open))
+                else:
+                    n = 0
+                if n:
+                    s.roll_cost += (2 * self.comm + 2 * self.slip * self.tv) * n
+                    s.counters["rolls_held"] += 1
             prev_code, last_close = code, c
             action = script.get(ts)
             if action is not None:

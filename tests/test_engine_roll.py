@@ -131,26 +131,52 @@ def test_flat_through_roll_no_event():
     assert res.rolls == [] and res.trades[0].roll_cost == 0.0
 
 
-def test_exit_on_roll_bar_pays_roll_then_exits():
+def test_exit_at_roll_bar_open_pays_no_roll():
+    """Review #3: an exit filling at the roll bar's open is a sale of the expiring
+    contract at its open. A real trader pays that one side, never a roll round trip."""
     df, _, res = run(hold_long_2(exit_at=ROLL_ROW - 1))
+    assert res.rolls == []
     (trade,) = res.trades
-    assert trade.roll_cost == 30.0 and trade.rolls == 1
+    assert trade.roll_cost == 0.0 and trade.rolls == 0
     assert trade.exit_ts == int(df["ts"][ROLL_ROW])
     assert trade.exit_price == df["open"][ROLL_ROW] - 0.25
 
 
-def test_flip_on_roll_bar_charges_old_side_only():
+def test_flip_at_roll_bar_open_pays_no_roll():
+    """The old side closes on the expiring contract and the new side opens on the next:
+    nothing is held through the roll."""
     script = {2: lambda c: c.broker.buy(2), ROLL_ROW - 1: lambda c: c.broker.sell(4),
               15: lambda c: c.broker.close()}
     _, _, res = run(script)
-    (ev,) = res.rolls
-    assert (ev.side, ev.contracts) == ("long", 2)
+    assert res.rolls == []
     first, second = res.trades
-    assert first.side == "long" and first.roll_cost == 30.0
+    assert first.side == "long" and first.roll_cost == 0.0
     assert second.side == "short" and second.roll_cost == 0.0 and second.rolls == 0
 
 
-def test_stop_gapped_on_roll_bar():
+def test_partial_exit_at_roll_bar_open_rolls_the_rest():
+    script = {2: lambda c: c.broker.buy(2), ROLL_ROW - 1: lambda c: c.broker.sell(1),
+              15: lambda c: c.broker.close()}
+    _, _, res = run(script)
+    (ev,) = res.rolls
+    assert (ev.side, ev.contracts, ev.cost) == ("long", 1, 15.0)
+    closed_at_open, rest = res.trades
+    assert closed_at_open.contracts == 1 and closed_at_open.roll_cost == 0.0
+    assert rest.contracts == 1 and rest.roll_cost == 15.0 and rest.rolls == 1
+
+
+def test_scale_in_at_roll_bar_open_rolls_only_the_held():
+    script = {2: lambda c: c.broker.buy(1), ROLL_ROW - 1: lambda c: c.broker.buy(2),
+              15: lambda c: c.broker.close()}
+    _, _, res = run(script)
+    (ev,) = res.rolls
+    assert (ev.contracts, ev.cost) == (1, 15.0)
+    assert sum(t.roll_cost for t in res.trades) == pytest.approx(15.0)
+
+
+def test_stop_gapped_at_roll_bar_open_pays_no_roll():
+    """The expiring contract opens through the stop, so the stop fills on it at the
+    open: the position never reaches the new contract."""
     stop = None
 
     def enter(c):
@@ -160,10 +186,25 @@ def test_stop_gapped_on_roll_bar():
 
     df, _, res = run({2: enter}, gap_down_at_roll=12.0)
     assert df["open"][ROLL_ROW] < stop                       # the roll bar opens through it
-    (ev,) = res.rolls
+    assert res.rolls == []
     (trade,) = res.trades
     assert trade.exit_ts == int(df["ts"][ROLL_ROW])
     assert trade.exit_price == df["open"][ROLL_ROW] - 0.25   # gap-through: open less slip
+    assert trade.roll_cost == 0.0
+
+
+def test_intrabar_stop_on_roll_bar_still_pays_the_roll():
+    """Held through the open into the new contract, then stopped out inside the bar:
+    the roll happened, so it is paid."""
+    # The roll bar opens 18035.00 with a low of 18034.75: a stop there is not gapped
+    # through at the open, but the bar trades down to it.
+    script = {2: lambda c: c.broker.buy(1),
+              ROLL_ROW - 1: lambda c: c.broker.amend_stop(18034.75)}
+    df, _, res = run(script)
+    roll_open = df["open"][ROLL_ROW]
+    (ev,) = res.rolls
+    (trade,) = res.trades
+    assert trade.exit_ts == int(df["ts"][ROLL_ROW]) and trade.exit_price < roll_open
     assert trade.roll_cost == ev.cost == 2 * 2.5 + 2 * 5.0
 
 
