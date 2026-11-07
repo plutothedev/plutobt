@@ -1,7 +1,8 @@
-"""python -m plutobt.build_continuous (spec §6.5)."""
+"""python -m plutobt.continuous (spec §6.5; renamed from build_continuous so the CLI
+module never shadows the build_continuous function)."""
 from pathlib import Path
 
-from plutobt.build_continuous import main
+from plutobt.continuous import main
 from plutobt.roll import load_continuous
 
 DIR = Path(__file__).resolve().parents[1] / "data" / "sample" / "nq_contracts"

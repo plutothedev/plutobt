@@ -1,6 +1,6 @@
 """Build a back-adjusted continuous series from a folder of contract files (spec §6.5).
 
-    python -m plutobt.build_continuous data/sample/nq_contracts --preset generic \\
+    python -m plutobt.continuous data/sample/nq_contracts --preset generic \\
         --root NQ --ts-is open -o nq_cont.csv
 
 Prints the roll table (day, from, to, gap in points and dollars) and writes the series
@@ -19,7 +19,7 @@ from plutobt.roll import TRIGGERS, build_continuous, save_continuous, trading_da
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m plutobt.build_continuous",
+        prog="python -m plutobt.continuous",
         description="Build a back-adjusted continuous futures series from one file per "
                     "contract.")
     p.add_argument("folder", help="folder holding one .csv/.txt file per contract")
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         df, meta = build_continuous(cs, args.trigger, roll_dates)
         csv_path, json_path = save_continuous(df, meta, args.out)
     except (ValueError, OSError) as refused:
-        print(f"build_continuous: {refused}", file=sys.stderr)
+        print(f"continuous: {refused}", file=sys.stderr)
         return 2
     print(f"{meta.root}: {len(cs.contracts)} contracts, {len(meta.rolls)} rolls "
           f"({meta.roll_trigger} trigger, backward additive)")

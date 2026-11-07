@@ -242,7 +242,7 @@ A futures contract expires, so years of history means stitching contracts into o
 continuous series. PlutoBT builds it from one file per contract:
 
 ```bash
-python -m plutobt.build_continuous data/sample/nq_contracts --preset generic --root NQ --ts-is open -o nq_cont.csv
+python -m plutobt.continuous data/sample/nq_contracts --preset generic --root NQ --ts-is open -o nq_cont.csv
 ```
 
 ```

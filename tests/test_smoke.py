@@ -119,3 +119,16 @@ def test_roll_api_is_exported():
                  "load_continuous", "save_continuous", "slice_continuous", "RollMeta"):
         assert name in plutobt.__all__, name
         assert getattr(plutobt, name) is not None
+
+
+def test_cli_import_does_not_shadow_build_continuous():
+    """Review #6: a CLI module named build_continuous replaced the public function on the
+    package once anything imported it."""
+    import types
+
+    importlib.import_module("plutobt.continuous")
+    from plutobt import build_continuous
+
+    assert isinstance(build_continuous, types.FunctionType)
+    assert not hasattr(plutobt, "build_continuous") or callable(plutobt.build_continuous)
+    assert not isinstance(plutobt.build_continuous, types.ModuleType)
