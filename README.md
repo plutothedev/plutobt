@@ -40,6 +40,10 @@ and auditability. Key properties:
   sizes per the CME contract specs. Margins are representative defaults (as of
   2026-06-07), not live exchange or broker margins: they vary by broker,
   volatility and date, so check yours before relying on a margin call.
+- **Continuous contracts (2.0)**: your own data from Databento, TradingView,
+  NinjaTrader or any CSV, stitched across expiries with a back-adjusted series,
+  rolls that cost real money, and a proof that the result equals trading the real
+  contracts (see [Contract roll](#contract-roll)).
 
 ## Look-ahead check
 
@@ -194,6 +198,110 @@ See `data/sample/NOTICE.md` for the full data license.
 Point values and tick sizes follow the CME contract specs (NQ, ES, CL, GC, ZN,
 etc.; `src/plutobt/instruments.py`). Initial and maintenance margins are
 representative defaults as of 2026-06-07, not live values: check your broker's
-before relying on margin behaviour. Contracts never roll: each run is one
-continuous series as given (the samples are a single synthetic expiry), and the
-manifest says so (`adjustment_method`).
+before relying on margin behaviour. A plain frame never rolls: each run is one
+series as given (the `*_5m.json` samples are a single synthetic expiry), and the
+manifest says so (`adjustment_method`). To trade through expiries, build a
+continuous series (next two sections).
+
+## Your own data
+
+`load_csv` reads one contract's bars from a vendor file into the frame the engine
+runs on, with the same checks `load_bars` makes (whole timestamps, finite prices,
+every bar's body inside its range, timestamps strictly increasing):
+
+```python
+from plutobt import load_csv
+
+df = load_csv("NQZ2025.csv", preset="tradingview")
+df = load_csv("bars.csv", preset="generic", tz="America/Chicago", ts_is="open",
+              columns={"ts": "Date", "open": "O", "high": "H", "low": "L",
+                       "close": "C", "volume": "V"})
+```
+
+| Preset | Reads | Notes |
+|--------|-------|-------|
+| `databento` | Databento OHLCV CSV | Columns by name. `ts_event` is the bar open, nanoseconds or ISO in UTC; prices decimal or fixed-point (1e-9). A file with several contracts: `load_csv_contracts` splits it by `symbol`. |
+| `tradingview` | "Export chart data" CSV from one contract's chart | Columns by name, any case; indicator columns dropped. Unix seconds, milliseconds or ISO with a zone. TradingView does not document whether `time` is the bar open: it is read as the open (`ts_is="close"` overrides). |
+| `ninjatrader` | NinjaTrader 8 historical export, `yyyyMMdd HHmmss;o;h;l;c;v` | NinjaTrader exports in UTC with END-of-bar stamps, so each stamp moves back one bar to the open. Minute bars only. |
+| `generic` | Any CSV | Map the columns, and say `ts_is="open"` or `"close"`. |
+
+Two time rules are refused rather than guessed. Timestamps written without a zone
+need `tz=`: a wrong zone shifts every bar. And a close-stamped file read as
+open-stamped puts every bar one interval early, which is look-ahead, so `generic`
+makes you say which it is. The contract (`NQZ2025`) comes from `symbol=`, the file's
+symbol column, or its name: `NQZ5`, `NQZ25`, `NQZ2025`, `NQ 12-25` and `NQ DEC25`
+all parse.
+
+The Databento column order and the TradingView header are read by name because the
+vendors do not document them exactly; if a real export does not load, open an issue
+with its first lines.
+
+## Contract roll
+
+A futures contract expires, so years of history means stitching contracts into one
+continuous series. PlutoBT builds it from one file per contract:
+
+```bash
+python -m plutobt.build_continuous data/sample/nq_contracts --preset generic --root NQ --ts-is open -o nq_cont.csv
+```
+
+```
+NQ: 4 contracts, 3 rolls (calendar trigger, backward additive)
+roll day    from      to           gap pts       gap $
+2026-03-16  NQH2026   NQM2026         25.0       500.0
+2026-06-15  NQM2026   NQU2026        -15.0      -300.0
+2026-09-14  NQU2026   NQZ2026         30.0       600.0
+```
+
+```python
+from plutobt import Engine, BacktestConfig, get_instrument, load_continuous
+
+df, meta = load_continuous("nq_cont.csv")
+result = Engine(get_instrument("NQ"), BacktestConfig()).run(df, strategy, roll_meta=meta)
+```
+
+**When it rolls.** `calendar` (equity-index roots NQ, ES, MNQ, MES, YM, RTY): CME's
+customary roll date, the Monday before the third Friday of the expiry month
+([CME Group, Equity Index Roll Dates](https://www.cmegroup.com/trading/equity-index/rolldates.html)).
+June 2026 expires Thursday 6/18 (Juneteenth); the roll stays Monday 6/15. `volume`:
+the trading day after the next contract's full-day volume first beats the current
+one's (day t's completed volume decides, day t+1 acts, so it never reads ahead).
+`dates`: your own roll day per contract, which is how CL, GC and ZN roll on their
+exchange rules today. The roll happens at the first bar of the roll day where both
+contracts trade.
+
+**How it adjusts.** Backward additive (Panama): the newest contract keeps its real
+prices, and each older one is shifted by the sum of the later gaps, in whole ticks.
+Each gap is measured at the roll bar's open from both contracts, the moment the roll
+trade executes, which is what makes the series' P&L equal the real contracts' P&L
+exactly. The series carries `contract`, `adj_offset` (adjusted minus raw) and
+`raw_close`; its `.roll.json` pins the trigger, the method, every roll and gap, a
+hash of every input file and of the series itself.
+
+**What the engine does with it.** A frame with a `contract` column runs only with its
+`roll_meta`, and the hashes must match: an edited or stale series is refused
+(`slice_continuous` takes a date range and re-pins it). When the contract changes
+under an open position, the position is rolled at that bar's open: a `RollEvent`
+in `result.rolls`, one round trip of commission and slippage in cash and in the
+trade's `roll_cost`, stops and levels unchanged. The report adds the rolls taken,
+their cost, and the **roll yield**: the jump an unadjusted front-month chart would
+show at each roll, which is carry, not P&L.
+
+**What it warns about.** On an adjusted series old prices are not the prices that
+traded, so a fixed level (`close > 18000`) or a percentage or log return reads the
+adjustment, not the market. With the look-ahead check on, precompute runs again on
+prices raised by 1,000 ticks; a signal column that is neither unchanged (RSI, a
+cross flag) nor raised by exactly that much (an EMA) draws a `PriceLevelWarning`
+naming it. Adjusted history can also go to or below zero; the builder warns and
+`Engine.run` refuses it unless `allow_nonpositive_prices = true`.
+
+**How it is proven.** `tests/test_roll_reconciliation.py` runs thousands of random
+cases (random contracts, gaps of both signs and zero, roll days, entries with and
+without stops, flips, stops gapping through on the roll bar) through the engine on
+the adjusted series AND through `tests/reference/raw_contract_sim.py`, an independent
+simulator that imports nothing from PlutoBT, holds the real contracts and sells one
+and buys the next on roll day. Price P&L matches to the tick, commission and roll
+cost to 1e-9: 2,000 cases in CI, 20,000 with `pytest --slow`. A planted one-tick
+adjustment error makes it fail, so it can fail. `tests/test_roll_invariance.py`
+adds a contract and checks every older price moves by exactly one constant while
+every trade and dollar stays the same.
