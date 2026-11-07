@@ -29,7 +29,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from plutobt.contracts import ContractSet, calendar_roll_day, parse_contract
+from plutobt.contracts import (
+    ContractSet,
+    calendar_roll_day,
+    parse_contract,
+    tick_decimals,
+)
 from plutobt.data import CT, frame_sha256
 from plutobt.instruments import REGISTRY
 
@@ -167,16 +172,12 @@ class RollMeta:
         return cls(**json.loads(text))
 
 
-def _decimals(tick: float) -> int:
-    text = repr(float(tick))
-    return len(text.split(".")[1]) if "." in text else 0
-
 
 def _adjust(cs: ContractSet, rolls: list[Roll]) -> tuple[pd.DataFrame, list[dict], float]:
     """Splice ``cs`` at ``rolls`` and back-adjust additively, in whole ticks. The newest
     contract keeps its raw floats exactly; an older one is rebuilt from integer ticks."""
     inst = REGISTRY[cs.root]
-    tick, dec = inst.tick_size, _decimals(inst.tick_size)
+    tick, dec = inst.tick_size, tick_decimals(inst.tick_size)
     codes = [c.code for c in cs.contracts]
     gaps: list[int] = []
     rows: list[dict] = []

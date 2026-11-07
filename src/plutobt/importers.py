@@ -45,7 +45,7 @@ from plutobt.data import ohlcv_problem
 PRESETS: tuple[str, ...] = ("databento", "tradingview", "ninjatrader", "generic")
 _BAR = ("open", "high", "low", "close", "volume")
 _ZONED = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
-_PX_SCALE = 1e-9            # Databento fixed-point prices
+_PX_UNITS = 1_000_000_000   # Databento fixed-point prices: 1 unit = 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +195,10 @@ def _databento_prices(raw: pd.DataFrame, name: str) -> pd.DataFrame:
     out = raw.copy()
     if kinds["open"] == "fixed":
         for col in ("open", "high", "low", "close"):
-            out[col] = raw[col].to_numpy(dtype="int64") * _PX_SCALE
+            # Divide, never multiply by 1e-9: an integer over 1e9 is correctly
+            # rounded to the float of its decimal; x * 1e-9 is not (15000.00 came
+            # out 15000.000000000002, and a stop resting at that low never fired).
+            out[col] = raw[col].to_numpy(dtype="int64") / _PX_UNITS
     return out
 
 

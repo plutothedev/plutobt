@@ -175,3 +175,32 @@ def test_no_warning_for_positive_history():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         build_two()
+
+
+@pytest.mark.parametrize("tick, places", [(0.25, 2), (0.01, 2), (0.015625, 6),
+                                          (5e-05, 5), (5e-07, 7), (1.0, 0), (0.1, 1)])
+def test_tick_decimals(tick, places):
+    """Review #2: repr(5e-05) has no '.', so the old helper gave 0 places."""
+    from plutobt.contracts import tick_decimals
+
+    assert tick_decimals(tick) == places
+
+
+def test_scientific_tick_root_adjusts(monkeypatch):
+    """Review #2: a 0.00005-tick root (a 6E-like contract) keeps its gap and decimals."""
+    from dataclasses import replace
+
+    from plutobt import instruments
+
+    eu = replace(instruments.REGISTRY["NQ"], symbol="EU", tick_size=5e-05,
+                 tick_value=6.25, point_value=125_000.0)
+    monkeypatch.setitem(instruments.REGISTRY, "EU", eu)
+    a = seg(T0, 20, 1.0800, tick=5e-05)
+    b = seg(T0 + 3000, 20, 1.0817, tick=5e-05)
+    cs = ContractSet.from_frames({"EUF2026": a, "EUG2026": b})
+    df, meta = build_continuous(cs, "dates", roll_dates={"EUF6": roll_day_of(T0)})
+    gap = meta.rolls[0]["gap_points"]
+    assert gap == pytest.approx(b["open"].iloc[0] - a["open"].iloc[10], abs=1e-12)
+    assert gap != 0.0
+    old = df[df["contract"] == "EUF2026"]
+    assert (old["close"] - old["raw_close"]).round(10).tolist() == [round(gap, 10)] * len(old)

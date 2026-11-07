@@ -3,6 +3,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -150,3 +151,20 @@ def test_dst_week_chicago():
 def test_unknown_preset_refused():
     with pytest.raises(ValueError, match="databento"):
         load_csv(str(FIX / "generic.csv"), preset="sierra")
+
+
+def test_databento_fixed_point_is_exact_on_the_grid(tmp_path):
+    """Review #1: raw * 1e-9 left 15000.00 as 15000.000000000002, so a stop resting at a
+    bar's exact low never fired. Every fixed-point price must load as the exact float of
+    its decimal."""
+    ticks = np.arange(60_000, 60_400)                       # 15000.00 .. 15099.75
+    lines = ["ts_event,open,high,low,close,volume,symbol"]
+    for i, t in enumerate(ticks):
+        px = int(t) * 250_000_000                            # 0.25 * 1e9
+        lines.append(f"{1772721000000000000 + i * 60_000_000_000},{px},{px},{px},{px},1,NQH6")
+    p = tmp_path / "fx.csv"
+    p.write_text(chr(10).join(lines) + chr(10))
+    df = load_csv(str(p), preset="databento")
+    want = [float(f"{t * 0.25:.2f}") for t in ticks]
+    for col in ("open", "high", "low", "close"):
+        assert df[col].tolist() == want, col

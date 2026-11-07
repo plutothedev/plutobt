@@ -136,3 +136,13 @@ def test_from_folder_wrong_root_refused(tmp_path):
 def test_from_folder_empty_refused(tmp_path):
     with pytest.raises(ValueError, match="no .csv or .txt"):
         ContractSet.from_folder(str(tmp_path), "generic", "NQ", ts_is="open")
+
+
+def test_prices_snap_to_exact_grid_floats():
+    """Review #1: a price within the tick tolerance but not the exact float of its tick
+    multiple (float noise from a vendor) is snapped, so stops at exact levels fire."""
+    frames = quarter_frames("NQH2026", "NQM2026")
+    frames["NQM2026"].loc[3, ["low", "open"]] = 18000.000000000004
+    cs = ContractSet.from_frames(frames)
+    assert cs.frames["NQM2026"].loc[3, "low"] == 18000.0
+    assert cs.frames["NQM2026"].loc[3, "open"] == 18000.0

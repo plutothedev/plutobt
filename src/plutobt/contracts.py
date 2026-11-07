@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 
 import numpy as np
 import pandas as pd
@@ -70,6 +71,18 @@ class Contract:
     def code(self) -> str:
         """Canonical code, e.g. ``NQZ2025``."""
         return f"{self.root}{_CODE_FOR_MONTH[self.month]}{self.year:04d}"
+
+
+def tick_decimals(tick: float) -> int:
+    """Decimal places of a tick size: 0.25 -> 2, 0.015625 -> 6, 5e-05 -> 5, 1.0 -> 0.
+    Read through Decimal so a tick ``repr`` prints in scientific notation still
+    counts its places."""
+    return max(0, -Decimal(repr(float(tick))).normalize().as_tuple().exponent)
+
+
+def snap_to_tick(values: np.ndarray, tick: float) -> np.ndarray:
+    """Each price as the exact float of its nearest tick multiple's decimal."""
+    return np.round(np.rint(values / tick) * tick, tick_decimals(tick))
 
 
 def _bad(code: str, why: str) -> ValueError:
@@ -268,6 +281,14 @@ class ContractSet:
                 "to one interval first"
             )
         contracts = [c for c, _ in ordered]
+        snapped: dict[str, object] = {}
+        for c, df in ordered:
+            # On the grid within tolerance (checked above): store the exact floats, so
+            # vendor float noise can never stop a stop resting at an exact level.
+            out = df.reset_index(drop=True).copy()
+            for col in ("open", "high", "low", "close"):
+                out[col] = snap_to_tick(out[col].to_numpy(dtype="float64"), tick)
+            snapped[c.code] = out
         for a, b in zip(contracts, contracts[1:], strict=False):
             if root in CALENDAR_ROOTS:
                 y, m = a.year, a.month + 3
@@ -290,7 +311,7 @@ class ContractSet:
         return cls(
             root=root,
             contracts=contracts,
-            frames={c.code: parsed[c.code][1].reset_index(drop=True) for c in contracts},
+            frames={c.code: snapped[c.code] for c in contracts},
             interval=distinct[0] if distinct else 0,
             file_sha256=dict(file_sha256 or {}),
         )
