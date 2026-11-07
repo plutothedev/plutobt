@@ -204,3 +204,14 @@ def test_scientific_tick_root_adjusts(monkeypatch):
     assert gap != 0.0
     old = df[df["contract"] == "EUF2026"]
     assert (old["close"] - old["raw_close"]).round(10).tolist() == [round(gap, 10)] * len(old)
+
+
+def test_resample_refuses_a_continuous_series():
+    """Review #4: resample silently dropped contract/adj_offset/raw_close, and the
+    engine then ran the result as a plain frame with no rolls."""
+    from plutobt.data import resample
+
+    _, (df, _) = build_two()
+    with pytest.raises(ValueError, match="contract") as err:
+        resample(df, "15min")
+    assert "build_continuous" in str(err.value)

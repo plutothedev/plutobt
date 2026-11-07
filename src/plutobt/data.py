@@ -350,7 +350,17 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
     Note: a 'session' label (if present) is NOT preserved; call tag_sessions
     on the result if session labels are needed at the coarser cadence.
+
+    A continuous series (a ``contract`` column, from ``roll.build_continuous``) is
+    refused: its roll columns cannot be aggregated, and dropping them would run the
+    series as a plain frame with no rolls. Resample each contract, then build.
     """
+    if "contract" in df.columns:
+        raise ValueError(
+            "resample refuses a continuous series (it has a 'contract' column): its "
+            "contract, adj_offset and raw_close columns cannot be aggregated, and "
+            "dropping them would lose every roll. Resample each contract's bars, then "
+            "build the series with build_continuous")
     offset = pd.tseries.frequencies.to_offset(rule)
     daily = (not isinstance(offset, pd.offsets.Tick)
              or pd.Timedelta(offset) >= pd.Timedelta(days=1))
