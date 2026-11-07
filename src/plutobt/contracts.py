@@ -7,7 +7,9 @@ canonical ``Contract`` whose ``code`` is ``NQZ2025``.
 The expiry calendar covers the CME equity-index roots only (``CALENDAR_ROOTS``): their
 quarterly contracts (March, June, September, December) expire on the third Friday of the
 contract month unless an exchange holiday moves it (``_EXPIRY_EXCEPTIONS``), and CME's
-roll convention is ``ROLL_DAYS_BEFORE_EXPIRY`` calendar days before that. Other roots
+customary roll date is the Monday before that third Friday (CME Group, "Equity Index Roll
+Dates", cmegroup.com/trading/equity-index/rolldates.html, read 2026-11-06: "Equity
+products roll date is the Monday prior to the third Friday of the expiration month"). Other roots
 (CL, GC, ZN, ...) roll on their own exchange rules, which this module does not encode:
 use the volume trigger or explicit roll dates for them.
 """
@@ -32,13 +34,15 @@ _MONTH_NAMES = {
 }
 
 CALENDAR_ROOTS = frozenset({"NQ", "ES", "MNQ", "MES", "YM", "RTY"})
-ROLL_DAYS_BEFORE_EXPIRY = 8
+ROLL_DAYS_BEFORE_THIRD_FRIDAY = 4      # Monday of the expiry week
 _QUARTERLY = (3, 6, 9, 12)
 
-# Contracts whose last trading day is not the plain third Friday (an exchange holiday
-# moved it), and contracts whose CME roll date is not expiry minus 8 days. Keyed by the
-# canonical code. Filled from the 2026-11-06 fact-check (CME pages, see the vault note).
-_EXPIRY_EXCEPTIONS: dict[str, date] = {}
+# Contracts whose last trading day is not the plain third Friday. CME's roll-date table
+# (read 2026-11-06) lists June 2026 expiring Thursday 6/18: Friday 6/19 is Juneteenth.
+# The roll day is still the Monday before the third Friday (6/15), as CME lists it.
+_EXPIRY_EXCEPTIONS: dict[str, date] = {
+    f"{root}M2026": date(2026, 6, 18) for root in sorted(CALENDAR_ROOTS)
+}
 _ROLL_DAY_EXCEPTIONS: dict[str, date] = {}
 
 _SHORT = re.compile(r"^([A-Z]+)([FGHJKMNQUVXZ])(\d{1,2}|\d{4})$")
@@ -146,11 +150,13 @@ def expiry(contract: Contract) -> date:
 
 
 def calendar_roll_day(contract: Contract) -> date:
-    """CME's roll day for ``contract``: ``ROLL_DAYS_BEFORE_EXPIRY`` calendar days before
-    its expiry, unless CME published a different date (``_ROLL_DAY_EXCEPTIONS``)."""
-    exp = expiry(contract)
+    """CME's customary roll day for ``contract``: the Monday before the third Friday of
+    its expiry month (even when a holiday moved the expiry itself), unless CME published
+    a different date (``_ROLL_DAY_EXCEPTIONS``)."""
+    expiry(contract)                     # same root and month checks
+    third = _third_friday(contract.year, contract.month)
     return _ROLL_DAY_EXCEPTIONS.get(contract.code,
-                                    exp - timedelta(days=ROLL_DAYS_BEFORE_EXPIRY))
+                                    third - timedelta(days=ROLL_DAYS_BEFORE_THIRD_FRIDAY))
 
 
 # ---------------------------------------------------------------------------

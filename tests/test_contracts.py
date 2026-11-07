@@ -66,4 +66,36 @@ def test_expiry_non_quarterly_month_refused():
 
 def test_expiry_plain_third_friday():
     assert expiry(Contract("ES", 12, 2025)) == date(2025, 12, 19)
-    assert calendar_roll_day(Contract("ES", 12, 2025)) == date(2025, 12, 11)
+    assert calendar_roll_day(Contract("ES", 12, 2025)) == date(2025, 12, 15)
+
+
+# CME Group "Equity Index Roll Dates" table, U.S. indexes, read 2026-11-06
+# (cmegroup.com/trading/equity-index/rolldates.html): (year, month, expiration, roll).
+CME_TABLE = [
+    (2025, 3, date(2025, 3, 21), date(2025, 3, 17)),
+    (2025, 6, date(2025, 6, 20), date(2025, 6, 16)),
+    (2025, 9, date(2025, 9, 19), date(2025, 9, 15)),
+    (2025, 12, date(2025, 12, 19), date(2025, 12, 15)),
+    (2026, 3, date(2026, 3, 20), date(2026, 3, 16)),
+    (2026, 6, date(2026, 6, 18), date(2026, 6, 15)),
+    (2026, 9, date(2026, 9, 18), date(2026, 9, 14)),
+    (2026, 12, date(2026, 12, 18), date(2026, 12, 14)),
+    (2027, 3, date(2027, 3, 19), date(2027, 3, 15)),
+    (2027, 6, date(2027, 6, 18), date(2027, 6, 14)),
+    (2027, 9, date(2027, 9, 17), date(2027, 9, 13)),
+    (2027, 12, date(2027, 12, 17), date(2027, 12, 13)),
+    (2028, 3, date(2028, 3, 17), date(2028, 3, 13)),
+    (2028, 6, date(2028, 6, 16), date(2028, 6, 12)),
+]
+
+
+@pytest.mark.parametrize("root", ["NQ", "ES"])
+@pytest.mark.parametrize("year, month, exp, roll", CME_TABLE)
+def test_expiry_matches_cme(root, year, month, exp, roll):
+    assert expiry(Contract(root, month, year)) == exp
+
+
+@pytest.mark.parametrize("root", ["NQ", "ES"])
+@pytest.mark.parametrize("year, month, exp, roll", CME_TABLE)
+def test_calendar_roll_day_matches_cme(root, year, month, exp, roll):
+    assert calendar_roll_day(Contract(root, month, year)) == roll
