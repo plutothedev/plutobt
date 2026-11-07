@@ -41,11 +41,15 @@ class Trade:
     # True when the engine closed these contracts on a margin call
     # (on_margin_call="liquidate"), not the strategy or its stop.
     margin_liquidation: bool = False
+    # Contract rolls these contracts were held through (2.0 spec §7.2) and their
+    # pro-rata share of what those rolls cost (commission and slippage on both legs).
+    roll_cost: float = 0.0
+    rolls: int = 0
 
     @property
     def net_pnl(self) -> float:
-        """P&L after the fees attributable to this trade."""
-        return self.pnl - self.commission
+        """P&L after the fees and roll costs attributable to this trade."""
+        return self.pnl - self.commission - self.roll_cost
 
 
 @dataclass
@@ -56,6 +60,27 @@ class Fill:
     price: float
     commission: float
     margin_liquidation: bool = False   # the engine's forced exit on a margin call
+
+
+@dataclass
+class RollEvent:
+    """The engine rolled an open position from one contract to the next (2.0 §7.2).
+
+    Booked at the open of the first bar of ``to_contract``: one side to close the old
+    contract and one to open the new, each paying ``commission_per_side`` and the
+    slippage, so ``cost`` is one round trip on ``contracts``. ``gap_points`` is the new
+    contract's price minus the old one's at that moment (from the roll metadata)."""
+
+    ts: int
+    from_contract: str
+    to_contract: str
+    side: str          # "long" | "short", the position rolled
+    contracts: int
+    gap_points: float
+    cost: float
+    # The jump an unadjusted front-month chart shows at this roll for the position, in
+    # dollars (carry, not P&L): -side * contracts * gap_points * point_value.
+    roll_yield: float = 0.0
 
 
 @dataclass
@@ -90,6 +115,8 @@ class Portfolio:
         self._mark_price: float | None = None
         self._open_entry_ts: int | None = None
         self._open_commission: float = 0.0
+        self._open_roll_cost: float = 0.0
+        self._open_rolls: int = 0
 
     def equity(self, mark_price: float) -> float:
         """cash + open MTM (fill-basis). Flat => cash."""
@@ -155,6 +182,8 @@ class Portfolio:
         exit_share = fill.commission * closing / fill.contracts
         self._open_commission -= entry_share
         trade_commission = entry_share + exit_share
+        roll_share = self._open_roll_cost * closing / abs(cur_qty)
+        self._open_roll_cost -= roll_share
         side_str = "long" if cur_qty > 0 else "short"
 
         # Pro-rata realized P&L on the closed contracts, fill-basis.
@@ -165,7 +194,7 @@ class Portfolio:
         self.cash += realized
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
-        r_mult = self._calc_r_multiple(realized - trade_commission, closing)
+        r_mult = self._calc_r_multiple(realized - trade_commission - roll_share, closing)
 
         self.trades.append(
             Trade(
@@ -179,6 +208,8 @@ class Portfolio:
                 r_multiple=r_mult,
                 commission=trade_commission,
                 margin_liquidation=fill.margin_liquidation,
+                roll_cost=roll_share,
+                rolls=self._open_rolls,
             )
         )
 
@@ -196,6 +227,8 @@ class Portfolio:
         self.position.initial_stop = None
         self._open_entry_ts = fill.ts
         self._open_commission = fill.commission * abs(remaining) / fill.contracts
+        self._open_roll_cost = 0.0
+        self._open_rolls = 0
 
     def _calc_r_multiple(self, pnl: float, contracts: int) -> float | None:
         """Van Tharp R = pnl / (risk_per_contract * contracts).
@@ -227,6 +260,21 @@ class Portfolio:
         self._mark_price = None
         # exact reset: x * n / n can leave a ~1e-17 residue after a full close
         self._open_commission = 0.0
+        self._open_roll_cost = 0.0
+        self._open_rolls = 0
+
+    def apply_roll(self, event: RollEvent) -> None:
+        """Pay a roll of the open position (2.0 §7.2): cash drops by ``event.cost``,
+        which pools on the position like entry fees and reaches each closing Trade pro
+        rata as ``roll_cost``. Size, side, average price and stops are unchanged: on an
+        additively adjusted series every price level is consistent across the roll.
+        Contracts added after a roll share the pooled cost pro rata too. No margin
+        check: a roll is a calendar spread and the position size does not change."""
+        if self.position.qty == 0:
+            raise ValueError("apply_roll needs an open position")
+        self.cash -= event.cost
+        self._open_roll_cost += event.cost
+        self._open_rolls += 1
 
     def mark(self, price: float) -> None:
         """Record the per-bar mark price for MTM (spec §5.2 settlement proxy).
@@ -314,7 +362,8 @@ class Portfolio:
         unrealized = pnl_points(self.position.avg_price, mark, self.position.qty, self.instrument)
 
         # §0.4 Van Tharp R: r_multiple when initial_stop is set.
-        r_mult = self._calc_r_multiple(unrealized - self._open_commission, abs(self.position.qty))
+        r_mult = self._calc_r_multiple(unrealized - self._open_commission
+                                       - self._open_roll_cost, abs(self.position.qty))
 
         self.trades.append(
             Trade(
@@ -328,5 +377,7 @@ class Portfolio:
                 r_multiple=r_mult,
                 open_at_end=True,
                 commission=self._open_commission,
+                roll_cost=self._open_roll_cost,
+                rolls=self._open_rolls,
             )
         )

@@ -102,7 +102,9 @@ The demo is the thesis in code: **same engine + strategy, swap symbol & cost con
 ## 10. Status
 **v1 is complete; pre-film audit fixes landed 2026-11-02.** A pre-film audit found and fixed look-ahead in the equity curve, entry-bar stops, margin calls that never ran, scale-in margin, stale stops after flips, allow_short, overnight exits, the look-ahead check itself (now run by `Engine.run`, verified by a randomized property sweep), off-session sample data, and report honesty (CI and PSR on the same skew/kurtosis-adjusted basis). Every fix was reviewed by an independent agent with executable probes.
 
-**What's left** (none is engine code): keep the data/no-sweep discipline; optional beyond-v1 (MinTRL, full continuous-contract back-adjustment, both deliberately cut from v1).
+**2.0 (2026-11): continuous contracts.** `importers.py` reads vendor CSVs (Databento, TradingView, NinjaTrader, generic); `contracts.py` parses contract codes, holds CME's equity-index roll calendar (the Monday before the third Friday) and validates a `ContractSet`; `roll.py` picks roll bars (calendar, volume or your dates), back-adjusts additively in whole ticks and pins the series with a `RollMeta`; `python -m plutobt.continuous` does it from a folder. `Engine.run(df, strategy, roll_meta=meta)` books a `RollEvent` with real roll cost when the contract changes under a position, and warns (`PriceLevelWarning`) on signals that read absolute price levels. Proof: `tests/test_roll_reconciliation.py` reconciles the engine with an independent raw-contract simulator to the tick.
+
+**What's left** (none is engine code): keep the data/no-sweep discipline; optional beyond-2.0: MinTRL, ratio adjustment, exchange roll rules for CL, GC and ZN (they roll by volume or your dates today).
 
 ## Where to go deeper
 - `README.md`: usage, the look-ahead check, and every honesty caveat.

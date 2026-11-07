@@ -1,3 +1,4 @@
 # Keep the frozen sample bars LF on every checkout: tests/test_sample_data.py
 # pins them byte for byte against scripts/gen_sample.py.
 *.json text eol=lf
+*.csv text eol=lf

@@ -494,7 +494,7 @@ class Broker:
         shadow.pending = twin
         return shadow, twin
 
-    def fill_pending(self, next_bar) -> list[Fill]:
+    def fill_pending(self, next_bar, after_open=None) -> list[Fill]:
         """Fill against one bar: the pending order and the resting stop, walked along
         the bar's prices in time order.
 
@@ -582,6 +582,10 @@ class Broker:
             path = paths[0] if len(paths) == 1 else self._worst(
                 ts, order, open_px, low, high, close_px, False,
                 [(None, *p) for p in paths])[1:]
+        if after_open is not None:
+            # The open is settled (its fills are booked) and the path has not started:
+            # the engine books a contract roll here, on what is still held (2.0 §7.2).
+            after_open()
         fills.extend(self._walk(ts, order, open_px, low, high, *path))
         return fills
 

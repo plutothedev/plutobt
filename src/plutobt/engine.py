@@ -5,7 +5,6 @@ from __future__ import annotations
 import collections
 import copy
 import functools
-import hashlib
 import inspect
 import keyword
 import math
@@ -13,6 +12,7 @@ import numbers
 import pickle
 import warnings
 from dataclasses import asdict, dataclass, field, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -20,18 +20,29 @@ import pandas as pd
 from plutobt import __version__
 from plutobt.broker import Broker, FrameError
 from plutobt.config import BacktestConfig
-from plutobt.data import assert_positive_prices, ohlcv_problem, ts_unit_problem
+from plutobt.data import (
+    assert_positive_prices,
+    frame_sha256,
+    ohlcv_problem,
+    ts_unit_problem,
+)
 from plutobt.instruments import Instrument
 from plutobt.lookahead import (
     _ROW_RULE,
     LookaheadError,
     LookaheadWarning,
+    PriceLevelWarning,
     _first_mismatch,
+    _mismatch_at,
+    _values,
     assert_causal,
     first_difference,
 )
-from plutobt.portfolio import MarginCall, Portfolio, Trade
+from plutobt.portfolio import MarginCall, Portfolio, RollEvent, Trade
 from plutobt.strategy import Context, Strategy
+
+if TYPE_CHECKING:
+    from plutobt.roll import RollMeta
 
 # ---------------------------------------------------------------------------
 # §0.1: BacktestResult defined ONCE at module scope (consumers import from here)
@@ -51,6 +62,8 @@ class BacktestResult:
     manifest: dict
     margin_calls: list[MarginCall] = field(default_factory=list)
     margin_refusals: int = 0
+    # Rolls of an open position on a continuous series (2.0 §7.2), in bar order.
+    rolls: list[RollEvent] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +71,8 @@ class BacktestResult:
 # ---------------------------------------------------------------------------
 
 # Columns that are always present in the raw frame; never treated as signal cols.
-_BASE_COLS = frozenset(("ts", "open", "high", "low", "close", "volume", "session"))
+_BASE_COLS = frozenset(("ts", "open", "high", "low", "close", "volume", "session",
+                        "contract", "adj_offset", "raw_close"))
 _STARTING_CASH = 100_000.0
 
 # v1 default roll/sample vintage; NOT the run date (back-adjustment construction
@@ -331,7 +345,8 @@ class Engine:
         self.instrument = instrument
         self.config = config
 
-    def run(self, df: pd.DataFrame, strategy: Strategy) -> BacktestResult:
+    def run(self, df: pd.DataFrame, strategy: Strategy,
+            roll_meta: RollMeta | None = None) -> BacktestResult:
         """Execute the backtest loop over ``df``.
 
         Checks first: a bad config (``break_on``; a commission, slippage or
@@ -411,11 +426,21 @@ class Engine:
             of the whole position, replacing any order placed on bar t; it fills at
             bar t+1's open (no break cancels it) and its Trade has
             ``margin_liquidation=True``. ``"record"`` keeps the position.
+        Continuous series (2.0): a frame with a ``contract`` column (from
+            ``roll.build_continuous``) needs its ``roll_meta``, whose ``frame_sha256``
+            must match the frame (an edited or stale series is refused, naming both
+            hashes). On the bar where ``contract`` changes while a position is open,
+            the contracts still held after that bar's open fills are rolled: a
+            RollEvent in ``rolls``, cash debited one round trip of commission and
+            slippage, the Trade's ``roll_cost``. An exit, a flip's closing half or a
+            gap-through stop at that open trades the expiring contract and does not
+            roll. Levels and stops are unchanged.
         Open-at-end: a position still open on the last bar is marked-to-last via
             ``portfolio.mark_open_at_end`` (§0.6 — single source of truth).
         """
         self._check_config()
         self._check_frame(df, precomputed=False)       # the caller's own frame
+        self._check_roll_meta(df, roll_meta)
         problem = ohlcv_problem(df)
         if problem is not None:
             raise ValueError(
@@ -453,6 +478,8 @@ class Engine:
         if self.config.check_causality:
             try:
                 self._check_causality(df, strategy, snapshot, data)
+                if "contract" in df.columns:
+                    self._check_price_levels(df, snapshot, data)
             finally:
                 _refuse_class_changes(classes)  # by a prefix call, or the last one
         session_breaks = self.config.break_on == "session"
@@ -471,6 +498,10 @@ class Engine:
         else:
             interval = 0
         has_session = "session" in data.columns
+        has_contract = "contract" in data.columns
+        gap_to = ({r["to"]: float(r["gap_points"]) for r in roll_meta.rolls}
+                  if roll_meta is not None else {})
+        rolls: list[RollEvent] = []
 
         # Build a namedtuple Row type from the (potentially augmented) column list.
         Row = collections.namedtuple("Row", list(data.columns))
@@ -513,7 +544,12 @@ class Engine:
                     # used to drop it too, holding the position overnight and on;
                     # fixed 2026-11-02). A resting protective stop is untouched.
                     broker.cancel_pending_entry(keep_exits=True)
-                broker.fill_pending(bar)
+                after_open = None
+                if has_contract and bar.contract != prev.contract:
+                    after_open = functools.partial(
+                        self._roll_held, portfolio, broker, rolls, gap_to, bar, prev,
+                        portfolio.position.qty)
+                broker.fill_pending(bar, after_open=after_open)
             prev = bar
 
             # Warm-up: skip on_bar until every signal col is set (§5.9); a NaN after
@@ -557,7 +593,7 @@ class Engine:
         equity_curve = pd.Series(
             equity_vals, index=pd.Index(equity_index, name="ts")
         )
-        manifest = self._build_manifest(df)
+        manifest = self._build_manifest(df, roll_meta)
         return BacktestResult(
             equity_curve=equity_curve,
             trades=portfolio.trades,
@@ -565,6 +601,7 @@ class Engine:
             manifest=manifest,
             margin_calls=margin_calls,
             margin_refusals=len(broker._margin_refused),
+            rolls=rolls,
         )
 
     def _check_causality(self, df: pd.DataFrame, strategy: Strategy, snapshot: Strategy,
@@ -688,18 +725,100 @@ class Engine:
             raise ValueError("causality_sample must be 'auto', None (check every bar) or "
                              f"a whole number of bars >= 1, got {sample!r}")
 
-    def _build_manifest(self, df: pd.DataFrame) -> dict:
+    def _check_price_levels(self, df: pd.DataFrame, snapshot: Strategy,
+                            data: pd.DataFrame) -> None:
+        """The price-level guard (2.0 §7.4), on a continuous series only. Precompute
+        runs once more, on a fresh copy of the strategy as passed in, with open, high,
+        low and close all raised by 1,000 ticks. A signal column that comes out the same
+        (RSI, a cross flag, ATR) or raised by exactly that much (a moving average) does
+        not depend on the price level. Anything else (a fixed threshold, a percentage or
+        log return) draws a PriceLevelWarning naming it: on a back-adjusted series those
+        levels are not prices that traded."""
+        shift = 1000 * self.instrument.tick_size
+        moved = df.copy()
+        for col in ("open", "high", "low", "close"):
+            moved[col] = moved[col] + shift
+        out = copy.deepcopy(snapshot).precompute(moved).reset_index(drop=True)
+        for col in data.columns:
+            if col in _BASE_COLS or col not in out.columns:
+                continue
+            a, b = data[col], out[col]
+            # The causality guard's tolerance, not exact: an EMA of shifted prices
+            # differs from the shifted EMA by float noise (~1e-11 at NQ levels).
+            if _mismatch_at(_values(b), _values(a), col) is None:
+                continue
+            numeric = (pd.api.types.is_numeric_dtype(a.dtype)
+                       and not pd.api.types.is_bool_dtype(a.dtype))
+            if numeric and _mismatch_at(_values(b), _values(a + shift), col) is None:
+                continue
+            warnings.warn(
+                f"signal column {col!r} depends on the absolute price level: on a "
+                "back-adjusted continuous series the old prices are shifted by the "
+                "later roll gaps, so a fixed level (close > 18000) or a percentage or log "
+                "return reads the adjustment, not the market. Use distances (points, "
+                "ATR, a moving average) or raw_close, which holds the real close",
+                PriceLevelWarning, stacklevel=4)
+
+    def _roll_held(self, portfolio: Portfolio, broker: Broker, rolls: list,
+                   gap_to: dict, bar, prev, qty_before: int) -> None:
+        """Book the roll of the contracts held THROUGH the roll bar's open (2.0 §7.2).
+
+        Called by the broker after the open's fills and before the intrabar path. An
+        exit, a flip's closing half or a gap-through stop filled at the open is a trade
+        on the expiring contract at its open, so those contracts never roll; contracts
+        added at the open open on the new contract, so they never roll either. What
+        rolls is the part of the position held both before and after the open:
+        min(|before|, |after|) on the same side. It costs one round trip of commission
+        and slippage. A stop or limit filling later in the bar was held into the new
+        contract, so it rolled first."""
+        qty_after = portfolio.position.qty
+        if qty_before == 0 or qty_after == 0 or (qty_before > 0) != (qty_after > 0):
+            return
+        n = min(abs(qty_before), abs(qty_after))
+        long = qty_before > 0
+        cost = (2 * self.config.commission_per_side * n
+                + 2 * broker._slippage_ticks() * self.instrument.tick_value * n)
+        gap_points = gap_to.get(str(bar.contract), 0.0)
+        event = RollEvent(
+            ts=int(bar.ts), from_contract=str(prev.contract),
+            to_contract=str(bar.contract), side="long" if long else "short",
+            contracts=n, gap_points=gap_points, cost=cost,
+            roll_yield=-(1 if long else -1) * n * gap_points * self.instrument.point_value)
+        portfolio.apply_roll(event)
+        rolls.append(event)
+
+    @staticmethod
+    def _check_roll_meta(df: pd.DataFrame, roll_meta: RollMeta | None) -> None:
+        """A continuous series runs only with the metadata it was built with (2.0 §7.1)."""
+        has_contract = "contract" in df.columns
+        if has_contract and roll_meta is None:
+            raise ValueError(
+                "the frame has a 'contract' column, so it is a continuous series: pass "
+                "the RollMeta it was built with, Engine.run(df, strategy, roll_meta=meta) "
+                "(load_continuous returns both)")
+        if roll_meta is not None and not has_contract:
+            raise ValueError("roll_meta was given but the frame has no 'contract' column; "
+                             "pass the series built with that metadata")
+        if roll_meta is not None:
+            from plutobt.roll import check_pin
+
+            # The pin covers the series' own columns (roll.PINNED_COLUMNS): added
+            # signal or 'session' columns are fine, edited bars are not. A date range
+            # comes from roll.slice_continuous, which re-pins after checking.
+            check_pin(df, roll_meta, "the frame passed to Engine.run")
+
+    def _build_manifest(self, df: pd.DataFrame, roll_meta: RollMeta | None = None) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the
         canonical CSV bytes of the input frame (§5.10, §0 key name).
 
         ``periods_per_year`` lives ONLY inside ``manifest["config"]`` (single
         source = config); consumers read it from there, never a top-level dup.
         """
-        # lineterminator pinned: pandas defaults to os.linesep, so the same bars
-        # hashed differently on Windows and Linux.
-        raw = df.to_csv(index=False, lineterminator="\n").encode("utf-8")
-        sha = hashlib.sha256(raw).hexdigest()
-        if sha in _SAMPLE_SHA256:
+        sha = frame_sha256(df)
+        if roll_meta is not None:
+            roll = (roll_meta.roll_trigger, roll_meta.splice_method,
+                    roll_meta.adjustment_method, roll_meta.as_of_date)
+        elif sha in _SAMPLE_SHA256:
             # §5.6 roll metadata: the shipped sample is a frozen, single-expiry
             # synthetic snapshot. These document the continuous-series policy;
             # full back-adjustment construction is out of v1 scope.
@@ -708,7 +827,7 @@ class Engine:
         else:
             # Any other frame: the engine cannot know how it was rolled or adjusted.
             roll = (_ROLL_UNKNOWN,) * 4
-        return {
+        manifest = {
             "data_sha256": sha,
             "version": __version__,
             "config": asdict(self.config),
@@ -716,3 +835,8 @@ class Engine:
             **dict(zip(("roll_trigger", "splice_method", "adjustment_method",
                         "as_of_date"), roll, strict=True)),
         }
+        if roll_meta is not None:
+            # 2.0: only a continuous series carries this key, so every 0.3.0 manifest
+            # keeps exactly its old keys.
+            manifest["rolls"] = len(roll_meta.rolls)
+        return manifest

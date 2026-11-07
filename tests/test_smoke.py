@@ -36,14 +36,14 @@ def test_package_imports():
 
 def test_version_is_pep440_string():
     assert isinstance(plutobt.__version__, str)
-    assert plutobt.__version__ == "0.3.0"
+    assert plutobt.__version__ == "2.0.0"
 
 
 def test_pyproject_declares_package_and_src_layout():
     with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
         cfg = tomllib.load(fh)
     assert cfg["project"]["name"] == "plutobt"
-    assert cfg["project"]["version"] == "0.3.0"
+    assert cfg["project"]["version"] == "2.0.0"
     assert cfg["project"]["requires-python"] == ">=3.11"
     assert cfg["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
@@ -112,3 +112,23 @@ def test_public_api_names_resolve():
     # Spot-check that they are the real objects, not None.
     assert plutobt.Engine is not None
     assert plutobt.BacktestResult is not None
+
+
+def test_roll_api_is_exported():
+    for name in ("load_csv", "load_csv_contracts", "ContractSet", "build_continuous",
+                 "load_continuous", "save_continuous", "slice_continuous", "RollMeta"):
+        assert name in plutobt.__all__, name
+        assert getattr(plutobt, name) is not None
+
+
+def test_cli_import_does_not_shadow_build_continuous():
+    """Review #6: a CLI module named build_continuous replaced the public function on the
+    package once anything imported it."""
+    import types
+
+    importlib.import_module("plutobt.continuous")
+    from plutobt import build_continuous
+
+    assert isinstance(build_continuous, types.FunctionType)
+    assert not hasattr(plutobt, "build_continuous") or callable(plutobt.build_continuous)
+    assert not isinstance(plutobt.build_continuous, types.ModuleType)

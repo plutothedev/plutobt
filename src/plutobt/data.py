@@ -6,6 +6,7 @@ Data is unix-seconds; bar ts marks the bar OPEN (verified empirically, §5.5).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import numbers
@@ -349,7 +350,17 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
     Note: a 'session' label (if present) is NOT preserved; call tag_sessions
     on the result if session labels are needed at the coarser cadence.
+
+    A continuous series (a ``contract`` column, from ``roll.build_continuous``) is
+    refused: its roll columns cannot be aggregated, and dropping them would run the
+    series as a plain frame with no rolls. Resample each contract, then build.
     """
+    if "contract" in df.columns:
+        raise ValueError(
+            "resample refuses a continuous series (it has a 'contract' column): its "
+            "contract, adj_offset and raw_close columns cannot be aggregated, and "
+            "dropping them would lose every roll. Resample each contract's bars, then "
+            "build the series with build_continuous")
     offset = pd.tseries.frequencies.to_offset(rule)
     daily = (not isinstance(offset, pd.offsets.Tick)
              or pd.Timedelta(offset) >= pd.Timedelta(days=1))
@@ -378,3 +389,13 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     out["ts"] = out["ts"].astype("int64") // 1_000_000_000
     out["volume"] = out["volume"].astype("int64")
     return out[_COLUMNS].reset_index(drop=True)
+
+
+def frame_sha256(df: pd.DataFrame) -> str:
+    """sha256 hex digest of a frame's canonical CSV bytes (§5.10): ``to_csv`` with no
+    index and LF line ends, so the same bars hash the same on every OS. This is the
+    manifest's ``data_sha256`` and a continuous series' ``frame_sha256``."""
+    # lineterminator pinned: pandas defaults to os.linesep, so the same bars hashed
+    # differently on Windows and Linux.
+    raw = df.to_csv(index=False, lineterminator=chr(10)).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
