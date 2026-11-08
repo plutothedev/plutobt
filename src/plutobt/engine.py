@@ -73,6 +73,9 @@ class BacktestResult:
 # Columns that are always present in the raw frame; never treated as signal cols.
 _BASE_COLS = frozenset(("ts", "open", "high", "low", "close", "volume", "session",
                         "contract", "adj_offset", "raw_close"))
+# The columns roll.build_continuous writes. They are read as a continuous series' own,
+# so a precompute may never add one (2.0.1: an added 'contract' booked phantom rolls).
+_ROLL_COLS = ("contract", "adj_offset", "raw_close")
 _STARTING_CASH = 100_000.0
 
 # v1 default roll/sample vintage; NOT the run date (back-adjustment construction
@@ -498,8 +501,8 @@ class Engine:
         else:
             interval = 0
         has_session = "session" in data.columns
-        has_contract = "contract" in data.columns
-        gap_to = ({r["to"]: float(r["gap_points"]) for r in roll_meta.rolls}
+        has_contract = "contract" in df.columns     # the caller's frame, never the strategy's
+        gap_to =({r["to"]: float(r["gap_points"]) for r in roll_meta.rolls}
                   if roll_meta is not None else {})
         rolls: list[RollEvent] = []
 
@@ -680,12 +683,20 @@ class Engine:
 
     @staticmethod
     def _check_precompute_kept_the_bars(df: pd.DataFrame, data: pd.DataFrame) -> None:
-        """Refuse a precompute that dropped or added rows, or changed a base column the
-        caller's frame holds: the loop fills orders against these bars as given."""
+        """Refuse a precompute that dropped or added rows, changed a base column the
+        caller's frame holds, or added one of the roll columns: the loop fills orders
+        against these bars as given, and books rolls only on a series built to roll."""
         if len(data) != len(df):
             raise FrameError(f"the strategy's precompute returned {len(data)} rows for "
                              f"{len(df)} input bars: {_ROW_RULE}")
         given = df.reset_index(drop=True)
+        for col in _ROLL_COLS:
+            if col in data.columns and col not in given.columns:
+                raise FrameError(
+                    f"the strategy's precompute added column {col!r}, a name the engine "
+                    "reserves for a continuous series made by roll.build_continuous (a "
+                    "'contract' column there is where the engine books each roll and its "
+                    "cost): give the signal another name")
         for col in sorted(_BASE_COLS & set(given.columns)):
             if col not in data.columns:
                 raise FrameError(f"the strategy's precompute removed column {col!r}")
