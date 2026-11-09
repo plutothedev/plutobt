@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sys
 
 from plutobt import format_study, get_instrument, load_bars, load_config, run_study
 from plutobt.ledger import DEFAULT_PATH
@@ -25,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ledger", default=DEFAULT_PATH,
                    help=f"the trials ledger (default {DEFAULT_PATH})")
     a = p.parse_args(argv)
+    # The report's warning lines carry a warning sign; a Windows stdout redirected to a
+    # file or pipe defaults to cp1252, which cannot encode it. Write UTF-8 instead.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     df = load_bars(ROOT / "data" / "sample" / "nq_5m.json")
     cfg = load_config(str(ROOT / "configs" / "nq.toml"))
     result = run_study(EMACross, GRID, df, get_instrument("NQ"), cfg, ledger=a.ledger)
