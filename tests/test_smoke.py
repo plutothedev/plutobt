@@ -36,14 +36,14 @@ def test_package_imports():
 
 def test_version_is_pep440_string():
     assert isinstance(plutobt.__version__, str)
-    assert plutobt.__version__ == "2.0.1"
+    assert plutobt.__version__ == "3.0.0"
 
 
 def test_pyproject_declares_package_and_src_layout():
     with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
         cfg = tomllib.load(fh)
     assert cfg["project"]["name"] == "plutobt"
-    assert cfg["project"]["version"] == "2.0.1"
+    assert cfg["project"]["version"] == "3.0.0"
     assert cfg["project"]["requires-python"] == ">=3.11"
     assert cfg["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
@@ -117,6 +117,13 @@ def test_public_api_names_resolve():
 def test_roll_api_is_exported():
     for name in ("load_csv", "load_csv_contracts", "ContractSet", "build_continuous",
                  "load_continuous", "save_continuous", "slice_continuous", "RollMeta"):
+        assert name in plutobt.__all__, name
+        assert getattr(plutobt, name) is not None
+
+
+def test_overfit_api_is_exported():
+    for name in ("run_study", "StudyResult", "format_study", "deflated_sharpe",
+                 "expected_max_sharpe", "Ledger"):
         assert name in plutobt.__all__, name
         assert getattr(plutobt, name) is not None
 
