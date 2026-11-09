@@ -62,3 +62,126 @@ def verdict(dsr: float, n_trials: int) -> str:
     if dsr >= SURVIVES:
         return "survives deflation"
     return f"does not survive deflation (N = {n_trials:,} tries)"
+
+
+# ---------------------------------------------------------------------------
+# python -m plutobt.deflate: the no-code deflator (spec §4.1)
+# ---------------------------------------------------------------------------
+
+_HELP = """\
+Deflate a Sharpe ratio for the number of versions you tried before you kept the best one.
+
+TradingView users: the Strategy Tester computes its Sharpe from MONTHLY returns, after
+taking off a risk-free rate (2% a year by default, the risk_free_rate argument of
+strategy()), so deflating it against zero here is slightly strict. TradingView does not
+document whether its figure is annualized. If yours is annualized, pass it as it is with
+--periods-per-year 12 --returns <months tested>. If it is a plain monthly figure,
+multiply it by 3.46 (the square root of 12) first.
+
+example:
+  python -m plutobt.deflate --sharpe 2.1 --periods-per-year 12 --returns 60 --trials 40
+"""
+
+_LABEL = "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
+
+
+class _Refused(ValueError):
+    pass
+
+
+def _parser():
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="python -m plutobt.deflate", description=_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--sharpe", type=float, required=True,
+                   help="the best Sharpe you kept, ANNUALIZED")
+    p.add_argument("--periods-per-year", type=float, required=True,
+                   help="return periods a year behind that Sharpe (12 monthly, 252 daily)")
+    p.add_argument("--returns", type=int, required=True,
+                   help="how many returns stand behind it (months tested, days tested)")
+    p.add_argument("--trials", type=int, required=True,
+                   help="how many versions you tried, the kept one included")
+    p.add_argument("--skew", type=float, default=None,
+                   help="skew of the returns (give with --kurtosis)")
+    p.add_argument("--kurtosis", type=float, default=None,
+                   help="Pearson kurtosis of the returns, normal = 3 (give with --skew)")
+    return p
+
+
+def _check(a) -> None:
+    if not math.isfinite(a.sharpe):
+        raise _Refused(f"--sharpe must be a finite number, got {a.sharpe}")
+    if not (math.isfinite(a.periods_per_year) and a.periods_per_year > 0):
+        raise _Refused(f"--periods-per-year must be above 0, got {a.periods_per_year}")
+    if a.returns < 2:
+        raise _Refused(f"--returns must be at least 2 (a Sharpe needs 2 returns), "
+                       f"got {a.returns}")
+    if a.trials < 1:
+        raise _Refused(f"--trials must be at least 1 (the version you kept), got {a.trials}")
+    if (a.skew is None) != (a.kurtosis is None):
+        raise _Refused("give both --skew and --kurtosis, or neither (then normal returns "
+                       "are assumed)")
+    if a.skew is not None:
+        if not (math.isfinite(a.skew) and math.isfinite(a.kurtosis)):
+            raise _Refused("--skew and --kurtosis must be finite numbers")
+        if a.kurtosis < 1 + a.skew ** 2:
+            raise _Refused(
+                f"skew {a.skew:g} with kurtosis {a.kurtosis:g} is impossible: Pearson "
+                f"kurtosis is always at least 1 + skew squared ({1 + a.skew ** 2:g}). "
+                "Kurtosis here is Pearson (normal = 3), not excess (normal = 0)")
+
+
+def _report(a) -> str:
+    from plutobt.metrics import psr_from_moments
+
+    root = math.sqrt(a.periods_per_year)
+    sr = a.sharpe / root
+    normal = a.skew is None
+    g3, g4 = (0.0, 3.0) if normal else (a.skew, a.kurtosis)
+    var_sr = null_var_sr(a.returns)
+    bar = expected_max_sharpe(a.trials, var_sr)
+    dsr = psr_from_moments(sr, a.returns, g3, g4, bar)
+    tries = "1 try" if a.trials == 1 else f"{a.trials:,} tries"
+    lines = [f"PlutoBT deflate: best Sharpe {a.sharpe:.2f} (annualized, "
+             f"{a.periods_per_year:g} periods a year) over {a.returns:,} returns, "
+             f"best of {tries}"]
+    if a.trials == 1:
+        lines.append("Luck bar: one try, nothing to deflate (this is the plain PSR "
+                     "against zero)")
+    else:
+        lines.append(f"Luck bar: the best of {a.trials:,} zero-edge tries would show an "
+                     f"annualized Sharpe of about {bar * root:.2f} by luck alone")
+    lines.append(f"Deflated Sharpe: {dsr:.3f}")
+    lines.append(f"Verdict: {verdict(dsr, a.trials)}")
+    if a.trials > 1:
+        lines.append(f"Assumed: the spread of the {tries} is what zero-edge tries show "
+                     f"over {a.returns:,} returns (their real spread is unknown here)")
+    if normal:
+        lines.append("Assumed: normal returns (skew 0, kurtosis 3); pass --skew and "
+                     "--kurtosis if you know them")
+    else:
+        lines.append(f"Using: skew {g3:g}, kurtosis {g4:g}")
+    if a.returns < 30:
+        lines.append("Warning: under 30 returns, every Sharpe statistic here is unreliable")
+    lines.append(_LABEL)
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Print the deflated verdict; 0 when it ran, 2 when the input was refused."""
+    import sys
+
+    a = _parser().parse_args(argv)
+    try:
+        _check(a)
+    except _Refused as refused:
+        print(f"deflate: {refused}", file=sys.stderr)
+        return 2
+    sys.stdout.write(_report(a))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
