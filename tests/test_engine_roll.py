@@ -89,6 +89,46 @@ def test_contract_column_without_meta_refused():
         Engine(get_instrument("NQ"), CFG).run(df, Script())
 
 
+def plain_bars():
+    """One contract's bars, no roll columns: an ordinary series."""
+    df, _ = series()
+    return df[["ts", "open", "high", "low", "close", "volume"]].copy()
+
+
+class AddsColumn(Strategy):
+    """Holds one long the whole run, with a precompute that adds column ``name``,
+    whose value changes at a fixed bar time (as a real contract code would)."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def precompute(self, frame):
+        frame[self.name] = np.where(frame["ts"] < T0 + 300 * ROLL_ROW, "A", "B")
+        return frame
+
+    def on_bar(self, ctx):
+        if ctx.position.qty == 0:
+            ctx.broker.buy(contracts=1)
+
+
+@pytest.mark.parametrize("name", ["contract", "adj_offset", "raw_close"])
+def test_precompute_adding_a_roll_column_is_refused(name):
+    """2.0.1: the engine read "contract" off the PRECOMPUTED frame, so a strategy that
+    named a signal column contract on a plain series booked phantom rolls and charged
+    them (one roll, $15 at 2.50 a side and 1 tick). The roll columns belong to a series
+    build_continuous made; a precompute may not add them."""
+    with pytest.raises(FrameError, match=rf"added column {name!r}.*build_continuous"):
+        Engine(get_instrument("NQ"), CFG).run(plain_bars(), AddsColumn(name))
+
+
+def test_a_signal_column_with_another_name_books_no_roll():
+    """Positive control: the same strategy with any other column name runs and rolls
+    nothing, so the refusal above is about the reserved name, not the column."""
+    res = Engine(get_instrument("NQ"), CFG).run(plain_bars(), AddsColumn("contract_code"))
+    assert res.rolls == []
+    assert all(t.roll_cost == 0 for t in res.trades)
+
+
 def test_meta_hash_mismatch_refused():
     df, meta = series()
     bad = replace(meta, frame_sha256="0" * 64)

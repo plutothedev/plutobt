@@ -36,14 +36,14 @@ def test_package_imports():
 
 def test_version_is_pep440_string():
     assert isinstance(plutobt.__version__, str)
-    assert plutobt.__version__ == "2.0.0"
+    assert plutobt.__version__ == "2.0.1"
 
 
 def test_pyproject_declares_package_and_src_layout():
     with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
         cfg = tomllib.load(fh)
     assert cfg["project"]["name"] == "plutobt"
-    assert cfg["project"]["version"] == "2.0.0"
+    assert cfg["project"]["version"] == "2.0.1"
     assert cfg["project"]["requires-python"] == ">=3.11"
     assert cfg["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
