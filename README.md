@@ -361,9 +361,10 @@ report then answers:
 
 - **Deflated Sharpe** (Bailey and Lopez de Prado, 2014): the probability the best
   setting truly beats the luck bar, the Sharpe the best of N zero-edge tries reaches by
-  luck. N is every distinct setting ever recorded for this strategy on these exact bars,
-  read from the ledger, so a study rerun until something looks good still counts every
-  try. "Survives deflation" means 0.95 or more.
+  luck. N is every distinct try ever recorded for this strategy on these exact bars,
+  read from the ledger. A try is the fully resolved setting (class defaults included)
+  plus a hash of the strategy's code, so changing a default or editing the logic and
+  rerunning the same grid counts every rerun. "Survives deflation" means 0.95 or more.
 - **PBO**, the Probability of Backtest Overfitting (Bailey, Borwein, Lopez de Prado
   and Zhu): the bars are cut into 16 blocks; for each of the 12,870 ways to call half of
   them in-sample, how often does the in-sample winner land in the bottom half on the
@@ -373,19 +374,26 @@ report then answers:
   indicators), so the stitched curve could actually have been traded. A position open
   at a window's end is charged one exit.
 - **Purged CV**: every block is the test block once. The bars right after it are
-  left out of training (the embargo, by default the longest trade in bars), because a
-  position carried out of the test block would leak its outcome into training. Folds
-  trained on later data say so; walk-forward is the strictly real-time test.
+  left out of training (the embargo, by default the longest trade in bars), because
+  what happens there still depends on the test block: the position carried out of it,
+  indicators still remembering it, the same market regime. Long indicator memory can
+  outlast the embargo, so folds trained on later data say so; walk-forward is the
+  strictly real-time test.
 
 **The ledger.** Every completed run is one line in `.plutobt/trials.jsonl` (change it
 with `ledger=`, turn it off with `ledger=False`, which the report then stamps). It is an
 honesty aid, not a lock: a strategy is known by its module and class name, so renaming
-the class starts a fresh count, and deleting the file forgets every try. Counting
-near-identical settings as separate tries overstates N, so the verdict errs strict.
+the class starts a fresh count, and deleting the file forgets every try. Any edit to the
+code counts as a new try, a comment included, and near-identical settings count
+separately: both overstate N, so the verdict errs strict. Costs and the data window are
+not part of a try: a different set of bars is a different count. The report prints the
+ledger's path, since the default is relative to the folder you run from.
 
-**How it is proven.** On pure noise, 2,000 seeded studies of 50 settings: the best
-setting survived deflation in 0.25% of them. With one setting carrying a real edge, it
-was found and survived in 97.7% of 300. The luck bar matches a brute-force simulation
+**How it is proven.** On pure noise, 2,000 seeded studies of 50 independent settings:
+the best setting survived deflation in 0.25% of them. Real grids are correlated (EMA
+20/50 and 21/50 move together), and there the margin is thinner: 1.6%, 4.1% and 4.7%
+at correlations of 0.5, 0.9 and 0.99, still under the 5% the 0.95 bar promises. With
+one setting carrying a real edge, it was found and survived in 97.7% of 300. The luck bar matches a brute-force simulation
 and the paper's worked example (Deflated Sharpe 0.9004); PBO gives about 0.5 on noise,
 near 0 for a planted steady edge and above 0.7 for settings that only got lucky; a
 planted regime change makes walk-forward fall below in-sample. All test data is

@@ -19,9 +19,15 @@ NQ = get_instrument("NQ")
 def sample_study(tmp_path_factory):
     df = load_bars(REPO_ROOT / "data" / "sample" / "nq_5m.json")
     cfg = load_config(str(REPO_ROOT / "configs" / "nq.toml"))
-    led = tmp_path_factory.mktemp("ledger") / "trials.jsonl"
-    return run_study(EMACross, {"fast_span": [10, 20, 30], "slow_span": [50, 100]}, df, NQ,
-                     cfg, ledger=led)
+    import os
+
+    here = os.getcwd()
+    os.chdir(tmp_path_factory.mktemp("ledger"))      # a relative ledger path prints the same
+    try:
+        return run_study(EMACross, {"fast_span": [10, 20, 30], "slow_span": [50, 100]}, df,
+                         NQ, cfg, ledger=os.path.join(".plutobt", "trials.jsonl"))
+    finally:
+        os.chdir(here)
 
 
 def test_study_report_snapshot(sample_study):
@@ -68,3 +74,15 @@ def test_winner_changed_warning():
     text = format_study(res, "NQ")
     assert "winner changed between windows" in text
     assert "capped" in text            # always in the market: the CV embargo is capped
+
+
+def test_ledger_path_printed(sample_study):
+    """Final review: a study run from another folder silently starts a separate count;
+    the path on the report is how the user notices."""
+    assert f"  Ledger: {sample_study.ledger_path}" in format_study(sample_study, "NQ")
+
+
+def test_one_setting_report(tmp_path):
+    res = run_study(Hold, {"side": [1]}, walk(600, drift=0.3), NQ, CFG, ledger=False)
+    text = format_study(res, "NQ")
+    assert "not computed: one setting, so there is nothing to choose between" in text

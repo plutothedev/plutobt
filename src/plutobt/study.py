@@ -28,7 +28,16 @@ from plutobt.config import BacktestConfig
 from plutobt.data import frame_sha256
 from plutobt.deflate import deflated_sharpe, expected_max_sharpe, verdict
 from plutobt.engine import Engine
-from plutobt.ledger import DEFAULT_PATH, Ledger, _plain, params_key, strategy_id
+from plutobt.ledger import (
+    DEFAULT_PATH,
+    Ledger,
+    _plain,
+    code_sha256,
+    params_key,
+    resolved_settings,
+    strategy_id,
+    try_key,
+)
 from plutobt.oos import (
     PurgedCV,
     WalkForward,
@@ -61,7 +70,7 @@ class StudyResult:
     n_this: int
     n_earlier: int
     deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann, verdict
-    pbo: PBOResult
+    pbo: PBOResult | None         # None for a one-setting study: nothing to choose between
     walk_forward: WalkForward
     cv: PurgedCV
 
@@ -81,7 +90,7 @@ class _Context:
     ppy: float
 
 
-def expand_grid(strategy_cls: type, grid: dict) -> list[dict]:
+def expand_grid(strategy_cls: type, grid: dict, max_configs: int | None = None) -> list[dict]:
     """Every combination of ``grid``'s values, in grid order, duplicates collapsed (20,
     20.0 and numpy's 20 are one setting). Refuses names the class does not have, methods,
     empty grids or value lists, and a class that cannot be built with no arguments."""
@@ -103,8 +112,19 @@ def expand_grid(strategy_cls: type, grid: dict) -> list[dict]:
                 "class attribute the strategy reads (a typo would quietly test the default)")
         if callable(getattr(strategy_cls, name)):
             raise ValueError(f"{name!r} is a method of {strategy_cls.__name__}, not a setting")
-        if not list(values):
+        if not isinstance(values, list | tuple | range | np.ndarray):
+            # a string would expand into its characters, each a junk try in the ledger
+            raise ValueError(
+                f"setting {name!r} needs a list of values to try, got "
+                f"{type(values).__name__} {values!r}: write [{values!r}] for one value")
+        if len(values) == 0:
             raise ValueError(f"setting {name!r} has no values to try")
+    total = math.prod(len(v) for v in grid.values())
+    if max_configs is not None and total > max_configs:
+        # counted before expanding: a large grid would hang in itertools.product first
+        raise ValueError(
+            f"the grid makes {total:,} settings, over max_configs={max_configs:,}: each is "
+            "one full backtest, so raise max_configs if you mean it")
     names = list(grid)
     seen, out = set(), []
     for combo in itertools.product(*(list(grid[n]) for n in names)):
@@ -153,21 +173,18 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
         raise ValueError(
             "run_study needs config.periods_per_year (bars a year, e.g. 20412 for 5-minute "
             "RTH index bars) to annualize its Sharpes")
-    settings = expand_grid(strategy_cls, grid)
-    if len(settings) > max_configs:
-        raise ValueError(
-            f"the grid makes {len(settings):,} settings, over max_configs={max_configs:,}: "
-            "each is one full backtest, so raise max_configs if you mean it")
+    settings = expand_grid(strategy_cls, grid, max_configs)
     n_rows = len(df) - 1
     # Every split is checked before the first run: too little data fails in a second.
     cscv_blocks(n_rows, blocks)
     walk_forward_windows(n_rows, wf_splits, wf_anchored)
     purged_folds(n_rows, cv_folds, 0)
 
-    sid, sha = strategy_id(strategy_cls), frame_sha256(df)
+    sid, sha, code = strategy_id(strategy_cls), frame_sha256(df), code_sha256(strategy_cls)
     led = Ledger(ledger) if ledger else None
     before = led.tries(sid, sha) if led else {}
-    record = (lambda p, bars, sr: led.record(sid, p, sha, bars, sr)) if led else None
+    record = (lambda p, bars, sr: led.record(sid, resolved_settings(strategy_cls, p), sha,
+                                             bars, sr, code=code)) if led else None
     ctx = _context(strategy_cls, settings, df, instrument, config, roll_meta, on_run=record)
 
     srs = np.array(ctx.sharpes, dtype=float)
@@ -177,7 +194,8 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     best_i = int(np.nanargmax(srs))
     tie = int(np.sum(srs == srs[best_i])) > 1
 
-    this = {params_key(p): s for p, s in zip(settings, ctx.sharpes, strict=True)}
+    this = {try_key(resolved_settings(strategy_cls, p), code): s
+            for p, s in zip(settings, ctx.sharpes, strict=True)}
     tries = led.tries(sid, sha) if led else this
     values = np.array([v for v in tries.values() if math.isfinite(v)])
     var_sr = float(np.var(values)) if values.size > 1 else 0.0
@@ -195,11 +213,11 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     return StudyResult(
         strategy=sid, grid=table, best=dict(settings[best_i]), tie=tie,
         returns=ctx.returns, periods_per_year=ctx.ppy, data_sha256=sha,
-        ledger_path=str(led.path) if led else None, ledger_new=led.is_new if led else False,
+        ledger_path=led.path.as_posix() if led else None, ledger_new=led.is_new if led else False,
         n_this=len(this), n_earlier=len(set(before) - set(this)),
         deflation={"dsr": dsr, "n_trials": n_trials, "var_sr": var_sr, "luck_bar": luck,
                    "luck_bar_ann": luck * root, "verdict": verdict(dsr, n_trials)},
-        pbo=pbo(ctx.returns.to_numpy(), blocks),
+        pbo=pbo(ctx.returns.to_numpy(), blocks) if len(settings) > 1 else None,
         walk_forward=walk_forward(ctx, wf_splits, wf_anchored),
         cv=purged_cv(ctx, cv_folds, embargo_bars),
     )

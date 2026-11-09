@@ -254,9 +254,12 @@ def format_study(result, symbol: str) -> str:
     else:
         count = f"N = {d['n_trials']:,} ({result.n_this:,} this study, " \
                 f"{result.n_earlier:,} earlier)"
+    lines += ["Deflated Sharpe", f"  {count}"]
+    if result.ledger_path is not None:
+        # the default path is relative to where you run: a study run from another folder
+        # starts a separate count, and this line is how you notice
+        lines.append(f"  Ledger: {result.ledger_path}")
     lines += [
-        "Deflated Sharpe",
-        f"  {count}",
         f"  Luck bar = {d['luck_bar_ann']:.3f}   (annualized: what the best of N zero-edge "
         "tries shows by luck alone)",
         f"  Deflated Sharpe = {_num(d['dsr'], '.3f')}   (probability the best setting "
@@ -265,16 +268,20 @@ def format_study(result, symbol: str) -> str:
     ]
 
     p = result.pbo
-    lines += [
-        "Probability of Backtest Overfitting",
-        f"  PBO = {p.pbo:.3f}   (share of {p.n_splits:,} splits whose in-sample best fell to "
-        "the bottom half out-of-sample; above 0.05 is a warning)",
-        f"  Degradation slope = {_num(p.degradation_slope, '.3f')}   (out-of-sample on "
-        "in-sample Sharpe of the winner, across splits)",
-        f"  Out-of-sample loss = {p.prob_oos_loss:.3f}   (share of splits where the winner "
-        "lost money out-of-sample)",
-    ]
-    if p.dropped_rows:
+    if p is None:
+        lines += ["Probability of Backtest Overfitting",
+                  "  not computed: one setting, so there is nothing to choose between"]
+    else:
+        lines += [
+            "Probability of Backtest Overfitting",
+            f"  PBO = {p.pbo:.3f}   (share of {p.n_splits:,} splits whose in-sample best fell "
+            "to the bottom half out-of-sample; above 0.05 is a warning)",
+            f"  Degradation slope = {_num(p.degradation_slope, '.3f')}   (out-of-sample on "
+            "in-sample Sharpe of the winner, across splits)",
+            f"  Out-of-sample loss = {p.prob_oos_loss:.3f}   (share of splits where the "
+            "winner lost money out-of-sample)",
+        ]
+    if p is not None and p.dropped_rows:
         lines.append(f"  {p.dropped_rows} oldest rows dropped so the blocks are equal")
 
     wf = result.walk_forward

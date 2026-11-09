@@ -4,10 +4,14 @@ The Deflated Sharpe Ratio is only honest if N, the number of tries behind the be
 result, is honest. So the study tools record every completed run here, one JSON line
 each, and N is read back from the file rather than reported by the user.
 
-A try is the distinct (strategy, data, settings): rerunning the same setting on the same
-bars is one try, and its latest Sharpe is the one used. Costs and margin are not part of
-the key, since a cost sweep is not a parameter sweep. ``Engine.run`` alone never writes
-here.
+A try is the distinct (strategy, data, code, settings). The settings are fully resolved:
+every public class attribute after the grid is applied, so editing a default that is not in
+the grid and rerunning is a new try, and naming a default in the grid is not. The code is a
+hash of the strategy's source, so editing the logic and rerunning is a new try too (any
+edit counts, a comment included: the count errs strict). Rerunning the same setting on the
+same bars and code is one try, and its latest Sharpe is the one used. Costs and margin are
+not part of the key, since a cost sweep is not a parameter sweep. ``Engine.run`` alone
+never writes here.
 
 An honesty aid, not a lock: a strategy is identified by its module and class name, so
 renaming the class starts a fresh count, and deleting the file forgets every try. Python
@@ -15,6 +19,8 @@ cannot stop code written to hide its tries; the ledger makes the honest path the
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import math
 import os
@@ -25,7 +31,8 @@ import numpy as np
 
 DEFAULT_PATH = ".plutobt/trials.jsonl"
 _SCHEMA = 1
-_KEYS = ("v", "time", "strategy", "params", "data_sha256", "bars", "sharpe", "plutobt")
+_KEYS = ("v", "time", "strategy", "code_sha256", "params", "data_sha256", "bars", "sharpe",
+         "plutobt")
 
 
 class LedgerError(ValueError):
@@ -65,6 +72,60 @@ def params_key(params: dict) -> str:
     return json.dumps(plain, sort_keys=True)
 
 
+def try_key(params: dict, code: str) -> str:
+    """The identity of one try: the code version plus the canonical settings."""
+    return json.dumps({"code": code, "params": json.loads(params_key(params))},
+                      sort_keys=True)
+
+
+def _own_classes(cls: type) -> list[type]:
+    # The strategy's own classes, base first: everything in the MRO above Strategy.
+    from plutobt.strategy import Strategy
+
+    out = [k for k in cls.__mro__ if k not in (Strategy, object)
+           and not (isinstance(k, type) and issubclass(Strategy, k))]
+    return list(reversed(out))
+
+
+def code_sha256(cls: type) -> str:
+    """sha256 of the strategy's source (every class of it above ``Strategy``), so an edit
+    to the logic is a new try. A class with no source file (a notebook cell, ``exec``)
+    falls back to its methods' bytecode and constants."""
+    h = hashlib.sha256()
+    for k in _own_classes(cls):
+        try:
+            h.update(inspect.getsource(k).encode("utf-8"))
+        except (OSError, TypeError):
+            h.update(k.__qualname__.encode("utf-8"))
+            for name, value in sorted(vars(k).items()):
+                func = getattr(value, "__func__", value)
+                code = getattr(func, "__code__", None)
+                if code is not None:
+                    h.update(name.encode("utf-8") + code.co_code + repr(code.co_consts)
+                             .encode("utf-8"))
+    return h.hexdigest()
+
+
+def resolved_settings(cls: type, params: dict) -> dict:
+    """Every public, non-method class attribute of the strategy with ``params`` applied:
+    what the run actually used. A value that is not plain JSON is kept as its repr."""
+    out = {}
+    for k in _own_classes(cls):
+        for name, value in vars(k).items():
+            if name.startswith("_") or callable(value) or isinstance(
+                    value, staticmethod | classmethod | property):
+                continue
+            out[name] = value
+    out.update(params)
+    resolved = {}
+    for name, value in out.items():
+        try:
+            resolved[name] = _plain(name, value)
+        except LedgerError:
+            resolved[name] = repr(value)
+    return resolved
+
+
 class Ledger:
     """One JSON-lines file of completed runs. ``is_new`` is whether the file was absent
     when this object was made."""
@@ -74,8 +135,10 @@ class Ledger:
         self.is_new = not self.path.exists()
 
     def record(self, strategy: str, params: dict, data_sha256: str, bars: int,
-               sharpe: float) -> None:
-        """Append one completed run and flush, so a crash loses at most the run in flight."""
+               sharpe: float, code: str = "") -> None:
+        """Append one completed run and flush, so a crash loses at most the run in flight.
+        ``params`` are the resolved settings (``resolved_settings``), ``code`` the
+        strategy's ``code_sha256``."""
         from plutobt import __version__
 
         plain = {k: _plain(k, v) for k, v in params.items()}
@@ -84,6 +147,7 @@ class Ledger:
             "v": _SCHEMA,
             "time": datetime.now(UTC).isoformat(timespec="seconds"),
             "strategy": strategy,
+            "code_sha256": code,
             "params": dict(sorted(plain.items())),
             "data_sha256": data_sha256,
             "bars": int(bars),
@@ -120,11 +184,13 @@ class Ledger:
                 yield line
 
     def tries(self, strategy: str, data_sha256: str) -> dict[str, float]:
-        """Every distinct setting ever recorded for ``strategy`` on these bars, mapped to
-        its latest per-bar Sharpe (NaN for a run with no return volatility)."""
+        """Every distinct try ever recorded for ``strategy`` on these bars, keyed by
+        ``try_key`` (code version plus settings) and mapped to its latest per-bar Sharpe
+        (NaN for a run with no return volatility)."""
         out: dict[str, float] = {}
         for line in self._lines():
             if line["strategy"] == strategy and line["data_sha256"] == data_sha256:
                 s = line["sharpe"]
-                out[params_key(line["params"])] = float("nan") if s is None else float(s)
+                key = try_key(line["params"], line["code_sha256"])
+                out[key] = float("nan") if s is None else float(s)
         return out

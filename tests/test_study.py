@@ -8,7 +8,7 @@ import pytest
 
 from plutobt.config import BacktestConfig
 from plutobt.instruments import get_instrument
-from plutobt.ledger import Ledger, params_key, strategy_id
+from plutobt.ledger import Ledger, code_sha256, resolved_settings, strategy_id, try_key
 from plutobt.study import StudyResult, expand_grid, run_study
 from tests.study_fixtures import CFG, Coin, Crashes, Hold, NeedsArgs, walk
 
@@ -125,4 +125,64 @@ def test_deflation_reads_the_ledger_spread(tmp_path):
     res = study(df, Hold, {"side": [1, -1]}, tmp_path)
     tries = Ledger(tmp_path / "trials.jsonl").tries(strategy_id(Hold), res.data_sha256)
     assert res.deflation["var_sr"] == pytest.approx(np.var(list(tries.values())))
-    assert tries[params_key({"side": 1})] == pytest.approx(res.grid.sharpe.iloc[0])
+    key = try_key(resolved_settings(Hold, {"side": 1}), code_sha256(Hold))
+    assert tries[key] == pytest.approx(res.grid.sharpe.iloc[0])
+
+
+# --- final review, finding 1: a try is the fully resolved setting AND the code version ---
+
+def test_changed_default_is_a_new_try(tmp_path, monkeypatch):
+    """Editing a class default that is not in the grid, then rerunning the same grid, is
+    the commonest overfitting loop: every rerun must count."""
+    df = walk(600, drift=0.3)
+    study(df, Coin, {"seed": [1, 2, 3]}, tmp_path)
+    monkeypatch.setattr(Coin, "bias", 0.8)
+    res = study(df, Coin, {"seed": [1, 2, 3]}, tmp_path)
+    assert (res.n_this, res.n_earlier) == (3, 3)
+    assert res.deflation["n_trials"] == 6
+
+
+def test_edited_code_is_a_new_try(tmp_path, monkeypatch):
+    import plutobt.study as study_mod
+
+    df = walk(600, drift=0.3)
+    study(df, Coin, {"seed": [1, 2]}, tmp_path)
+    monkeypatch.setattr(study_mod, "code_sha256", lambda cls: "edited")
+    res = study(df, Coin, {"seed": [1, 2]}, tmp_path)
+    assert (res.n_this, res.n_earlier) == (2, 2)
+
+
+def test_naming_a_default_is_not_a_new_try(tmp_path):
+    df = walk(600, drift=0.3)
+    study(df, Coin, {"seed": [1]}, tmp_path)
+    res = study(df, Coin, {"seed": [1], "bias": [0.5]}, tmp_path)
+    assert (res.n_this, res.n_earlier) == (1, 0)
+    assert res.deflation["n_trials"] == 1
+
+
+def test_string_values_refused_not_split_into_characters(tmp_path):
+    """Final review, finding 3: {"seed": "abc"} became three junk tries in the ledger."""
+    for bad in ("abc", 5, None):
+        with pytest.raises(ValueError, match="list"):
+            expand_grid(Coin, {"seed": bad})
+    assert expand_grid(Coin, {"seed": range(2)}) == [{"seed": 0}, {"seed": 1}]
+    assert expand_grid(Coin, {"seed": np.array([3, 4])}) == [{"seed": 3}, {"seed": 4}]
+
+
+def test_one_setting_is_deflated_against_the_ledger_without_pbo(tmp_path):
+    """Final review, finding 4: the honest user with one pre-chosen setting got a crash
+    after the full run. PBO needs two settings to choose between, so it is skipped."""
+    df = walk(600, drift=0.3)
+    study(df, Coin, {"seed": [1, 2]}, tmp_path)
+    res = study(df, Coin, {"seed": [3]}, tmp_path)
+    assert res.pbo is None
+    assert (res.n_this, res.n_earlier) == (1, 2) and res.deflation["n_trials"] == 3
+    assert len(res.walk_forward.windows) == 5
+
+
+def test_huge_grid_refused_before_expansion(tmp_path):
+    """Final review, finding 5: the max_configs refusal came after itertools.product
+    expanded the whole grid, which hangs on a large one."""
+    grid = {"seed": list(range(100_000)), "bias": [x / 100_000 for x in range(100_000)]}
+    with pytest.raises(ValueError, match=r"10,000,000,000 settings.*max_configs"):
+        run_study(Coin, grid, walk(600), NQ, CFG, ledger=False)

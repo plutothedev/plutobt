@@ -142,3 +142,29 @@ def test_calibration_noise_survives_at_most_5_percent():
 
 def test_planted_edge_survives():
     assert _study_survival(50, 1000, 300, seed=3, planted_sr=0.20) >= 0.80
+
+
+def _correlated_survival(rho, studies, seed, settings=50, t=1000):
+    """Final review: real grids are correlated (EMA 20/50 and 21/50 move together). Each
+    setting is sqrt(rho) x a common noise + sqrt(1 - rho) x its own: still zero edge."""
+    rng = np.random.default_rng(seed)
+    survived = 0
+    for _ in range(studies):
+        common = rng.standard_normal((t, 1))
+        r = math.sqrt(rho) * common + math.sqrt(1 - rho) * rng.standard_normal((t, settings))
+        srs = r.mean(axis=0) / r.std(axis=0)
+        best = int(np.argmax(srs))
+        survived += deflated_sharpe(pd.Series(r[:, best]), settings, float(np.var(srs))) \
+            >= SURVIVES
+    return survived / studies
+
+
+def test_calibration_correlated_settings_small():
+    assert _correlated_survival(0.9, 300, seed=21) <= 0.08
+
+
+@pytest.mark.slow
+def test_calibration_correlated_settings_stays_under_5_percent():
+    # measured 2026-11-09 (1,000 studies, seed 21): rho 0.5 1.6%, 0.9 4.1%, 0.99 4.7%
+    for rho in (0.5, 0.9, 0.99):
+        assert _correlated_survival(rho, 1000, seed=21) <= 0.06

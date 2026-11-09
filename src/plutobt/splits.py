@@ -74,9 +74,9 @@ def walk_forward_windows(n_rows: int, splits: int, anchored: bool) -> list[tuple
 
 def purged_folds(n_rows: int, folds: int, embargo: int) -> list[tuple[np.ndarray, range]]:
     """``folds`` equal blocks (remainder to the last), each the test block once. Training
-    is every other row except the ``embargo`` rows right after the test block, where a
-    position carried out of the test block would leak its outcome. Returns (train rows,
-    test range) pairs."""
+    is every other row except the ``embargo`` rows right after the test block, which still
+    depend on it (the position carried out of it, indicators remembering it, the same
+    regime). Returns (train rows, test range) pairs."""
     if folds < 2:
         raise SplitError(f"purged CV needs at least 2 folds, got {folds}")
     if embargo < 0:

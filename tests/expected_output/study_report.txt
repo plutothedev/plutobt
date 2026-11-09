@@ -10,6 +10,7 @@ Settings   (Sharpe annualized: per bar x sqrt(20412) = x 142.871)
   30         100        1.725   52      2,107.50
 Deflated Sharpe
   N = 6 (new ledger)
+  Ledger: .plutobt/trials.jsonl
   Luck bar = 0.929   (annualized: what the best of N zero-edge tries shows by luck alone)
   Deflated Sharpe = 0.599   (probability the best setting truly beats the luck bar)
   Verdict: does not survive deflation (N = 6 tries)
