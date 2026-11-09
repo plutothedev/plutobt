@@ -1,0 +1,144 @@
+"""Deflated Sharpe and the luck bar (3.0 spec §4). Numbers from the paper are the ones
+the fact-check confirmed (Bailey and Lopez de Prado 2014, pp. 9-10)."""
+import math
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from plutobt.deflate import (
+    EULER_GAMMA,
+    SURVIVES,
+    deflated_sharpe,
+    expected_max_sharpe,
+    null_var_sr,
+    verdict,
+)
+from plutobt.metrics import psr, psr_from_moments
+
+# The paper's worked example: annualized SR 2.5, daily (250 a year), T = 1250, skew -3,
+# kurtosis 10, N = 100, V = 1/2 annualized (1/500 per period).
+SR = 2.5 / math.sqrt(250)
+T, SKEW, KURT, V = 1250, -3.0, 10.0, 0.5 / 250
+
+
+def test_constants():
+    assert EULER_GAMMA == pytest.approx(0.5772156649015329, abs=1e-15)
+    assert SURVIVES == 0.95
+
+
+def test_luck_bar_matches_the_video_card():
+    assert expected_max_sharpe(100, 1.0) == pytest.approx(2.5306, abs=1e-4)
+    assert expected_max_sharpe(1000, 1.0) == pytest.approx(3.2551, abs=1e-4)
+
+
+def test_one_trial_has_no_luck_bar():
+    assert expected_max_sharpe(1, 0.7) == 0.0
+
+
+def test_luck_bar_scales_with_spread():
+    assert expected_max_sharpe(100, 4.0) == pytest.approx(2 * expected_max_sharpe(100, 1.0))
+
+
+def test_paper_worked_example():
+    sr0 = expected_max_sharpe(100, V)
+    assert sr0 == pytest.approx(0.1132, abs=1e-4)
+    assert psr_from_moments(SR, T, SKEW, KURT, sr0) == pytest.approx(0.9004, abs=1e-4)
+    # "with N = 46 trials, DSR would be 0.9505"; normal returns reach it at N = 88
+    assert psr_from_moments(SR, T, SKEW, KURT, expected_max_sharpe(46, V)) == \
+        pytest.approx(0.9505, abs=1e-4)
+    assert psr_from_moments(SR, T, 0.0, 3.0, expected_max_sharpe(88, V)) == \
+        pytest.approx(0.9505, abs=1e-4)
+
+
+def _max_sharpe_sims(n, t, sims, seed):
+    rng = np.random.default_rng(seed)
+    out = np.empty(sims)
+    for s in range(sims):
+        r = rng.standard_normal((t, n))
+        out[s] = (r.mean(axis=0) / r.std(axis=0)).max()
+    return out
+
+
+@pytest.mark.parametrize("n", [10, 100, 1000])
+def test_luck_bar_matches_brute_force(n):
+    t = 500
+    sims = {10: 2000, 100: 600, 1000: 150}[n]
+    simulated = _max_sharpe_sims(n, t, sims, seed=n).mean()
+    formula = expected_max_sharpe(n, null_var_sr(t))
+    if n >= 100:
+        assert formula == pytest.approx(simulated, rel=0.03)
+    else:
+        # The paper's Eq. 1 is a large-N approximation: at N = 10 it runs about 2.3% above
+        # the true expected maximum (1.5746 against 1.5393 for unit variance), the strict
+        # side, so a small study's luck bar is a little high, never low.
+        assert simulated <= formula <= simulated * 1.05
+
+
+def test_deflated_equals_psr_against_the_luck_bar():
+    r = pd.Series(np.random.default_rng(1).normal(0.05, 1.0, 800))
+    assert deflated_sharpe(r, 40, 0.002) == psr(r, sr0=expected_max_sharpe(40, 0.002))
+
+
+def test_psr_from_moments_matches_psr():
+    from plutobt.metrics import _skew_kurtosis
+
+    for seed in range(5):
+        r = np.random.default_rng(seed).normal(0.02, 1.0, 300)
+        g3, g4 = _skew_kurtosis(r)
+        sr = r.mean() / r.std(ddof=0)
+        assert psr_from_moments(sr, r.size, g3, g4, 0.03) == psr(pd.Series(r), sr0=0.03)
+
+
+def test_psr_from_moments_nan_cases():
+    assert math.isnan(psr_from_moments(0.1, 1, 0.0, 3.0))
+    assert math.isnan(psr_from_moments(1.0, 100, 5.0, 3.0))   # non-positive variance term
+
+
+def test_null_var_sr():
+    assert null_var_sr(101) == pytest.approx(0.01)
+
+
+def test_refusals():
+    for bad in [(0, 1.0), (100, -1.0), (100, float("nan")), (100, float("inf"))]:
+        with pytest.raises(ValueError):
+            expected_max_sharpe(*bad)
+    with pytest.raises(ValueError):
+        null_var_sr(1)
+
+
+def test_verdict_text():
+    assert verdict(0.97, 40) == "survives deflation"
+    assert verdict(0.95, 40) == "survives deflation"
+    assert verdict(0.9, 1340) == "does not survive deflation (N = 1,340 tries)"
+    assert verdict(float("nan"), 3) == "not computable (no return volatility)"
+
+
+def _study_survival(settings, t, studies, seed, planted_sr=None):
+    """Share of seeded studies whose best setting survives deflation; with a planted edge,
+    also require the planted column (0) to be the best."""
+    rng = np.random.default_rng(seed)
+    survived = 0
+    for _ in range(studies):
+        r = rng.standard_normal((t, settings))
+        if planted_sr is not None:
+            r[:, 0] += planted_sr
+        srs = r.mean(axis=0) / r.std(axis=0)
+        best = int(np.argmax(srs))
+        dsr = deflated_sharpe(pd.Series(r[:, best]), settings, float(np.var(srs)))
+        if dsr >= SURVIVES and (planted_sr is None or best == 0):
+            survived += 1
+    return survived / studies
+
+
+def test_calibration_small():
+    assert _study_survival(50, 1000, 300, seed=7) <= 0.08
+
+
+@pytest.mark.slow
+def test_calibration_noise_survives_at_most_5_percent():
+    assert _study_survival(50, 1000, 2000, seed=11) <= 0.06
+
+
+def test_planted_edge_survives():
+    assert _study_survival(50, 1000, 300, seed=3, planted_sr=0.20) >= 0.80

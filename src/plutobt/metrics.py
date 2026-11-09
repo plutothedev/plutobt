@@ -132,9 +132,19 @@ def psr(
     g3, g4 = _skew_kurtosis(r)                  # population skew, Pearson kurtosis
     g3 = g3 if skew is None else skew
     g4 = g4 if kurtosis is None else kurtosis
+    return psr_from_moments(sr_hat, n, g3, g4, sr0)
+
+
+def psr_from_moments(sr_hat: float, n: int, skew: float, kurtosis: float,
+                     sr0: float = 0.0) -> float:
+    """PSR from a per-bar Sharpe and the moments of its ``n`` returns (``psr``'s
+    arithmetic, for callers holding only the statistics, such as the no-code deflator).
+    NaN for fewer than 2 returns or a non-positive variance term."""
+    if n < 2:
+        return float("nan")
     # The variance-adjustment term can go non-positive for extreme
     # skew/kurtosis; sqrt of it would raise. Guard with NaN instead.
-    variance_adj = 1.0 - g3 * sr_hat + ((g4 - 1.0) / 4.0) * sr_hat**2
+    variance_adj = 1.0 - skew * sr_hat + ((kurtosis - 1.0) / 4.0) * sr_hat**2
     if variance_adj <= 0.0:
         return float("nan")
     denom = math.sqrt(variance_adj)
