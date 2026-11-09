@@ -187,3 +187,131 @@ def format_report(result: BacktestResult, symbol: str) -> str:
         )
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 3.0: the study report
+# ---------------------------------------------------------------------------
+
+_STUDY_LABEL = "IN-SAMPLE, best of a grid search; not predictive of live results."
+_OOS_LABEL = "OUT-OF-SAMPLE (rerun flat in each test window)."
+
+
+def _params(p: dict) -> str:
+    return ", ".join(f"{k}={v}" for k, v in p.items())
+
+
+def _rows(r: range) -> str:
+    return f"rows {r.start}-{r.stop - 1}"
+
+
+def format_study(result, symbol: str) -> str:
+    """Render a ``StudyResult`` (``plutobt.study.run_study``): every setting, the
+    Deflated Sharpe against every recorded try, PBO, then the out-of-sample walk-forward
+    and purged CV. Sharpes print annualized (per-bar x sqrt(periods_per_year))."""
+    from plutobt import __version__
+
+    root = math.sqrt(result.periods_per_year)
+    grid = result.grid
+    names = [c for c in grid.columns if c not in ("sharpe", "sharpe_ann", "trades",
+                                                   "net_pnl")]
+    lines = [
+        f"=== PlutoBT study: {result.strategy.split(':')[-1]} on {symbol}, "
+        f"{len(grid)} settings ===",
+        _STUDY_LABEL,
+        f"Settings   (Sharpe annualized: per bar x sqrt({result.periods_per_year:g}) = "
+        f"x {root:.3f})",
+    ]
+    head = [*names, "Sharpe", "Trades", "Net P&L"]
+    body = []
+    best_key = tuple(result.best.get(n) for n in names)
+    for i in range(len(grid)):
+        # column by column: iterrows would turn every int setting into a float
+        values = [grid[n].iloc[i] for n in names]
+        values = [v.item() if hasattr(v, "item") else v for v in values]
+        cells = [str(v) for v in values]
+        cells += [_num(float(grid["sharpe_ann"].iloc[i]), ".3f", nan="flat"),
+                  str(int(grid["trades"].iloc[i])), f"{grid['net_pnl'].iloc[i]:,.2f}"]
+        mark = "   <- best" if tuple(values) == best_key else ""
+        body.append((cells, mark))
+    widths = [max(len(h), *(len(c[i]) for c, _ in body)) for i, h in enumerate(head)]
+    lines.append(("  " + "  ".join(h.ljust(w) for h, w in zip(head, widths, strict=True)))
+                 .rstrip())
+    for cells, mark in body:
+        row = "  " + "  ".join(c.ljust(w) for c, w in zip(cells, widths, strict=True))
+        lines.append(row.rstrip() + mark)
+    if result.tie:
+        tied = int((grid["sharpe"] == grid["sharpe"].max()).sum())
+        lines.append(f"  tie: {tied} settings share the best Sharpe; the first in grid "
+                     "order is used")
+
+    d = result.deflation
+    if result.ledger_path is None:
+        count = f"N = {d['n_trials']:,} (ledger OFF: N counts this study only, earlier " \
+                "tries unknown)"
+    elif result.n_earlier == 0 and result.ledger_new:
+        count = f"N = {d['n_trials']:,} (new ledger)"
+    else:
+        count = f"N = {d['n_trials']:,} ({result.n_this:,} this study, " \
+                f"{result.n_earlier:,} earlier)"
+    lines += [
+        "Deflated Sharpe",
+        f"  {count}",
+        f"  Luck bar = {d['luck_bar_ann']:.3f}   (annualized: what the best of N zero-edge "
+        "tries shows by luck alone)",
+        f"  Deflated Sharpe = {_num(d['dsr'], '.3f')}   (probability the best setting "
+        "truly beats the luck bar)",
+        f"  Verdict: {d['verdict']}",
+    ]
+
+    p = result.pbo
+    lines += [
+        "Probability of Backtest Overfitting",
+        f"  PBO = {p.pbo:.3f}   (share of {p.n_splits:,} splits whose in-sample best fell to "
+        "the bottom half out-of-sample; above 0.05 is a warning)",
+        f"  Degradation slope = {_num(p.degradation_slope, '.3f')}   (out-of-sample on "
+        "in-sample Sharpe of the winner, across splits)",
+        f"  Out-of-sample loss = {p.prob_oos_loss:.3f}   (share of splits where the winner "
+        "lost money out-of-sample)",
+    ]
+    if p.dropped_rows:
+        lines.append(f"  {p.dropped_rows} oldest rows dropped so the blocks are equal")
+
+    wf = result.walk_forward
+    kind = "anchored" if len(wf.windows) > 1 and wf.windows[1]["train"].start == 0 \
+        else "rolling"
+    lines += [_OOS_LABEL, f"Walk-forward   ({kind}, {len(wf.windows)} windows)"]
+    for k, w in enumerate(wf.windows, 1):
+        lines.append(
+            f"  window {k}: train {_rows(w['train'])}, test {_rows(w['test'])}: "
+            f"{_params(w['params'])}   in-sample {w['is_sharpe'] * root:.3f}, "
+            f"out-of-sample {_num(w['oos_sharpe'] * root, '.3f', nan='flat')}"
+            + ("   (ended open: one exit charged)" if w["open_at_end"] else ""))
+    lines += [
+        f"  Out-of-sample Sharpe = {_num(wf.sharpe_ann, '.3f', nan='flat')}   "
+        f"SE {_num(wf.sharpe_se, '.3f')}   PSR {_num(wf.psr, '.3f')}",
+        f"  In-sample Sharpe of the picks (mean) = {wf.is_sharpe_mean * root:.3f}",
+    ]
+    if wf.open_windows:
+        lines.append(f"  {wf.open_windows} window(s) ended with a position open: each was "
+                     "marked at its last close and charged one exit")
+    if wf.winner_changed:
+        lines.append("  ⚠ winner changed between windows: the pick is not stable")
+
+    cv = result.cv
+    lines.append(f"Purged CV   ({len(cv.folds)} folds, embargo {cv.embargo} bars)")
+    for k, f in enumerate(cv.folds, 1):
+        lines.append(
+            f"  fold {k}: test {_rows(f['test'])}: {_params(f['params'])}   out-of-sample "
+            f"{_num(f['oos_sharpe'] * root, '.3f', nan='flat')}"
+            + ("   (not real-time order: trained on later data)" if f["not_real_time"]
+               else ""))
+    lines.append(f"  Spread of fold Sharpes = {_num(cv.spread * root, '.3f')}")
+    if cv.capped:
+        lines.append("  ⚠ embargo capped to keep 30 training rows: some trades are longer, "
+                     "so these folds still carry part of the leak (walk-forward does not)")
+    lines += [
+        f"data_sha256   = {result.data_sha256}",
+        f"engine version = {__version__}",
+    ]
+    return "\n".join(lines) + "\n"

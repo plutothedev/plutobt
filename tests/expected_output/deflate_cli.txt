@@ -4,4 +4,4 @@ Deflated Sharpe: 0.988
 Verdict: survives deflation
 Assumed: the spread of the 40 tries is what zero-edge tries show over 60 returns (their real spread is unknown here)
 Assumed: normal returns (skew 0, kurtosis 3); pass --skew and --kurtosis if you know them
-IN-SAMPLE, single pre-specified strategy; not predictive of live results.
+IN-SAMPLE, best of several tries; not predictive of live results.

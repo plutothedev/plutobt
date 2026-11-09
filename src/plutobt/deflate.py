@@ -82,7 +82,7 @@ example:
   python -m plutobt.deflate --sharpe 2.1 --periods-per-year 12 --returns 60 --trials 40
 """
 
-_LABEL = "IN-SAMPLE, single pre-specified strategy; not predictive of live results."
+_LABEL = "IN-SAMPLE, best of several tries; not predictive of live results."
 
 
 class _Refused(ValueError):
