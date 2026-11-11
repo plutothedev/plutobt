@@ -106,3 +106,12 @@ class Sparse(Strategy):
 class Inert(Hold):
     """Hold with a setting that does nothing: every ``dummy`` value trades identically."""
     dummy = 0
+
+
+class Big(Strategy):
+    """Long ``size`` contracts whenever flat: enough contracts to meet the margin rules."""
+    size = 4
+
+    def on_bar(self, ctx):
+        if ctx.position.qty == 0:
+            ctx.broker.buy(contracts=self.size)

@@ -149,3 +149,56 @@ def test_fold_before_training_is_flagged_not_real_time():
     flags = [f["not_real_time"] for f in cv.folds]
     assert flags == [True] * 5 + [False]
     assert len(cv.sharpes) == 6 and cv.spread == pytest.approx(np.std(cv.sharpes))
+
+
+# --- 3.0.1, audit finding 7: margin inside the reruns --------------------------------------
+
+def _falling(drift):
+    from tests.study_fixtures import Big
+
+    df = walk(600, drift=drift, sigma=2.0, seed=3)
+    settings = [{"size": 4}, {"size": 3}]
+    return df, _context(Big, settings, df, NQ, CFG, None), Big
+
+
+def test_margin_events_inside_a_rerun_are_carried_out():
+    from plutobt.engine import Engine
+
+    df, ctx, big = _falling(-1.3)
+    wf = walk_forward(ctx, 2, True)
+    assert wf.margin_calls >= 1 and wf.margin_refusals >= 1
+    assert wf.margin_calls == sum(w["margin_calls"] for w in wf.windows)
+    assert wf.margin_refusals == sum(w["margin_refusals"] for w in wf.windows)
+    # each window's counts are the engine's own for that rerun
+    for w in wf.windows:
+        a, b = w["test"].start, w["test"].stop
+        strat = big()
+        strat.size = w["params"]["size"]
+        res = Engine(NQ, CFG).run(df.iloc[: b + 1].reset_index(drop=True), strat,
+                                  trade_from_ts=int(df.ts.iloc[a]))
+        assert (len(res.margin_calls), res.margin_refusals) == \
+            (w["margin_calls"], w["margin_refusals"])
+
+
+def test_a_stitched_curve_below_the_margin_it_needed_is_flagged():
+    """Each window restarts from 100,000, so window 2 opens its contracts although the
+    stitched curve is already under their initial margin."""
+    _, ctx, _ = _falling(-0.5)
+    wf = walk_forward(ctx, 2, True)
+    assert wf.margin_calls == 0                          # no rerun saw anything wrong
+    assert wf.below_margin_windows >= 1
+    held = max(w["params"]["size"] for w in wf.windows)
+    assert wf.equity.min() < held * NQ.initial_margin
+
+
+def test_a_calm_study_has_no_margin_flags():
+    df = walk(600, drift=0.3)
+    wf = walk_forward(_context(Hold, [{"side": 1}, {"side": -1}], df, NQ, CFG, None), 2, False)
+    assert (wf.margin_calls, wf.margin_refusals, wf.below_margin_windows) == (0, 0, 0)
+
+
+def test_cv_folds_carry_margin_events_too():
+    _, ctx, _ = _falling(-1.3)
+    cv = purged_cv(ctx, 2, 5)
+    assert cv.margin_calls + cv.margin_refusals >= 1
+    assert cv.margin_calls == sum(f["margin_calls"] for f in cv.folds)
