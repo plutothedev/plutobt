@@ -11,7 +11,7 @@ class BacktestConfig:
     commission_per_side: float = 0.0
     slippage_ticks: float | None = None   # None => use instrument default
     risk_free: float = 0.0
-    periods_per_year: float | None = None  # None => derived from data/session
+    periods_per_year: float | None = None  # bars a year; None => pass it to compute_metrics
     # False (default): ENTRIES never carry across a break (see break_on): a pending order
     # that would open or add to a position is cancelled there. It is NOT "flat
     # overnight": a pending EXIT survives the break and fills at the next session's open

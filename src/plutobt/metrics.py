@@ -475,7 +475,10 @@ def compute_metrics(result: BacktestResult, periods_per_year: float | None) -> d
         periods_per_year = result.manifest.get("config", {}).get("periods_per_year")
     if periods_per_year is None:
         raise ValueError(
-            "periods_per_year not provided and not present in result.manifest"
+            "periods_per_year is not set: pass compute_metrics(result, periods_per_year=N) "
+            "or set periods_per_year in the config. It is the number of bars a year "
+            "(20412 for 5-minute RTH index bars, 252 for daily bars) and is what "
+            "annualizes the Sharpe"
         )
 
     returns = equity.pct_change().dropna()

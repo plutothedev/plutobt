@@ -60,6 +60,21 @@ def _num(value) -> str:
     return repr(float(value))
 
 
+def missing_column_hint(df: pd.DataFrame, name: str) -> str:
+    """What to add after "the frame has no '<name>' column": the columns it does have, and
+    the fix when the cause is a capitalised name or a datetime index."""
+    cols = [str(c) for c in df.columns]
+    out = f" (it has: {', '.join(cols) if cols else 'no columns'}"
+    twin = next((c for c in cols if c.lower() == name and c != name), None)
+    if twin is not None:
+        out += (f"; {twin!r} looks like {name!r}: column names are lower case, e.g. "
+                "df.columns = df.columns.str.lower()")
+    elif name == "ts" and isinstance(df.index, pd.DatetimeIndex):
+        out += ("; its index holds datetimes: the engine reads a 'ts' column of whole "
+                "unix seconds, not the index")
+    return out + ")"
+
+
 def ohlcv_problem(df: pd.DataFrame) -> str | None:
     """The first problem with a frame's base bar values, naming row and column; None if
     there is none. open, high, low and close must be present; they and volume (when
@@ -73,7 +88,7 @@ def ohlcv_problem(df: pd.DataFrame) -> str | None:
 
     for col in _PRICE_COLS:
         if col not in df.columns:
-            return f"the frame has no {col!r} column"
+            return f"the frame has no {col!r} column" + missing_column_hint(df, col)
     for col in (*_PRICE_COLS, "volume"):
         if col not in df.columns:
             continue
@@ -113,7 +128,13 @@ def load_bars(path: str) -> pd.DataFrame:
     max(open, close)), so a file that loads is one Engine.run can fill against.
     """
     with open(path, encoding="utf-8") as fh:
-        rows = json.load(fh)
+        try:
+            rows = json.load(fh)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"{str(path)!r} is not JSON ({err.msg}, line {err.lineno}): load_bars reads "
+                "PlutoBT's JSON bars, an array of [ts, open, high, low, close, volume]; "
+                "for a vendor CSV use load_csv") from None
     if not isinstance(rows, list):
         raise ValueError(
             f"expected a JSON array of bars in {path!r}, got {type(rows).__name__}"

@@ -65,6 +65,11 @@ def _days(x: float) -> str:
 
 def format_report(result: BacktestResult, symbol: str) -> str:
     m = result.metrics
+    if not m:
+        raise ValueError(
+            "result.metrics is empty: call compute_metrics(result, periods_per_year=...) "
+            "and store what it returns in result.metrics before format_report "
+            "(Engine.run returns the run; the metrics are a separate step)")
     man = result.manifest
     # Direct indexing (not .get) so a missing required key raises KeyError, never blanks.
     sharpe = m["sharpe"]
