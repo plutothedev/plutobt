@@ -47,7 +47,7 @@ from plutobt.oos import (
     purged_cv,
     walk_forward,
 )
-from plutobt.pbo import PBOResult, pbo
+from plutobt.pbo import IdenticalSettingsError, PBOResult, pbo
 from plutobt.splits import cscv_blocks, purged_folds, walk_forward_windows
 from plutobt.strategy import Strategy
 
@@ -75,7 +75,8 @@ class StudyResult:
     n_other_bars: int             # tries of this strategy on other bars (never part of N)
     deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann,
     #                               active_bars, verdict
-    pbo: PBOResult | None         # None for a one-setting study: nothing to choose between
+    pbo: PBOResult | None         # None when there is nothing to choose between
+    pbo_note: str | None          # why pbo is None
     walk_forward: WalkForward
     cv: PurgedCV
 
@@ -214,6 +215,16 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     luck = expected_max_sharpe(n_trials, var_sr)
     root = math.sqrt(ctx.ppy)
 
+    overfit, pbo_note = None, None
+    if len(settings) < 2:
+        pbo_note = "one setting, so there is nothing to choose between"
+    else:
+        try:
+            overfit = pbo(ctx.returns.to_numpy(), blocks)
+        except IdenticalSettingsError:
+            pbo_note = ("every setting produced the same returns: the grid's settings do "
+                        "nothing, so there is nothing to choose between")
+
     table = pd.DataFrame(settings)
     table["sharpe"] = srs
     table["sharpe_ann"] = srs * root
@@ -229,7 +240,7 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
         deflation={"dsr": dsr, "n_trials": n_trials, "var_sr": var_sr, "luck_bar": luck,
                    "luck_bar_ann": luck * root, "active_bars": active,
                    "verdict": verdict(dsr, n_trials, active)},
-        pbo=pbo(ctx.returns.to_numpy(), blocks) if len(settings) > 1 else None,
+        pbo=overfit, pbo_note=pbo_note,
         walk_forward=walk_forward(ctx, wf_splits, wf_anchored),
         cv=purged_cv(ctx, cv_folds, embargo_bars),
     )

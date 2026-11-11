@@ -225,3 +225,29 @@ def test_a_sometimes_trading_best_setting_keeps_its_verdict(tmp_path):
 def test_an_always_in_setting_counts_every_moving_bar(tmp_path):
     res = study(walk(600, drift=0.3), Hold, {"side": [1, -1]}, tmp_path)
     assert res.deflation["active_bars"] > 500
+
+
+# --- 3.0.1, audit finding 5: settings that do nothing --------------------------------------
+
+def test_a_grid_of_settings_that_do_nothing_gets_no_pbo(tmp_path):
+    from tests.study_fixtures import Inert
+
+    res = run_study(Inert, {"dummy": [0, 1, 2]}, walk(600, drift=0.3), NQ, CFG, ledger=False)
+    assert res.pbo is None
+    assert res.pbo_note == "every setting produced the same returns: the grid's settings " \
+                           "do nothing, so there is nothing to choose between"
+
+
+def test_identical_settings_inside_a_grid_are_collapsed_for_pbo(tmp_path):
+    from tests.study_fixtures import Inert
+
+    res = run_study(Inert, {"side": [1, -1], "dummy": [0, 1]}, walk(600, drift=0.3), NQ, CFG,
+                    ledger=False)
+    assert res.pbo.collapsed == 2
+    assert res.pbo_note is None
+
+
+def test_one_setting_has_its_own_pbo_note(tmp_path):
+    res = run_study(Hold, {"side": [1]}, walk(600, drift=0.3), NQ, CFG, ledger=False)
+    assert res.pbo is None
+    assert res.pbo_note == "one setting, so there is nothing to choose between"

@@ -24,6 +24,12 @@ import numpy as np
 from plutobt.splits import cscv_blocks
 
 _BATCH = 2048   # splits per vectorised batch; bounds memory at large N
+_TIE = 1e-12    # Sharpes this close are one value: the split sums are matrix products,
+#                 and their last bits would otherwise decide a rank
+
+
+class IdenticalSettingsError(ValueError):
+    """Every setting has the same returns, so there is nothing to choose between."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,7 @@ class PBOResult:
     prob_oos_loss: float          # share of splits where the winner lost money out-of-sample
     n_splits: int
     dropped_rows: int             # remainder rows dropped from the start
+    collapsed: int = 0            # settings left out because another had identical returns
 
 
 def _sharpe(s: np.ndarray, q: np.ndarray, count: int) -> np.ndarray:
@@ -49,11 +56,28 @@ def _sharpe(s: np.ndarray, q: np.ndarray, count: int) -> np.ndarray:
 
 
 def pbo(returns: np.ndarray, blocks: int = 16) -> PBOResult:
-    """PBO of picking the best column of ``returns`` (rows x settings) by Sharpe."""
+    """PBO of picking the best column of ``returns`` (rows x settings) by Sharpe.
+
+    Settings whose returns are exactly identical (a grid over a setting that does nothing)
+    count once: their out-of-sample ranks could only be told apart by rounding error, and
+    a tie counts as overfit. ``collapsed`` says how many were left out. Non-finite returns
+    are refused: pass ``equity.pct_change().dropna()``, not the raw ``pct_change``."""
     r = np.asarray(returns, dtype=float)
     if r.ndim != 2 or r.shape[1] < 2:
         raise ValueError("the Probability of Backtest Overfitting needs at least 2 settings "
                          "to choose between")
+    if not np.isfinite(r).all():
+        row, col = (int(x) for x in np.argwhere(~np.isfinite(r))[0])
+        raise ValueError(
+            f"the returns table has a value that is not finite (row {row}, setting "
+            f"{col + 1}): drop that row first, e.g. equity.pct_change().dropna()")
+    given = r.shape[1]
+    _, first = np.unique(r, axis=1, return_index=True)
+    r = r[:, np.sort(first)]                # the first of each identical group, grid order
+    if r.shape[1] < 2:
+        raise IdenticalSettingsError(
+            f"all {given} settings have identical returns: the grid's settings do "
+            "nothing, so there is nothing to choose between")
     n_rows, n = r.shape
     dropped, parts = cscv_blocks(n_rows, blocks)
     size = len(parts[0])
@@ -70,10 +94,12 @@ def pbo(returns: np.ndarray, blocks: int = 16) -> PBOResult:
         is_sr = _sharpe(mask @ sums, mask @ squares, half)
         oos_sum = (1.0 - mask) @ sums
         oos_sr = _sharpe(oos_sum, (1.0 - mask) @ squares, half)
-        best = np.argmax(is_sr, axis=1)                          # first max on a tie
+        # first of the settings within _TIE of the best, so a rounding error picks no one
+        best = np.argmax(is_sr >= is_sr.max(axis=1, keepdims=True) - _TIE, axis=1)
         rows = np.arange(len(chosen))
         v = oos_sr[rows, best][:, None]
-        rank = 1 + (oos_sr < v).sum(axis=1) + 0.5 * ((oos_sr == v).sum(axis=1) - 1)
+        tied = (np.abs(oos_sr - v) <= _TIE).sum(axis=1)
+        rank = 1 + (oos_sr < v - _TIE).sum(axis=1) + 0.5 * (tied - 1)
         w = rank / (n + 1)
         logits.append(np.log(w / (1 - w)))
         is_best.append(is_sr[rows, best])
@@ -90,4 +116,5 @@ def pbo(returns: np.ndarray, blocks: int = 16) -> PBOResult:
         prob_oos_loss=float(np.mean(np.concatenate(oos_loss))),
         n_splits=len(combos),
         dropped_rows=dropped,
+        collapsed=given - n,
     )

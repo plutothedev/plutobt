@@ -101,3 +101,8 @@ class Sparse(Strategy):
             ctx.broker.buy(contracts=1)
         elif not ctx.bar.go and ctx.position.qty != 0:
             ctx.broker.close()
+
+
+class Inert(Hold):
+    """Hold with a setting that does nothing: every ``dummy`` value trades identically."""
+    dummy = 0

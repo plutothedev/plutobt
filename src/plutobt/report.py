@@ -275,8 +275,7 @@ def format_study(result, symbol: str) -> str:
 
     p = result.pbo
     if p is None:
-        lines += ["Probability of Backtest Overfitting",
-                  "  not computed: one setting, so there is nothing to choose between"]
+        lines += ["Probability of Backtest Overfitting", f"  not computed: {result.pbo_note}"]
     else:
         lines += [
             "Probability of Backtest Overfitting",
@@ -289,6 +288,12 @@ def format_study(result, symbol: str) -> str:
         ]
     if p is not None and p.dropped_rows:
         lines.append(f"  {p.dropped_rows} oldest rows dropped so the blocks are equal")
+    if p is not None and p.collapsed:
+        lines.append(f"  {p.collapsed} setting(s) had returns identical to another and "
+                     "count once here")
+    if p is not None and p.pbo > 0.05 and p.prob_oos_loss < 0.05:
+        lines.append("  the in-sample winner rarely lost money out-of-sample: a PBO this "
+                     "high then says the settings are too alike to rank, not that they fail")
 
     wf = result.walk_forward
     kind = "anchored" if len(wf.windows) > 1 and wf.windows[1]["train"].start == 0 \
