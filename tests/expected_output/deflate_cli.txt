@@ -1,0 +1,7 @@
+PlutoBT deflate: best Sharpe 2.10 (annualized, 12 periods a year) over 60 returns, best of 40 tries
+Luck bar: the best of 40 zero-edge tries would show an annualized Sharpe of about 0.99 by luck alone
+Deflated Sharpe: 0.988
+Verdict: survives deflation
+Assumed: the spread of the 40 tries is what zero-edge tries show over 60 returns (their real spread is unknown here)
+Assumed: normal returns (skew 0, kurtosis 3); pass --skew and --kurtosis if you know them
+IN-SAMPLE, best of several tries; not predictive of live results.

@@ -1,7 +1,8 @@
 """PlutoBT: a hybrid futures backtesting engine.
 
 Vectorized signals + event-driven execution, realistic futures fills/margin,
-verified CME contract specs, and (2.0) back-adjusted continuous contracts.
+verified CME contract specs, (2.0) back-adjusted continuous contracts, and (3.0)
+an overfitting toolkit: Deflated Sharpe, PBO, walk-forward and purged CV.
 
 Public API
 ----------
@@ -24,20 +25,28 @@ Public API
     RollMeta           : how a continuous series was built
     compute_metrics    : assemble the full metrics bundle
     format_report      : render a human-readable IN-SAMPLE report
+    run_study          : run a grid of settings and test the best for overfitting
+    StudyResult        : the result returned by run_study
+    format_study       : render a study
+    deflated_sharpe    : PSR against the luck bar of N tries
+    expected_max_sharpe: the luck bar: the best of N zero-edge tries
+    Ledger             : the file that counts every try
 """
 
-__version__ = "2.0.1"
+__version__ = "3.0.0"
 
 # Import individual names to populate the package namespace.
 # Order matters for readability; keep lowest-level modules first.
 from plutobt.config import BacktestConfig, load_config
 from plutobt.contracts import ContractSet
 from plutobt.data import load_bars
+from plutobt.deflate import deflated_sharpe, expected_max_sharpe
 from plutobt.engine import BacktestResult, Engine
 from plutobt.importers import load_csv, load_csv_contracts
 from plutobt.instruments import REGISTRY, get_instrument
+from plutobt.ledger import Ledger
 from plutobt.metrics import compute_metrics
-from plutobt.report import format_report
+from plutobt.report import format_report, format_study
 from plutobt.roll import (
     RollMeta,
     build_continuous,
@@ -46,6 +55,7 @@ from plutobt.roll import (
     slice_continuous,
 )
 from plutobt.strategy import Context, Strategy
+from plutobt.study import StudyResult, run_study
 
 __all__ = [
     "__version__",
@@ -68,4 +78,10 @@ __all__ = [
     "RollMeta",
     "compute_metrics",
     "format_report",
+    "run_study",
+    "StudyResult",
+    "format_study",
+    "deflated_sharpe",
+    "expected_max_sharpe",
+    "Ledger",
 ]

@@ -349,7 +349,8 @@ class Engine:
         self.config = config
 
     def run(self, df: pd.DataFrame, strategy: Strategy,
-            roll_meta: RollMeta | None = None) -> BacktestResult:
+            roll_meta: RollMeta | None = None,
+            trade_from_ts: int | None = None) -> BacktestResult:
         """Execute the backtest loop over ``df``.
 
         Checks first: a bad config (``break_on``; a commission, slippage or
@@ -440,10 +441,16 @@ class Engine:
             roll. Levels and stops are unchanged.
         Open-at-end: a position still open on the last bar is marked-to-last via
             ``portfolio.mark_open_at_end`` (§0.6 — single source of truth).
+        Trading from a timestamp (3.0): with ``trade_from_ts`` set (the ts of one of
+            ``df``'s bars), ``precompute`` still sees every bar, so indicators warm up
+            on the earlier ones, but ``on_bar`` is not called before that bar: no order
+            exists before it and equity stays at the starting cash. The study tools use
+            it to rerun a setting flat inside one test window. ``None`` is a plain run.
         """
         self._check_config()
         self._check_frame(df, precomputed=False)       # the caller's own frame
         self._check_roll_meta(df, roll_meta)
+        trade_from = self._trade_from_index(df, trade_from_ts)
         problem = ohlcv_problem(df)
         if problem is not None:
             raise ValueError(
@@ -502,7 +509,7 @@ class Engine:
             interval = 0
         has_session = "session" in data.columns
         has_contract = "contract" in df.columns     # the caller's frame, never the strategy's
-        gap_to =({r["to"]: float(r["gap_points"]) for r in roll_meta.rolls}
+        gap_to = ({r["to"]: float(r["gap_points"]) for r in roll_meta.rolls}
                   if roll_meta is not None else {})
         rolls: list[RollEvent] = []
 
@@ -556,8 +563,8 @@ class Engine:
             prev = bar
 
             # Warm-up: skip on_bar until every signal col is set (§5.9); a NaN after
-            # that was refused above.
-            if t >= warm_up_end:
+            # that was refused above. Nor before trade_from_ts (3.0).
+            if t >= warm_up_end and t >= trade_from:
                 ctx = Context(
                     bar=bar,
                     # A copy for this bar: a strategy writing it (qty = 0 to "exit", or
@@ -597,6 +604,10 @@ class Engine:
             equity_vals, index=pd.Index(equity_index, name="ts")
         )
         manifest = self._build_manifest(df, roll_meta)
+        if trade_from_ts is not None:
+            # 3.0: only a run that set it carries this key, so every 2.0.1 manifest keeps
+            # exactly its old keys.
+            manifest["trade_from_ts"] = int(trade_from_ts)
         return BacktestResult(
             equity_curve=equity_curve,
             trades=portfolio.trades,
@@ -817,6 +828,21 @@ class Engine:
             # signal or 'session' columns are fine, edited bars are not. A date range
             # comes from roll.slice_continuous, which re-pins after checking.
             check_pin(df, roll_meta, "the frame passed to Engine.run")
+
+    @staticmethod
+    def _trade_from_index(df: pd.DataFrame, trade_from_ts: int | None) -> int:
+        """The bar position ``on_bar`` starts at: 0 for a plain run, else the position of
+        the bar whose ts is ``trade_from_ts`` (refused when no bar has it)."""
+        if trade_from_ts is None:
+            return 0
+        ts = df["ts"].to_numpy()
+        hits = (ts == trade_from_ts).nonzero()[0]
+        if hits.size == 0:
+            raise ValueError(
+                f"trade_from_ts {trade_from_ts} is not the ts of any bar in the frame "
+                f"(first bar {int(ts[0])}, last bar {int(ts[-1])}): pass the ts of the bar "
+                "trading should start on")
+        return int(hits[0])
 
     def _build_manifest(self, df: pd.DataFrame, roll_meta: RollMeta | None = None) -> dict:
         """Build the run manifest; data_sha256 is the sha256 hex digest of the

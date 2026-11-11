@@ -1,0 +1,42 @@
+=== PlutoBT study: EMACross on NQ, 6 settings ===
+IN-SAMPLE, best of a grid search; not predictive of live results.
+Settings   (Sharpe annualized: per bar x sqrt(20412) = x 142.871)
+  fast_span  slow_span  Sharpe  Trades  Net P&L
+  10         50         -0.171  86      -297.50
+  10         100        0.781   73      897.50
+  20         50         1.793   74      2,172.50
+  20         100        1.156   60      1,377.50
+  30         50         1.816   67      2,202.50   <- best
+  30         100        1.725   52      2,107.50
+Deflated Sharpe
+  N = 6 (new ledger)
+  Ledger: .plutobt/trials.jsonl
+  Luck bar = 0.929   (annualized: what the best of N zero-edge tries shows by luck alone)
+  Deflated Sharpe = 0.599   (probability the best setting truly beats the luck bar)
+  Verdict: does not survive deflation (N = 6 tries)
+Probability of Backtest Overfitting
+  PBO = 0.873   (share of 12,870 splits whose in-sample best fell to the bottom half out-of-sample; above 0.05 is a warning)
+  Degradation slope = -1.094   (out-of-sample on in-sample Sharpe of the winner, across splits)
+  Out-of-sample loss = 0.473   (share of splits where the winner lost money out-of-sample)
+  3 oldest rows dropped so the blocks are equal
+OUT-OF-SAMPLE (rerun flat in each test window).
+Walk-forward   (rolling, 5 windows)
+  window 1: train rows 0-268, test rows 269-537: fast_span=20, slow_span=50   in-sample 1.984, out-of-sample -4.478
+  window 2: train rows 269-537, test rows 538-806: fast_span=30, slow_span=50   in-sample -0.967, out-of-sample 16.163   (ended open: one exit charged)
+  window 3: train rows 538-806, test rows 807-1075: fast_span=30, slow_span=100   in-sample 21.887, out-of-sample -1.017   (ended open: one exit charged)
+  window 4: train rows 807-1075, test rows 1076-1344: fast_span=20, slow_span=50   in-sample 3.344, out-of-sample -7.459   (ended open: one exit charged)
+  window 5: train rows 1076-1344, test rows 1345-1618: fast_span=10, slow_span=50   in-sample -4.039, out-of-sample -10.007   (ended open: one exit charged)
+  Out-of-sample Sharpe = -0.760   SE 3.883   PSR 0.422
+  In-sample Sharpe of the picks (mean) = 4.442
+  4 window(s) ended with a position open: each was marked at its last close and charged one exit
+  ⚠ winner changed between windows: the pick is not stable
+Purged CV   (6 folds, embargo 232 bars)
+  fold 1: test rows 0-268: fast_span=20, slow_span=50   out-of-sample 1.984   (not real-time order: trained on later data)
+  fold 2: test rows 269-537: fast_span=30, slow_span=50   out-of-sample -0.967   (not real-time order: trained on later data)
+  fold 3: test rows 538-806: fast_span=30, slow_span=50   out-of-sample 16.163   (not real-time order: trained on later data)
+  fold 4: test rows 807-1075: fast_span=30, slow_span=100   out-of-sample -1.017   (not real-time order: trained on later data)
+  fold 5: test rows 1076-1344: fast_span=20, slow_span=50   out-of-sample -7.459   (not real-time order: trained on later data)
+  fold 6: test rows 1345-1618: fast_span=20, slow_span=50   out-of-sample -6.549
+  Spread of fold Sharpes = 7.798
+data_sha256   = 123af852f8fb1364e02b5761d048a397adb5b87a53301567c85410b139fc8ca7
+engine version = 3.0.0

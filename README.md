@@ -44,6 +44,9 @@ and auditability. Key properties:
   NinjaTrader or any CSV, stitched across expiries with a back-adjusted series,
   rolls that cost real money, and a proof that the result equals trading the real
   contracts (see [Contract roll](#contract-roll)).
+- **Overfitting toolkit (3.0)**: the Deflated Sharpe Ratio, the Probability of
+  Backtest Overfitting, walk-forward and purged cross-validation, with a ledger that
+  counts every setting you ever tried (see [Did you overfit?](#did-you-overfit)).
 
 ## Look-ahead check
 
@@ -147,6 +150,7 @@ package installed, or with `PYTHONPATH=src`):
 | `examples/run_demo.py` | The EMA(20/50) demo on NQ, ES and CL with per-instrument costs. |
 | `examples/cold_open_lookahead.py` | One changed line (`position = signal` vs `signal.shift(1)`): trading a bar on its own close (impossible) against acting at the next bar's open (frictionless pandas, "bar hit rate", unlevered), then the same signal through the real engine with NQ costs (closed-trade win rate, gross - slippage - commission = net). Each Sharpe prints with the engine's standard error. Saves a chart to `examples/output/`. |
 | `examples/causality_demo.py` | A strategy built on `close.shift(-1) > close` is refused by `Engine.run` with a `LookaheadError` naming the column; its honest twin (`close > close.shift(1)`) runs and prints its report. |
+| `examples/overfit_study.py` | A 3.0 study of the demo strategy over six EMA settings on the synthetic sample: every setting, the Deflated Sharpe against every try in the ledger, PBO, walk-forward and purged CV. |
 | `examples/cost_sweep.py` | A COST sweep, not a parameter sweep: the demo strategy, parameters unchanged, at 0, 1, 2 and 4 ticks of slippage per side with commission fixed. Final equity, Sharpe with its standard error, PF and expectancy per level, and whether any Sharpe's 95% CI excludes zero. |
 
 ## Reproducible golden run
@@ -310,3 +314,87 @@ cost to 1e-9: 2,000 cases in CI, 20,000 with `pytest --slow`. A planted one-tick
 adjustment error makes it fail, so it can fail. `tests/test_roll_invariance.py`
 adds a contract and checks every older price moves by exactly one constant while
 every trade and dollar stays the same.
+
+## Did you overfit?
+
+The honest question about a backtest is not "what's your Sharpe". It is "how many
+did you try before you found that one?" The best of 100 settings with no edge at all
+lands about 2.5 standard errors above zero by luck alone; the best of 1,000, about
+3.25. PlutoBT 3.0 measures that, two ways.
+
+**No code: deflate a number you already have.**
+
+```bash
+python -m plutobt.deflate --sharpe 2.1 --periods-per-year 12 --returns 60 --trials 40
+```
+
+```
+PlutoBT deflate: best Sharpe 2.10 (annualized, 12 periods a year) over 60 returns, best of 40 tries
+Luck bar: the best of 40 zero-edge tries would show an annualized Sharpe of about 0.99 by luck alone
+Deflated Sharpe: 0.988
+Verdict: survives deflation
+```
+
+`--trials` is every version you tried, the one you kept included. The spread of those
+tries is unknown here, so it assumes what zero-edge tries would show over that many
+returns, and says so. TradingView users: the Strategy Tester computes its Sharpe from
+monthly returns after taking off a risk-free rate (2% a year by default), so deflating
+it against zero is slightly strict. TradingView does not document whether its figure
+is annualized: if yours is, pass it as it is with `--periods-per-year 12 --returns
+<months>`; if it is a plain monthly figure, multiply it by 3.46 (the square root of 12)
+first.
+
+**Python: run the grid and let PlutoBT count.**
+
+```python
+from plutobt import format_study, get_instrument, load_bars, load_config, run_study
+from plutobt.strategies.ema_cross import EMACross
+
+result = run_study(EMACross, {"fast_span": [10, 20, 30], "slow_span": [50, 100]},
+                   load_bars("data/sample/nq_5m.json"), get_instrument("NQ"),
+                   load_config("configs/nq.toml"))
+print(format_study(result, "NQ"))
+```
+
+Every setting runs once through the same engine (same costs, margin and rolls). The
+report then answers:
+
+- **Deflated Sharpe** (Bailey and Lopez de Prado, 2014): the probability the best
+  setting truly beats the luck bar, the Sharpe the best of N zero-edge tries reaches by
+  luck. N is every distinct try ever recorded for this strategy on these exact bars,
+  read from the ledger. A try is the fully resolved setting (class defaults included)
+  plus a hash of the strategy's code, so changing a default or editing the logic and
+  rerunning the same grid counts every rerun. "Survives deflation" means 0.95 or more.
+- **PBO**, the Probability of Backtest Overfitting (Bailey, Borwein, Lopez de Prado
+  and Zhu): the bars are cut into 16 blocks; for each of the 12,870 ways to call half of
+  them in-sample, how often does the in-sample winner land in the bottom half on the
+  other half? 0.5 is a coin flip. The paper treats anything above 0.05 as a warning.
+- **Walk-forward**: pick the best on one window, trade it on the next, five times.
+  Each pick is rerun flat in its test window (earlier bars only warm up the
+  indicators), so the stitched curve could actually have been traded. A position open
+  at a window's end is charged one exit.
+- **Purged CV**: every block is the test block once. The bars right after it are
+  left out of training (the embargo, by default the longest trade in bars), because
+  what happens there still depends on the test block: the position carried out of it,
+  indicators still remembering it, the same market regime. Long indicator memory can
+  outlast the embargo, so folds trained on later data say so; walk-forward is the
+  strictly real-time test.
+
+**The ledger.** Every completed run is one line in `.plutobt/trials.jsonl` (change it
+with `ledger=`, turn it off with `ledger=False`, which the report then stamps). It is an
+honesty aid, not a lock: a strategy is known by its module and class name, so renaming
+the class starts a fresh count, and deleting the file forgets every try. Any edit to the
+code counts as a new try, a comment included, and near-identical settings count
+separately: both overstate N, so the verdict errs strict. Costs and the data window are
+not part of a try: a different set of bars is a different count. The report prints the
+ledger's path, since the default is relative to the folder you run from.
+
+**How it is proven.** On pure noise, 2,000 seeded studies of 50 independent settings:
+the best setting survived deflation in 0.25% of them. Real grids are correlated (EMA
+20/50 and 21/50 move together), and there the margin is thinner: 1.6%, 4.1% and 4.7%
+at correlations of 0.5, 0.9 and 0.99, still under the 5% the 0.95 bar promises. With
+one setting carrying a real edge, it was found and survived in 97.7% of 300. The luck bar matches a brute-force simulation
+and the paper's worked example (Deflated Sharpe 0.9004); PBO gives about 0.5 on noise,
+near 0 for a planted steady edge and above 0.7 for settings that only got lucky; a
+planted regime change makes walk-forward fall below in-sample. All test data is
+synthetic: no real-data sweep was run to build this.
