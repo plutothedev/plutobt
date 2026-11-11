@@ -26,7 +26,7 @@ import pandas as pd
 
 from plutobt.config import BacktestConfig
 from plutobt.data import bars_sha256, frame_sha256
-from plutobt.deflate import deflated_sharpe, expected_max_sharpe, verdict
+from plutobt.deflation import deflated_sharpe, expected_max_sharpe, verdict
 from plutobt.engine import Engine
 from plutobt.ledger import (
     DEFAULT_PATH,

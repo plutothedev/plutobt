@@ -94,3 +94,67 @@ def test_cli_runs_as_module():
                           capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith("PlutoBT deflate:")
+
+
+def test_cli_as_module_prints_no_python_warning():
+    """3.0.1, audit finding 8: every run began with a runpy RuntimeWarning on stderr,
+    because the package imported plutobt.deflate before python -m ran it."""
+    done = subprocess.run([sys.executable, "-m", "plutobt.deflate", *ARGS],
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 0
+    assert done.stderr == ""
+
+
+def test_importing_the_package_does_not_load_the_command():
+    done = subprocess.run(
+        [sys.executable, "-c",
+         "import sys, plutobt; print('plutobt.deflate' in sys.modules)"],
+        capture_output=True, text=True, check=False)
+    assert done.stdout.strip() == "False", done.stderr
+
+
+def test_the_3_0_0_import_path_still_works():
+    import plutobt.deflation as deflation
+    from plutobt.deflate import (  # noqa: F401
+        EULER_GAMMA,
+        SURVIVES,
+        deflated_sharpe,
+        expected_max_sharpe,
+        null_var_sr,
+        verdict,
+    )
+
+    assert expected_max_sharpe is deflation.expected_max_sharpe
+
+
+@pytest.mark.parametrize("extra, reason", [
+    (["--trials", "10000000000000000"], "--trials"),
+    (["--trials", "100000000000000000000"], "--trials"),
+    (["--sharpe", "1e308"], "--sharpe"),
+    (["--sharpe", "1e155"], "--sharpe"),
+])
+def test_cli_refuses_absurd_values_without_a_traceback(capsys, extra, reason):
+    argv = list(ARGS)
+    argv[argv.index(extra[0]) + 1] = extra[1]
+    code, out, err = run(capsys, argv)
+    assert code == 2 and out == ""
+    assert err.startswith("deflate: ") and reason in err and "Traceback" not in err
+
+
+def test_cli_names_the_real_reason_when_the_moments_leave_no_standard_error(capsys):
+    # skew 2, kurtosis 5 is possible, but with a per-period Sharpe of 1 the Sharpe's
+    # variance term 1 - skew*SR + (kurtosis - 1)/4 * SR^2 is 0: no standard error exists
+    argv = ["--sharpe", "1", "--periods-per-year", "1", "--returns", "60", "--trials", "5",
+            "--skew", "2", "--kurtosis", "5"]
+    code, out, _ = run(capsys, argv)
+    assert code == 0
+    assert "no return volatility" not in out
+    assert "Verdict: not computable: this skew and kurtosis leave" in out
+
+
+def test_cli_one_try_is_not_labelled_several(capsys):
+    argv = list(ARGS)
+    argv[argv.index("--trials") + 1] = "1"
+    _, out, _ = run(capsys, argv)
+    assert "best of several tries" not in out
+    assert "IN-SAMPLE, a single try; not predictive of live results." in out

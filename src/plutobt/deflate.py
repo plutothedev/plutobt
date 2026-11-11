@@ -1,68 +1,29 @@
-"""The Deflated Sharpe Ratio: how good the best of N tries has to look before it is more
-than luck (3.0 spec §4; Bailey and Lopez de Prado, "The Deflated Sharpe Ratio", 2014).
+"""``python -m plutobt.deflate``: deflate a Sharpe you already have, no code needed (3.0
+spec §4.1).
 
-Every Sharpe here is PER BAR (not annualized), the convention of ``metrics.psr``.
-
-    expected_max_sharpe(N, V)  the luck bar: the Sharpe the best of N zero-edge tries
-                               reaches by luck alone, given the spread V of their Sharpes
-    deflated_sharpe(r, N, V)   the probability the best try truly beats that luck bar
-                               (``psr`` with the luck bar as its benchmark)
-    null_var_sr(T)             the spread zero-edge tries show over T returns, for when
-                               the real spread is unknown
-
-Counting near-identical settings as separate tries overstates N, so the result errs
-strict. The paper's estimate of an effective N is out of scope.
+The maths is in ``plutobt.deflation``; its names are re-exported here so
+``from plutobt.deflate import deflated_sharpe`` keeps working. Nothing in the package
+imports this module, which is what lets ``python -m plutobt.deflate`` run without Python's
+"found in sys.modules" warning.
 """
 from __future__ import annotations
 
 import math
-from statistics import NormalDist
 
-from plutobt.metrics import psr
+from plutobt.deflation import (
+    EULER_GAMMA,
+    MAX_TRIALS,
+    SURVIVES,
+    deflated_sharpe,
+    expected_max_sharpe,
+    null_var_sr,
+    verdict,
+)
 
-EULER_GAMMA = 0.5772156649015329
-SURVIVES = 0.95
-_Z = NormalDist().inv_cdf
+__all__ = ["EULER_GAMMA", "SURVIVES", "deflated_sharpe", "expected_max_sharpe", "main",
+           "null_var_sr", "verdict"]
 
-
-def expected_max_sharpe(n_trials: int, var_sr: float) -> float:
-    """The luck bar: ``sqrt(var_sr) * ((1 - g) Z(1 - 1/N) + g Z(1 - 1/(N e)))``, the
-    expected maximum of N zero-edge per-bar Sharpes (paper Eq. 1, mean 0). One try has
-    nothing to deflate: 0."""
-    if int(n_trials) != n_trials or n_trials < 1:
-        raise ValueError(f"n_trials must be a whole number of at least 1, got {n_trials}")
-    if not math.isfinite(var_sr) or var_sr < 0:
-        raise ValueError(f"var_sr must be a finite variance of 0 or more, got {var_sr}")
-    n = int(n_trials)
-    if n == 1:
-        return 0.0
-    bracket = ((1 - EULER_GAMMA) * _Z(1 - 1 / n)
-               + EULER_GAMMA * _Z(1 - 1 / (n * math.e)))
-    return math.sqrt(var_sr) * bracket
-
-
-def null_var_sr(n_returns: int) -> float:
-    """``1 / (T - 1)``: the variance of a per-bar Sharpe estimate over T returns when the
-    true Sharpe is zero."""
-    if n_returns < 2:
-        raise ValueError(f"a Sharpe needs at least 2 returns, got {n_returns}")
-    return 1.0 / (n_returns - 1)
-
-
-def deflated_sharpe(returns, n_trials: int, var_sr: float) -> float:
-    """PSR of ``returns`` against the luck bar of ``n_trials`` tries with Sharpe
-    variance ``var_sr``. NaN when the returns have no volatility."""
-    return psr(returns, sr0=expected_max_sharpe(n_trials, var_sr))
-
-
-def verdict(dsr: float, n_trials: int) -> str:
-    """The one-line verdict the report and the command print."""
-    if not math.isfinite(dsr):
-        return "not computable (no return volatility)"
-    if dsr >= SURVIVES:
-        return "survives deflation"
-    return f"does not survive deflation (N = {n_trials:,} tries)"
-
+_MAX_SHARPE = 1e6          # per period; far past any real Sharpe, far short of overflow
 
 # ---------------------------------------------------------------------------
 # python -m plutobt.deflate: the no-code deflator (spec §4.1)
@@ -83,6 +44,7 @@ example:
 """
 
 _LABEL = "IN-SAMPLE, best of several tries; not predictive of live results."
+_LABEL_ONE = "IN-SAMPLE, a single try; not predictive of live results."
 
 
 class _Refused(ValueError):
@@ -120,6 +82,13 @@ def _check(a) -> None:
                        f"got {a.returns}")
     if a.trials < 1:
         raise _Refused(f"--trials must be at least 1 (the version you kept), got {a.trials}")
+    if a.trials > MAX_TRIALS:
+        raise _Refused(f"--trials {a.trials:,} is too large to compute a luck bar for "
+                       f"(the limit is {MAX_TRIALS:,})")
+    if abs(a.sharpe) / math.sqrt(a.periods_per_year) > _MAX_SHARPE:
+        raise _Refused(f"--sharpe {a.sharpe:g} with --periods-per-year "
+                       f"{a.periods_per_year:g} is a Sharpe of over {_MAX_SHARPE:g} a "
+                       "period, which is not a Sharpe ratio")
     if (a.skew is None) != (a.kurtosis is None):
         raise _Refused("give both --skew and --kurtosis, or neither (then normal returns "
                        "are assumed)")
@@ -154,7 +123,12 @@ def _report(a) -> str:
         lines.append(f"Luck bar: the best of {a.trials:,} zero-edge tries would show an "
                      f"annualized Sharpe of about {bar * root:.2f} by luck alone")
     lines.append(f"Deflated Sharpe: {dsr:.3f}")
-    lines.append(f"Verdict: {verdict(dsr, a.trials)}")
+    if math.isfinite(dsr):
+        lines.append(f"Verdict: {verdict(dsr, a.trials)}")
+    else:
+        lines.append("Verdict: not computable: this skew and kurtosis leave a Sharpe of "
+                     f"{sr:.3g} a period no standard error (1 - skew x SR + (kurtosis - 1)"
+                     "/4 x SR squared must be above 0)")
     if a.trials > 1:
         lines.append(f"Assumed: the spread of the {tries} is what zero-edge tries show "
                      f"over {a.returns:,} returns (their real spread is unknown here)")
@@ -165,7 +139,7 @@ def _report(a) -> str:
         lines.append(f"Using: skew {g3:g}, kurtosis {g4:g}")
     if a.returns < 30:
         lines.append("Warning: under 30 returns, every Sharpe statistic here is unreliable")
-    lines.append(_LABEL)
+    lines.append(_LABEL_ONE if a.trials == 1 else _LABEL)
     return "\n".join(lines) + "\n"
 
 

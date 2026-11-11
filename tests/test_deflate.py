@@ -168,3 +168,14 @@ def test_calibration_correlated_settings_stays_under_5_percent():
     # measured 2026-11-09 (1,000 studies, seed 21): rho 0.5 1.6%, 0.9 4.1%, 0.99 4.7%
     for rho in (0.5, 0.9, 0.99):
         assert _correlated_survival(rho, 1000, seed=21) <= 0.06
+
+
+def test_a_bool_is_not_a_try_count():
+    with pytest.raises(ValueError, match="whole number"):
+        expected_max_sharpe(True, 0.01)
+
+
+def test_a_try_count_too_large_to_compute_is_refused_plainly():
+    with pytest.raises(ValueError, match="too large"):
+        expected_max_sharpe(10 ** 16, 0.01)
+    assert expected_max_sharpe(10 ** 12, 1.0) > expected_max_sharpe(10 ** 9, 1.0)

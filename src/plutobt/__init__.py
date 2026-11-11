@@ -40,7 +40,7 @@ __version__ = "3.0.0"
 from plutobt.config import BacktestConfig, load_config
 from plutobt.contracts import ContractSet
 from plutobt.data import load_bars
-from plutobt.deflate import deflated_sharpe, expected_max_sharpe
+from plutobt.deflation import deflated_sharpe, expected_max_sharpe
 from plutobt.engine import BacktestResult, Engine
 from plutobt.importers import load_csv, load_csv_contracts
 from plutobt.instruments import REGISTRY, get_instrument
