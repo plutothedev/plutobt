@@ -328,7 +328,7 @@ def assert_positive_prices(df: pd.DataFrame) -> None:
             raise ValueError(
                 f"non-positive price in column '{col}' at row {row} "
                 f"(value={val!r}); percentage/log returns are undefined on "
-                f"non-positive prices (§5.6). Use points/dollar P&L instead."
+                f"non-positive prices. Use points/dollar P&L instead."
             )
 
 

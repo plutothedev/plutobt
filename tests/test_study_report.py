@@ -30,8 +30,13 @@ def sample_study(tmp_path_factory):
         os.chdir(here)
 
 
+def _pinned(study) -> str:
+    # the report prints the ledger's full path, which is this machine's temp folder
+    return format_study(study, "NQ").replace(study.ledger_path, "<ledger>")
+
+
 def test_study_report_snapshot(sample_study):
-    assert format_study(sample_study, "NQ") == SNAP.read_text(encoding="utf-8")
+    assert _pinned(sample_study) == SNAP.read_text(encoding="utf-8")
 
 
 def test_study_report_numbers_are_the_result(sample_study):
@@ -57,7 +62,8 @@ def test_n_split_line(tmp_path):
     led = tmp_path / "t.jsonl"
     run_study(Coin, {"seed": [0, 1], "bias": [0.5]}, df, NQ, CFG, ledger=led)
     res = run_study(Coin, {"seed": [1, 2], "bias": [0.5]}, df, NQ, CFG, ledger=led)
-    assert "N = 3 (2 this study, 1 earlier)" in format_study(res, "NQ")
+    text = format_study(res, "NQ")
+    assert "N = 3 (2 this study, 1 of them already in the ledger, 1 earlier)" in text
 
 
 def test_tie_noted(tmp_path):
@@ -106,3 +112,69 @@ def test_low_activity_lines():
             ) in text
     assert "WARNING: only" not in format_study(
         run_study(Hold, {"side": [1, -1]}, walk(600, drift=0.3), NQ, CFG, ledger=False), "NQ")
+
+
+# --- 3.0.1: report text ---------------------------------------------------------------------
+
+def test_the_report_is_plain_ascii(sample_study):
+    assert format_study(sample_study, "NQ").isascii()
+
+
+def test_the_ledger_path_is_absolute(sample_study, tmp_path):
+    import pathlib
+
+    assert pathlib.PurePath(sample_study.ledger_path).is_absolute()
+    res = run_study(Hold, {"side": [1, -1]}, walk(600, drift=0.3), NQ, CFG,
+                    ledger=tmp_path / "t.jsonl")
+    assert f"  Ledger: {(tmp_path / 't.jsonl').resolve().as_posix()}" in format_study(res, "NQ")
+
+
+def test_a_rerun_of_the_same_settings_says_they_were_already_counted(tmp_path):
+    df, led = walk(600, drift=0.3), tmp_path / "t.jsonl"
+    run_study(Hold, {"side": [1, -1]}, df, NQ, CFG, ledger=led)
+    text = format_study(run_study(Hold, {"side": [1, -1]}, df, NQ, CFG, ledger=led), "NQ")
+    assert "N = 2 (2 this study, 2 of them already in the ledger, 0 earlier)" in text
+
+
+def test_tries_on_other_bars_get_a_line(tmp_path):
+    df, led = walk(601, drift=0.3), tmp_path / "t.jsonl"
+    run_study(Coin, {"seed": [0, 1, 2], "bias": [0.5]}, df.iloc[:-1].reset_index(drop=True),
+              NQ, CFG, ledger=led)
+    text = format_study(run_study(Coin, {"seed": [0], "bias": [0.5]}, df, NQ, CFG, ledger=led),
+                        "NQ")
+    assert "  The ledger also holds 3 tries of this strategy on other bars: N does not " \
+           "count them" in text
+    assert "on other bars" not in format_study(
+        run_study(Hold, {"side": [1, -1]}, df, NQ, CFG, ledger=False), "NQ")
+
+
+def _falling_study(drift):
+    from tests.study_fixtures import Big
+
+    return run_study(Big, {"size": [4, 3]}, walk(600, drift=drift, sigma=2.0, seed=3), NQ,
+                     CFG, ledger=False, wf_splits=2, wf_anchored=True, cv_folds=2,
+                     embargo_bars=5)
+
+
+def test_walk_forward_says_each_window_restarts(sample_study):
+    assert "  Each window restarts flat from 100,000: its sizing and margin checks do not " \
+           "follow the stitched curve" in format_study(sample_study, "NQ")
+
+
+def test_margin_events_in_the_reruns_are_printed():
+    res = _falling_study(-1.3)
+    wf, text = res.walk_forward, format_study(res, "NQ")
+    assert (f"  WARNING: {wf.margin_calls} margin call(s) and {wf.margin_refusals} refused "
+            "or cut order(s) inside the walk-forward reruns") in text
+    assert (f"  WARNING: {res.cv.margin_calls} margin call(s) and "
+            f"{res.cv.margin_refusals} refused or cut order(s) inside the fold reruns") in text
+
+
+def test_a_stitched_curve_below_its_margin_is_printed():
+    res = _falling_study(-0.5)
+    wf, text = res.walk_forward, format_study(res, "NQ")
+    assert wf.below_margin_windows >= 1
+    assert (f"  WARNING: in {wf.below_margin_windows} window(s) the stitched curve stood "
+            "below the initial margin of the contracts held (its low: "
+            f"{wf.equity.min():,.0f}): one account could not have carried them") in text
+    assert "inside the walk-forward reruns" not in text

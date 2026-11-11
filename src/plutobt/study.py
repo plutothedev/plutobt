@@ -234,7 +234,8 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     return StudyResult(
         strategy=sid, grid=table, best=dict(settings[best_i]), tie=tie,
         returns=ctx.returns, periods_per_year=ctx.ppy, data_sha256=sha, bars_sha256=bars,
-        ledger_path=led.path.as_posix() if led else None, ledger_new=led.is_new if led else False,
+        ledger_path=led.path.resolve().as_posix() if led else None,
+        ledger_new=led.is_new if led else False,
         n_this=len(this), n_earlier=len(set(before) - set(this)),
         n_repeat=len(set(before) & set(this)), n_other_bars=other_bars,
         deflation={"dsr": dsr, "n_trials": n_trials, "var_sr": var_sr, "luck_bar": luck,

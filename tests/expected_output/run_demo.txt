@@ -5,7 +5,7 @@ Annualization = sqrt(periods_per_year) = sqrt(20412) = 142.871
 Sharpe/bar    = 0.0125479   (raw, per bar)
 Sharpe        = 1.793   (annualized: Sharpe/bar x 142.871)
 Sharpe SE     = 3.529   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-5.124, +8.710]
-⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+WARNING: Sharpe CI includes 0: not statistically distinguishable from zero
 PSR           = 0.694   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
 Sortino       = 2.678
 Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)
@@ -27,7 +27,7 @@ Annualization = sqrt(periods_per_year) = sqrt(20412) = 142.871
 Sharpe/bar    = -0.0274604   (raw, per bar)
 Sharpe        = -3.923   (annualized: Sharpe/bar x 142.871)
 Sharpe SE     = 3.513   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-10.809, +2.963]
-⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+WARNING: Sharpe CI includes 0: not statistically distinguishable from zero
 PSR           = 0.132   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
 Sortino       = -5.322
 Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)
@@ -41,7 +41,7 @@ Trades        = 28   (closed)
 Open at end   = 1 (marked to last close, excluded from trade stats)
 data_sha256   = 24f31941d385678f0a4f8acd12e16b602b777263ea726222f1a948a6b8716daf   (of the loaded bars as CSV, not the file)
 engine version = 3.0.0
-⚠ insufficient sample: n_trades=28 < 30; profit factor, expectancy, win rate and Avg R unreliable
+WARNING: insufficient sample: n_trades=28 < 30; profit factor, expectancy, win rate and Avg R unreliable
 
 === PlutoBT report: CL ===
 IN-SAMPLE, single pre-specified strategy; not predictive of live results.
@@ -50,7 +50,7 @@ Annualization = sqrt(periods_per_year) = sqrt(16632) = 128.965
 Sharpe/bar    = -0.0388931   (raw, per bar)
 Sharpe        = -5.016   (annualized: Sharpe/bar x 128.965)
 Sharpe SE     = 3.327   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-11.537, +1.505]
-⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+WARNING: Sharpe CI includes 0: not statistically distinguishable from zero
 PSR           = 0.066   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
 Sortino       = -6.179
 Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)

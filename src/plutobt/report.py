@@ -146,7 +146,7 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     # from no edge at all. Say so on its own line, next to the interval. Decided on the
     # unrounded bounds; _signed prints them so the screen never contradicts it.
     if ci_known and ci_lo <= 0.0 <= ci_hi:
-        lines.append("⚠ Sharpe CI includes 0: not statistically distinguishable from zero")
+        lines.append("WARNING: Sharpe CI includes 0: not statistically distinguishable from zero")
     lines += [
         f"PSR           = {_num(psr, '.3f', nan=no_vol if math.isnan(sharpe) else 'n/a')}"
         "   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; "
@@ -183,7 +183,7 @@ def format_report(result: BacktestResult, symbol: str) -> str:
     # n_trades as the Trades line).
     if n_trades < MIN_TRADE_SAMPLE:
         lines.append(
-            f"⚠ insufficient sample: n_trades={n_trades} < {MIN_TRADE_SAMPLE}; "
+            f"WARNING: insufficient sample: n_trades={n_trades} < {MIN_TRADE_SAMPLE}; "
             f"profit factor, expectancy, win rate and Avg R unreliable"
         )
 
@@ -253,13 +253,20 @@ def format_study(result, symbol: str) -> str:
     elif result.n_earlier == 0 and result.ledger_new:
         count = f"N = {d['n_trials']:,} (new ledger)"
     else:
-        count = f"N = {d['n_trials']:,} ({result.n_this:,} this study, " \
+        # a rerun of settings the ledger already holds adds no try: say so, or "0 earlier"
+        # reads as if the earlier run had not been seen
+        again = f"{result.n_repeat:,} of them already in the ledger, " if result.n_repeat \
+            else ""
+        count = f"N = {d['n_trials']:,} ({result.n_this:,} this study, {again}" \
                 f"{result.n_earlier:,} earlier)"
     lines += ["Deflated Sharpe", f"  {count}"]
     if result.ledger_path is not None:
         # the default path is relative to where you run: a study run from another folder
-        # starts a separate count, and this line is how you notice
+        # starts a separate count, and this line (the full path) is how you notice
         lines.append(f"  Ledger: {result.ledger_path}")
+    if result.n_other_bars:
+        lines.append(f"  The ledger also holds {result.n_other_bars:,} tries of this "
+                     "strategy on other bars: N does not count them")
     lines += [
         f"  Luck bar = {d['luck_bar_ann']:.3f}   (annualized: what the best of N zero-edge "
         "tries shows by luck alone)",
@@ -306,6 +313,8 @@ def format_study(result, symbol: str) -> str:
             f"out-of-sample {_num(w['oos_sharpe'] * root, '.3f', nan='flat')}"
             + ("   (ended open: one exit charged)" if w["open_at_end"] else ""))
     lines += [
+        "  Each window restarts flat from 100,000: its sizing and margin checks do not "
+        "follow the stitched curve",
         f"  Out-of-sample Sharpe = {_num(wf.sharpe_ann, '.3f', nan='flat')}   "
         f"SE {_num(wf.sharpe_se, '.3f')}   PSR {_num(wf.psr, '.3f')}",
         f"  In-sample Sharpe of the picks (mean) = {wf.is_sharpe_mean * root:.3f}",
@@ -313,8 +322,16 @@ def format_study(result, symbol: str) -> str:
     if wf.open_windows:
         lines.append(f"  {wf.open_windows} window(s) ended with a position open: each was "
                      "marked at its last close and charged one exit")
+    if wf.margin_calls or wf.margin_refusals:
+        lines.append(f"  WARNING: {wf.margin_calls} margin call(s) and "
+                     f"{wf.margin_refusals} refused or cut order(s) inside the walk-forward "
+                     "reruns: those windows did not trade as the settings table shows")
+    if wf.below_margin_windows:
+        lines.append(f"  WARNING: in {wf.below_margin_windows} window(s) the stitched curve "
+                     "stood below the initial margin of the contracts held (its low: "
+                     f"{wf.equity.min():,.0f}): one account could not have carried them")
     if wf.winner_changed:
-        lines.append("  ⚠ winner changed between windows: the pick is not stable")
+        lines.append("  WARNING: winner changed between windows: the pick is not stable")
 
     cv = result.cv
     lines.append(f"Purged CV   ({len(cv.folds)} folds, embargo {cv.embargo} bars)")
@@ -325,9 +342,13 @@ def format_study(result, symbol: str) -> str:
             + ("   (not real-time order: trained on later data)" if f["not_real_time"]
                else ""))
     lines.append(f"  Spread of fold Sharpes = {_num(cv.spread * root, '.3f')}")
+    if cv.margin_calls or cv.margin_refusals:
+        lines.append(f"  WARNING: {cv.margin_calls} margin call(s) and "
+                     f"{cv.margin_refusals} refused or cut order(s) inside the fold reruns")
     if cv.capped:
-        lines.append("  ⚠ embargo capped to keep 30 training rows: some trades are longer, "
-                     "so these folds still carry part of the leak (walk-forward does not)")
+        lines.append("  WARNING: embargo capped to keep 30 training rows: some trades are "
+                     "longer, so these folds still carry part of the leak (walk-forward "
+                     "does not)")
     lines += [
         f"data_sha256   = {result.data_sha256}",
         f"engine version = {__version__}",

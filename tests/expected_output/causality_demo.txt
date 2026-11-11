@@ -16,7 +16,7 @@ Annualization = sqrt(periods_per_year) = sqrt(20412) = 142.871
 Sharpe/bar    = -0.000475170   (raw, per bar)
 Sharpe        = -0.068   (annualized: Sharpe/bar x 142.871)
 Sharpe SE     = 3.550   (iid, skew/kurtosis-adjusted; no autocorrelation adjustment)   95% CI [-7.027, +6.891]
-⚠ Sharpe CI includes 0: not statistically distinguishable from zero
+WARNING: Sharpe CI includes 0: not statistically distinguishable from zero
 PSR           = 0.492   (Probabilistic Sharpe Ratio vs 0: 1 minus the one-sided p-value; skew/kurtosis-adjusted, Bailey & Lopez de Prado)
 Sortino       = -0.096
 Calmar        = n/a (needs >= 1 year; this run covers 20 trading days)

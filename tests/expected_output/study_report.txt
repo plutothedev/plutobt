@@ -10,7 +10,7 @@ Settings   (Sharpe annualized: per bar x sqrt(20412) = x 142.871)
   30         100        1.725   52      2,107.50
 Deflated Sharpe
   N = 6 (new ledger)
-  Ledger: .plutobt/trials.jsonl
+  Ledger: <ledger>
   Luck bar = 0.929   (annualized: what the best of N zero-edge tries shows by luck alone)
   Deflated Sharpe = 0.599   (probability the best setting truly beats the luck bar)
   Verdict: does not survive deflation (N = 6 tries)
@@ -26,10 +26,11 @@ Walk-forward   (rolling, 5 windows)
   window 3: train rows 538-806, test rows 807-1075: fast_span=30, slow_span=100   in-sample 21.887, out-of-sample -1.017   (ended open: one exit charged)
   window 4: train rows 807-1075, test rows 1076-1344: fast_span=20, slow_span=50   in-sample 3.344, out-of-sample -7.459   (ended open: one exit charged)
   window 5: train rows 1076-1344, test rows 1345-1618: fast_span=10, slow_span=50   in-sample -4.039, out-of-sample -10.007   (ended open: one exit charged)
+  Each window restarts flat from 100,000: its sizing and margin checks do not follow the stitched curve
   Out-of-sample Sharpe = -0.760   SE 3.883   PSR 0.422
   In-sample Sharpe of the picks (mean) = 4.442
   4 window(s) ended with a position open: each was marked at its last close and charged one exit
-  ⚠ winner changed between windows: the pick is not stable
+  WARNING: winner changed between windows: the pick is not stable
 Purged CV   (6 folds, embargo 232 bars)
   fold 1: test rows 0-268: fast_span=20, slow_span=50   out-of-sample 1.984   (not real-time order: trained on later data)
   fold 2: test rows 269-537: fast_span=30, slow_span=50   out-of-sample -0.967   (not real-time order: trained on later data)
