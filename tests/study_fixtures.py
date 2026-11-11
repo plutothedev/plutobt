@@ -84,3 +84,20 @@ class Crashes(Strategy):
 class NeedsArgs(Strategy):
     def __init__(self, x):
         self.x = x
+
+
+class Sparse(Strategy):
+    """Long for one bar every ``every`` bars, starting at bar ``phase``: a strategy that is
+    rarely in the market, with its few trades spread evenly."""
+    every = 100
+    phase = 5
+
+    def precompute(self, df):
+        df["go"] = (np.arange(len(df)) % self.every) == self.phase
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.go and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=1)
+        elif not ctx.bar.go and ctx.position.qty != 0:
+            ctx.broker.close()

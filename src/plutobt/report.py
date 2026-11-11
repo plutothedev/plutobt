@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 
+from plutobt.deflation import LOW_ACTIVE, MIN_ACTIVE
 from plutobt.engine import BacktestResult
 from plutobt.metrics import (
     MIN_TRADE_SAMPLE,
@@ -266,6 +267,11 @@ def format_study(result, symbol: str) -> str:
         "truly beats the luck bar)",
         f"  Verdict: {d['verdict']}",
     ]
+    if MIN_ACTIVE <= d["active_bars"] < LOW_ACTIVE:
+        lines.append(
+            f"  WARNING: only {d['active_bars']} bars with a non-zero return: under "
+            f"{LOW_ACTIVE}, zero-edge strategies pass more often than the 5% this bar "
+            "promises")
 
     p = result.pbo
     if p is None:

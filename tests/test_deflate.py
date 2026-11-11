@@ -179,3 +179,45 @@ def test_a_try_count_too_large_to_compute_is_refused_plainly():
     with pytest.raises(ValueError, match="too large"):
         expected_max_sharpe(10 ** 16, 0.01)
     assert expected_max_sharpe(10 ** 12, 1.0) > expected_max_sharpe(10 ** 9, 1.0)
+
+
+# --- 3.0.1, audit finding 4: too few active bars -------------------------------------------
+
+def _sparse_false_pass(active, t, n, studies, seed, fat=False):
+    """Zero-edge settings that are in the market on exactly ``active`` of ``t`` bars."""
+    rng = np.random.default_rng(seed)
+    passed = 0
+    for _ in range(studies):
+        r = np.zeros((t, n))
+        for c in range(n):
+            rows = rng.choice(t, size=active, replace=False)
+            r[rows, c] = rng.standard_t(3, size=active) if fat else rng.standard_normal(active)
+        srs = r.mean(axis=0) / r.std(axis=0)
+        best = int(np.argmax(srs))
+        var = float(np.var(srs)) if n > 1 else 0.0
+        passed += deflated_sharpe(pd.Series(r[:, best]), n, var) >= SURVIVES
+    return passed / studies
+
+
+def test_the_low_activity_thresholds_match_what_was_measured():
+    """Measured 2026-11-11 (4,000 studies a cell): the false-pass rate follows the number
+    of non-zero returns, not the bar count. 10 active: 10%; 30: 6 to 7%; 100: 5 to 6%
+    (fat tails 7%). So under MIN_ACTIVE the verdict is withheld, under LOW_ACTIVE warned."""
+    from plutobt.deflation import LOW_ACTIVE, MIN_ACTIVE
+
+    assert (MIN_ACTIVE, LOW_ACTIVE) == (30, 100)
+    assert _sparse_false_pass(10, 500, 1, 1500, seed=1) > 0.075          # the problem is real
+    assert _sparse_false_pass(MIN_ACTIVE, 500, 1, 1500, seed=2) < 0.09
+    assert _sparse_false_pass(LOW_ACTIVE, 500, 2, 1500, seed=3) < 0.065
+    # fat tails still pass too often at 30, hence the warning up to LOW_ACTIVE
+    assert _sparse_false_pass(MIN_ACTIVE, 500, 2, 1500, seed=4, fat=True) > 0.06
+
+
+def test_verdict_is_withheld_under_30_active_bars():
+    assert verdict(0.99, 5, active_bars=29) == \
+        "not judged: only 29 bars with a non-zero return (it takes 30)"
+    assert verdict(0.99, 5, active_bars=30) == "survives deflation"
+    assert verdict(0.10, 5, active_bars=12) == \
+        "not judged: only 12 bars with a non-zero return (it takes 30)"
+    assert verdict(0.99, 5) == "survives deflation"            # the command has no bar count
+    assert verdict(float("nan"), 3, active_bars=5) == "not computable (no return volatility)"

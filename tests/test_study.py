@@ -1,6 +1,7 @@
 """run_study (3.0 spec §6): the grid, the ledger count, Deflated Sharpe, PBO and the
 out-of-sample blocks, end to end on synthetic bars."""
 import json
+import math
 import re
 
 import numpy as np
@@ -193,3 +194,34 @@ def test_huge_grid_refused_before_expansion(tmp_path):
     grid = {"seed": list(range(100_000)), "bias": [x / 100_000 for x in range(100_000)]}
     with pytest.raises(ValueError, match=r"10,000,000,000 settings.*max_configs"):
         run_study(Coin, grid, walk(600), NQ, CFG, ledger=False)
+
+
+# --- 3.0.1, audit finding 4: too few active bars -------------------------------------------
+
+def _sparse_study(every, tmp_path):
+    from tests.study_fixtures import Sparse
+
+    return run_study(Sparse, {"every": [every], "phase": [5, 6]}, walk(1800, drift=0.3), NQ,
+                     CFG, ledger=False, wf_splits=2, cv_folds=2, blocks=2)
+
+
+def test_a_rarely_trading_best_setting_is_not_judged(tmp_path):
+    res = _sparse_study(150, tmp_path)
+    best = int(np.nanargmax(res.grid.sharpe))
+    active = int(np.count_nonzero(res.returns.iloc[:, best]))
+    assert active < 30
+    assert res.deflation["active_bars"] == active
+    assert res.deflation["verdict"] == \
+        f"not judged: only {active} bars with a non-zero return (it takes 30)"
+    assert math.isfinite(res.deflation["dsr"])           # the number still prints
+
+
+def test_a_sometimes_trading_best_setting_keeps_its_verdict(tmp_path):
+    res = _sparse_study(40, tmp_path)
+    assert 30 <= res.deflation["active_bars"] < 100
+    assert not res.deflation["verdict"].startswith("not judged")
+
+
+def test_an_always_in_setting_counts_every_moving_bar(tmp_path):
+    res = study(walk(600, drift=0.3), Hold, {"side": [1, -1]}, tmp_path)
+    assert res.deflation["active_bars"] > 500

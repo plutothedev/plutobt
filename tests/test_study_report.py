@@ -86,3 +86,23 @@ def test_one_setting_report(tmp_path):
     res = run_study(Hold, {"side": [1]}, walk(600, drift=0.3), NQ, CFG, ledger=False)
     text = format_study(res, "NQ")
     assert "not computed: one setting, so there is nothing to choose between" in text
+
+
+def _sparse(every):
+    from tests.study_fixtures import Sparse
+
+    return run_study(Sparse, {"every": [every], "phase": [5, 6]}, walk(1800, drift=0.3), NQ,
+                     CFG, ledger=False, wf_splits=2, cv_folds=2, blocks=2)
+
+
+def test_low_activity_lines():
+    """3.0.1, audit finding 4."""
+    few = format_study(_sparse(150), "NQ")
+    assert "Verdict: not judged: only" in few
+    some = _sparse(40)
+    text = format_study(some, "NQ")
+    assert (f"  WARNING: only {some.deflation['active_bars']} bars with a non-zero return: "
+            "under 100, zero-edge strategies pass more often than the 5% this bar promises"
+            ) in text
+    assert "WARNING: only" not in format_study(
+        run_study(Hold, {"side": [1, -1]}, walk(600, drift=0.3), NQ, CFG, ledger=False), "NQ")

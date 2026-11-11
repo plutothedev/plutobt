@@ -27,6 +27,13 @@ from plutobt.metrics import psr
 EULER_GAMMA = 0.5772156649015329
 SURVIVES = 0.95
 MAX_TRIALS = 10 ** 15      # past this, 1 - 1/(N e) rounds to 1.0 and the formula has no value
+# The PSR treats every bar as an observation, but a strategy that is rarely in the market
+# has only as much evidence as its non-zero returns. Measured on zero-edge returns
+# (2026-11-11, 4,000 studies a cell): 10 non-zero returns pass 10% of the time, 30 pass 6
+# to 7%, 100 pass 5 to 6% (7% with fat tails), whatever the bar count. So under MIN_ACTIVE
+# the verdict is withheld and under LOW_ACTIVE the report warns.
+MIN_ACTIVE = 30
+LOW_ACTIVE = 100
 _Z = NormalDist().inv_cdf
 
 
@@ -64,10 +71,15 @@ def deflated_sharpe(returns, n_trials: int, var_sr: float) -> float:
     return psr(returns, sr0=expected_max_sharpe(n_trials, var_sr))
 
 
-def verdict(dsr: float, n_trials: int) -> str:
-    """The one-line verdict the report and the command print."""
+def verdict(dsr: float, n_trials: int, active_bars: int | None = None) -> str:
+    """The one-line verdict the report and the command print. ``active_bars`` is the
+    number of non-zero returns behind the Sharpe, when it is known (a study knows it, the
+    command does not): under ``MIN_ACTIVE`` no verdict is given."""
     if not math.isfinite(dsr):
         return "not computable (no return volatility)"
+    if active_bars is not None and active_bars < MIN_ACTIVE:
+        return (f"not judged: only {active_bars} bars with a non-zero return (it takes "
+                f"{MIN_ACTIVE})")
     if dsr >= SURVIVES:
         return "survives deflation"
     return f"does not survive deflation (N = {n_trials:,} tries)"

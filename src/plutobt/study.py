@@ -73,7 +73,8 @@ class StudyResult:
     n_earlier: int                # tries on these bars the ledger held that this study did not run
     n_repeat: int                 # of n_this, how many the ledger already held
     n_other_bars: int             # tries of this strategy on other bars (never part of N)
-    deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann, verdict
+    deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann,
+    #                               active_bars, verdict
     pbo: PBOResult | None         # None for a one-setting study: nothing to choose between
     walk_forward: WalkForward
     cv: PurgedCV
@@ -209,6 +210,7 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     var_sr = float(np.var(values)) if values.size > 1 else 0.0
     n_trials = len(tries)
     dsr = deflated_sharpe(ctx.returns.iloc[:, best_i], n_trials, var_sr)
+    active = int(np.count_nonzero(ctx.returns.iloc[:, best_i].to_numpy()))
     luck = expected_max_sharpe(n_trials, var_sr)
     root = math.sqrt(ctx.ppy)
 
@@ -225,7 +227,8 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
         n_this=len(this), n_earlier=len(set(before) - set(this)),
         n_repeat=len(set(before) & set(this)), n_other_bars=other_bars,
         deflation={"dsr": dsr, "n_trials": n_trials, "var_sr": var_sr, "luck_bar": luck,
-                   "luck_bar_ann": luck * root, "verdict": verdict(dsr, n_trials)},
+                   "luck_bar_ann": luck * root, "active_bars": active,
+                   "verdict": verdict(dsr, n_trials, active)},
         pbo=pbo(ctx.returns.to_numpy(), blocks) if len(settings) > 1 else None,
         walk_forward=walk_forward(ctx, wf_splits, wf_anchored),
         cv=purged_cv(ctx, cv_folds, embargo_bars),
