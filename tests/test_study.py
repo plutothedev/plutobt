@@ -8,7 +8,14 @@ import pytest
 
 from plutobt.config import BacktestConfig
 from plutobt.instruments import get_instrument
-from plutobt.ledger import Ledger, code_sha256, resolved_settings, strategy_id, try_key
+from plutobt.ledger import (
+    Ledger,
+    code_sha256,
+    config_key,
+    resolved_settings,
+    strategy_id,
+    try_key,
+)
 from plutobt.study import StudyResult, expand_grid, run_study
 from tests.study_fixtures import CFG, Coin, Crashes, Hold, NeedsArgs, walk
 
@@ -59,7 +66,7 @@ def test_crash_stops_and_names_the_setting(tmp_path):
 def test_every_completed_run_is_recorded(tmp_path):
     res = study(walk(600, drift=0.3), Hold, {"side": [1, -1, 0]}, tmp_path)
     led = Ledger(tmp_path / "trials.jsonl")
-    assert len(led.tries(strategy_id(Hold), res.data_sha256)) == 3
+    assert len(led.tries(strategy_id(Hold), res.bars_sha256)) == 3
     assert res.n_this == 3 and res.n_earlier == 0 and res.ledger_new
 
 
@@ -123,9 +130,9 @@ def test_noise_end_to_end(tmp_path):
 def test_deflation_reads_the_ledger_spread(tmp_path):
     df = walk(600, drift=0.3)
     res = study(df, Hold, {"side": [1, -1]}, tmp_path)
-    tries = Ledger(tmp_path / "trials.jsonl").tries(strategy_id(Hold), res.data_sha256)
+    tries = Ledger(tmp_path / "trials.jsonl").tries(strategy_id(Hold), res.bars_sha256)
     assert res.deflation["var_sr"] == pytest.approx(np.var(list(tries.values())))
-    key = try_key(resolved_settings(Hold, {"side": 1}), code_sha256(Hold))
+    key = try_key(resolved_settings(Hold, {"side": 1}), code_sha256(Hold), config_key(CFG))
     assert tries[key] == pytest.approx(res.grid.sharpe.iloc[0])
 
 

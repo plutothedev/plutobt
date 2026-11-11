@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from plutobt.config import BacktestConfig
-from plutobt.data import frame_sha256
+from plutobt.data import bars_sha256, frame_sha256
 from plutobt.deflate import deflated_sharpe, expected_max_sharpe, verdict
 from plutobt.engine import Engine
 from plutobt.ledger import (
@@ -33,6 +33,7 @@ from plutobt.ledger import (
     Ledger,
     _plain,
     code_sha256,
+    config_key,
     params_key,
     resolved_settings,
     strategy_id,
@@ -64,11 +65,14 @@ class StudyResult:
     tie: bool
     returns: pd.DataFrame         # rows x settings, row i = the return on bar i + 1
     periods_per_year: float
-    data_sha256: str
+    data_sha256: str              # the exact frame, as a run's manifest has it
+    bars_sha256: str              # the bars by content: what the ledger keys tries by
     ledger_path: str | None
     ledger_new: bool
-    n_this: int
-    n_earlier: int
+    n_this: int                   # distinct tries this study ran
+    n_earlier: int                # tries on these bars the ledger held that this study did not run
+    n_repeat: int                 # of n_this, how many the ledger already held
+    n_other_bars: int             # tries of this strategy on other bars (never part of N)
     deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann, verdict
     pbo: PBOResult | None         # None for a one-setting study: nothing to choose between
     walk_forward: WalkForward
@@ -181,10 +185,14 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     purged_folds(n_rows, cv_folds, 0)
 
     sid, sha, code = strategy_id(strategy_cls), frame_sha256(df), code_sha256(strategy_cls)
+    # The ledger keys bars by content (float volume or an extra column is the same bars)
+    # and a try by its code, settings and the config switches that change what trades.
+    bars, switches = bars_sha256(df), config_key(config)
     led = Ledger(ledger) if ledger else None
-    before = led.tries(sid, sha) if led else {}
-    record = (lambda p, bars, sr: led.record(sid, resolved_settings(strategy_cls, p), sha,
-                                             bars, sr, code=code)) if led else None
+    before = led.tries(sid, bars) if led else {}
+    other_bars = led.tries_on_other_bars(sid, bars) if led else 0
+    record = (lambda p, n, sr: led.record(sid, resolved_settings(strategy_cls, p), bars,
+                                          n, sr, code=code, config=switches)) if led else None
     ctx = _context(strategy_cls, settings, df, instrument, config, roll_meta, on_run=record)
 
     srs = np.array(ctx.sharpes, dtype=float)
@@ -194,9 +202,9 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     best_i = int(np.nanargmax(srs))
     tie = int(np.sum(srs == srs[best_i])) > 1
 
-    this = {try_key(resolved_settings(strategy_cls, p), code): s
+    this = {try_key(resolved_settings(strategy_cls, p), code, switches): s
             for p, s in zip(settings, ctx.sharpes, strict=True)}
-    tries = led.tries(sid, sha) if led else this
+    tries = led.tries(sid, bars) if led else this
     values = np.array([v for v in tries.values() if math.isfinite(v)])
     var_sr = float(np.var(values)) if values.size > 1 else 0.0
     n_trials = len(tries)
@@ -212,9 +220,10 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
 
     return StudyResult(
         strategy=sid, grid=table, best=dict(settings[best_i]), tie=tie,
-        returns=ctx.returns, periods_per_year=ctx.ppy, data_sha256=sha,
+        returns=ctx.returns, periods_per_year=ctx.ppy, data_sha256=sha, bars_sha256=bars,
         ledger_path=led.path.as_posix() if led else None, ledger_new=led.is_new if led else False,
         n_this=len(this), n_earlier=len(set(before) - set(this)),
+        n_repeat=len(set(before) & set(this)), n_other_bars=other_bars,
         deflation={"dsr": dsr, "n_trials": n_trials, "var_sr": var_sr, "luck_bar": luck,
                    "luck_bar_ann": luck * root, "verdict": verdict(dsr, n_trials)},
         pbo=pbo(ctx.returns.to_numpy(), blocks) if len(settings) > 1 else None,

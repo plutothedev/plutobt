@@ -19,11 +19,15 @@ cannot stop code written to hide its tries; the ledger makes the honest path the
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import json
 import math
 import os
+import sys
+import sysconfig
+import tokenize
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -72,10 +76,13 @@ def params_key(params: dict) -> str:
     return json.dumps(plain, sort_keys=True)
 
 
-def try_key(params: dict, code: str) -> str:
-    """The identity of one try: the code version plus the canonical settings."""
-    return json.dumps({"code": code, "params": json.loads(params_key(params))},
-                      sort_keys=True)
+def try_key(params: dict, code: str, config: dict | None = None) -> str:
+    """The identity of one try: the code version, the canonical settings, and the config
+    switches (``config_key``). With no config the key is the one 3.0.0 wrote."""
+    key = {"code": code, "params": json.loads(params_key(params))}
+    if config:
+        key["config"] = dict(sorted(config.items()))
+    return json.dumps(key, sort_keys=True)
 
 
 def _own_classes(cls: type) -> list[type]:
@@ -87,23 +94,132 @@ def _own_classes(cls: type) -> list[type]:
     return list(reversed(out))
 
 
-def code_sha256(cls: type) -> str:
-    """sha256 of the strategy's source (every class of it above ``Strategy``), so an edit
-    to the logic is a new try. A class with no source file (a notebook cell, ``exec``)
-    falls back to its methods' bytecode and constants."""
-    h = hashlib.sha256()
+def _installed_roots() -> tuple[Path, ...]:
+    # Where code that is not the user's lives: the standard library, site-packages, and
+    # plutobt itself.
+    roots = {Path(p).resolve() for key, p in sysconfig.get_paths().items()
+             if key in ("stdlib", "platstdlib", "purelib", "platlib") and p}
+    roots.add(Path(__file__).resolve().parent)
+    return tuple(roots)
+
+
+def _source_file(module) -> Path | None:
+    path = getattr(module, "__file__", None)
+    if not path or not str(path).endswith(".py"):
+        return None
+    path = Path(path).resolve()
+    return path if path.is_file() else None
+
+
+def _is_user_file(path: Path, roots: tuple[Path, ...]) -> bool:
+    return not any(path == root or root in path.parents for root in roots)
+
+
+def _modules_used(module) -> list:
+    """The modules a module's top level names: imported modules, and the home modules of
+    the functions, classes and objects it imported or built."""
+    found = {}
+    for value in list(vars(module).values()):
+        if inspect.ismodule(value):
+            target = value
+        else:
+            name = getattr(value, "__module__", None)
+            if not isinstance(name, str):
+                name = getattr(type(value), "__module__", None)
+            target = sys.modules.get(name) if isinstance(name, str) else None
+        if target is not None and target is not module:
+            found[getattr(target, "__name__", repr(target))] = target
+    return [found[name] for name in sorted(found)]
+
+
+def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
+    """(each of the strategy's classes with its module, the files that make up its code).
+    The files: every module that defines one of the classes, then every USER module those
+    name at their top level, followed through. Installed packages, the standard library
+    and plutobt itself are never followed."""
+    roots = _installed_roots()
+    owners, files, seen, queue = [], [], set(), []
     for k in _own_classes(cls):
-        try:
-            h.update(inspect.getsource(k).encode("utf-8"))
-        except (OSError, TypeError):
-            h.update(k.__qualname__.encode("utf-8"))
-            for name, value in sorted(vars(k).items()):
-                func = getattr(value, "__func__", value)
-                code = getattr(func, "__code__", None)
-                if code is not None:
-                    h.update(name.encode("utf-8") + code.co_code + repr(code.co_consts)
-                             .encode("utf-8"))
+        module = sys.modules.get(k.__module__)
+        owners.append((k, module))
+        if module is not None and id(module) not in seen:
+            seen.add(id(module))
+            queue.append((module, True))
+    while queue:
+        module, is_owner = queue.pop(0)
+        path = _source_file(module)
+        if path is not None and (is_owner or _is_user_file(path, roots)):
+            if path not in files:
+                files.append(path)
+        elif not is_owner:
+            continue                    # installed code: not hashed, not followed
+        for used in _modules_used(module):
+            if id(used) in seen:
+                continue
+            used_path = _source_file(used)
+            if used_path is not None and _is_user_file(used_path, roots):
+                seen.add(id(used))
+                queue.append((used, False))
+    return owners, files
+
+
+def code_files(cls: type) -> list[str]:
+    """The files ``code_sha256`` reads for this strategy, in hashing order."""
+    return [str(p) for p in _code_modules(cls)[1]]
+
+
+def _normalized(path: Path) -> str:
+    # Parsed and written back out, so comments, blank lines and formatting are not an
+    # edit; text that does not parse is hashed as it stands.
+    with tokenize.open(path) as fh:
+        text = fh.read()
+    try:
+        return ast.unparse(ast.parse(text))
+    except (SyntaxError, ValueError):
+        return text.replace("\r\n", "\n")
+
+
+def _class_fallback(h, k: type) -> None:
+    # A class with no file (a notebook cell, ``exec``): its own source if Python kept it,
+    # else its methods' bytecode and constants.
+    try:
+        h.update(inspect.getsource(k).encode("utf-8"))
+    except (OSError, TypeError):
+        for name, value in sorted(vars(k).items()):
+            func = getattr(value, "__func__", value)
+            code = getattr(func, "__code__", None)
+            if code is not None:
+                h.update(name.encode("utf-8") + code.co_code + repr(code.co_consts)
+                         .encode("utf-8"))
+
+
+def code_sha256(cls: type) -> str:
+    """sha256 of the strategy's code, so an edit to the logic is a new try wherever the
+    logic lives: the whole file of every module that defines one of the strategy's classes
+    (a module-level constant or a helper function counts), plus every user module those
+    files name at their top level, followed through (``code_files`` lists them). Comments
+    and formatting are not an edit. A class with no file (a notebook cell, ``exec``) falls
+    back to its own source or bytecode, so a helper edited in another notebook cell is
+    not seen."""
+    owners, files = _code_modules(cls)
+    h = hashlib.sha256()
+    for k, module in owners:
+        h.update(k.__qualname__.encode("utf-8") + b"\0")
+        if module is None or _source_file(module) is None:
+            _class_fallback(h, k)
+    for path in files:
+        h.update(_normalized(path).encode("utf-8") + b"\0")
     return h.hexdigest()
+
+
+_TRY_CONFIG = ("allow_short", "break_on", "carry_overnight", "on_margin_call")
+
+
+def config_key(config) -> dict:
+    """The config switches that change what a strategy trades, which makes them part of a
+    try. Costs are left out on purpose (a cost sweep is not a parameter sweep), and so are
+    the look-ahead check switches, which change no result."""
+    return {name: getattr(config, name) for name in _TRY_CONFIG}
 
 
 def resolved_settings(cls: type, params: dict) -> dict:
@@ -135,10 +251,10 @@ class Ledger:
         self.is_new = not self.path.exists()
 
     def record(self, strategy: str, params: dict, data_sha256: str, bars: int,
-               sharpe: float, code: str = "") -> None:
+               sharpe: float, code: str = "", config: dict | None = None) -> None:
         """Append one completed run and flush, so a crash loses at most the run in flight.
         ``params`` are the resolved settings (``resolved_settings``), ``code`` the
-        strategy's ``code_sha256``."""
+        strategy's ``code_sha256``, ``config`` its ``config_key``."""
         from plutobt import __version__
 
         plain = {k: _plain(k, v) for k, v in params.items()}
@@ -148,6 +264,7 @@ class Ledger:
             "time": datetime.now(UTC).isoformat(timespec="seconds"),
             "strategy": strategy,
             "code_sha256": code,
+            "config": dict(sorted((config or {}).items())),
             "params": dict(sorted(plain.items())),
             "data_sha256": data_sha256,
             "bars": int(bars),
@@ -185,12 +302,24 @@ class Ledger:
 
     def tries(self, strategy: str, data_sha256: str) -> dict[str, float]:
         """Every distinct try ever recorded for ``strategy`` on these bars, keyed by
-        ``try_key`` (code version plus settings) and mapped to its latest per-bar Sharpe
-        (NaN for a run with no return volatility)."""
+        ``try_key`` (code version, settings, config switches) and mapped to its latest
+        per-bar Sharpe (NaN for a run with no return volatility). A line 3.0.0 wrote has
+        no config and reads as a try of its own."""
         out: dict[str, float] = {}
         for line in self._lines():
             if line["strategy"] == strategy and line["data_sha256"] == data_sha256:
                 s = line["sharpe"]
-                key = try_key(line["params"], line["code_sha256"])
+                key = try_key(line["params"], line["code_sha256"], line.get("config"))
                 out[key] = float("nan") if s is None else float(s)
         return out
+
+    def tries_on_other_bars(self, strategy: str, data_sha256: str) -> int:
+        """How many distinct tries the file holds for ``strategy`` on any OTHER bars. N
+        never counts them (different bars are a different question), but a report that
+        says nothing would hide twenty tries behind one new bar."""
+        seen = set()
+        for line in self._lines():
+            if line["strategy"] == strategy and line["data_sha256"] != data_sha256:
+                seen.add((line["data_sha256"],
+                          try_key(line["params"], line["code_sha256"], line.get("config"))))
+        return len(seen)

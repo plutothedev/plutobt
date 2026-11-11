@@ -399,3 +399,33 @@ def frame_sha256(df: pd.DataFrame) -> str:
     # differently on Windows and Linux.
     raw = df.to_csv(index=False, lineterminator=chr(10)).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+_BARS_NUMBERS = ("open", "high", "low", "close", "volume", "adj_offset", "raw_close")
+_BARS_ORDER = ("ts", "open", "high", "low", "close", "volume", "session", "contract",
+               "adj_offset", "raw_close")
+
+
+def bars_sha256(df: pd.DataFrame) -> str:
+    """sha256 of the bars by CONTENT: only the columns the engine reads, in one fixed
+    order, numbers as float64 and ``ts`` as int64. The same bars with volume stored as
+    floats, an extra column or the columns reordered hash the same, which
+    ``frame_sha256`` (the exact frame, format included) does not. The study ledger keys
+    its tries by this. A frame this cannot canonicalize (the engine will refuse it
+    anyway) falls back to ``frame_sha256``."""
+    try:
+        cols = {}
+        for name in _BARS_ORDER:
+            if name not in df.columns:
+                continue
+            col = df[name]
+            if name == "ts":
+                col = col.astype("int64")
+            elif name in _BARS_NUMBERS:
+                col = col.astype("float64")
+            cols[name] = col.to_numpy()
+        if "ts" not in cols:
+            return frame_sha256(df)
+        return frame_sha256(pd.DataFrame(cols))
+    except (TypeError, ValueError):
+        return frame_sha256(df)
