@@ -148,6 +148,9 @@ def _is_user_file(path: Path, roots: tuple[Path, ...]) -> bool:
     return not any(path == root or root in path.parents for root in roots)
 
 
+_BUILTIN_WRAPPERS = ("builtins", "functools")
+
+
 def _modules_held(module) -> list[str]:
     """Names of the modules a loaded module's top level holds: modules themselves, and
     the home modules of the functions, classes and objects found there. This catches what
@@ -167,6 +170,14 @@ def _modules_held(module) -> list[str]:
                 name = type.__getattribute__(value, "__module__")
             else:
                 name = type.__getattribute__(kind, "__module__")
+                if name in _BUILTIN_WRAPPERS:
+                    # A bound method, a staticmethod, an lru_cache wrapper: a built-in
+                    # type around one of the user's functions. Its own __module__ is
+                    # that function's, and reading it runs none of the user's code.
+                    inner = getattr(value, "__module__", None)
+                    if not isinstance(inner, str):
+                        inner = getattr(getattr(value, "__func__", None), "__module__", None)
+                    name = inner if isinstance(inner, str) else name
         except Exception:
             continue
         if isinstance(name, str) and name:
@@ -201,9 +212,10 @@ def _find_on_disk(parts: list[str], locations: list[str], name: str) -> tuple[Pa
     """Follow ``parts`` down from ``locations`` by Python's standard file rules (a package
     folder, then a module file, in each location in turn; a bare folder is a namespace
     package), reading only the file system. (file, package) of what is found. It knows
-    folders and ``.py`` files only: a module that an import hook, a zip file, a
-    sourceless ``.pyc`` or a ``__path__`` edited at run time would supply is not found
-    here, and is seen once it has been imported."""
+    folders and ``.py`` files only. A module that an import hook or a ``__path__`` edited
+    at run time would supply is not found here, and is seen once it has been imported.
+    One that lives in a zip file or exists only as a ``.pyc`` has no source file and is
+    never hashed (a same-named ``.py`` later on the path can be read in its place)."""
     for i, part in enumerate(parts):
         last = i == len(parts) - 1
         hit, folders = None, []
@@ -278,8 +290,9 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     import statements to read, and ``from params import THRESH`` leaves only a number
     behind, so for it every user module the session has loaded counts. Installed
     packages, the standard library and plutobt itself are never followed. Nothing is
-    imported to do this, no lazily loaded module is woken, and no attribute is read from
-    the user's own objects (only from their types)."""
+    imported to do this and no lazily loaded module is woken. From the user's own objects
+    only the home module of their type is read, so a proxy is not triggered (a metaclass
+    that makes ``__module__`` a property is the one way user code can still run)."""
     roots = _installed_roots()
     owners, owner_files, other_files = [], [], set()
     seen: set[Path] = set()

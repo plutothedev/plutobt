@@ -571,3 +571,35 @@ def test_hashing_reads_nothing_from_the_users_objects(layout):
     module.TOUCHED.clear()
     assert len(code_sha256(cls)) == 64
     assert module.TOUCHED == []
+
+
+# --- final re-review of 3.0.1: built-in wrappers around the user's functions ------------------
+
+@pytest.mark.parametrize("held", [
+    "importlib.import_module('svc_{tag}').Service().handle",        # a bound method
+    "importlib.import_module('svc_{tag}').Service.make",            # a bound classmethod
+    "importlib.import_module('svc_{tag}').cached",                  # an lru_cache wrapper
+    "staticmethod(importlib.import_module('svc_{tag}').plain)",     # a staticmethod object
+])
+def test_a_builtin_wrapper_around_a_user_function_still_leads_to_its_file(layout, held):
+    """Reading only an object's type lost these: their type is builtins or functools, and
+    no import statement names the module (it came from importlib)."""
+    def version(cut):
+        return layout({
+            "svc_{tag}.py": "import functools\n"
+                            f"CUT = {cut}\n"
+                            "class Service:\n"
+                            "    def handle(self):\n        return CUT\n"
+                            "    @classmethod\n"
+                            "    def make(cls):\n        return cls()\n"
+                            "@functools.lru_cache\n"
+                            "def cached():\n    return CUT\n"
+                            "def plain():\n    return CUT\n",
+            "strat_{tag}.py": "import importlib\n"
+                              "from plutobt.strategy import Strategy\n"
+                              f"thing = {held}\n" + BODY,
+        }, "strat_{tag}")
+
+    cls = version(1)
+    assert any("svc_" in f for f in code_files(cls))
+    assert code_sha256(cls) != code_sha256(version(2))
