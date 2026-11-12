@@ -26,4 +26,4 @@ def test_overfit_example_runs(tmp_path):
     assert done.stdout.startswith("=== PlutoBT study: EMACross on NQ, 6 settings ===")
     assert "N = 6 (new ledger)" in done.stdout
     assert (tmp_path / "trials.jsonl").exists()
-    assert "⚠ winner changed" in done.stdout     # the warning sign survives, in UTF-8
+    assert "WARNING: winner changed" in done.stdout

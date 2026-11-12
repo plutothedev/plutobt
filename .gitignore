@@ -6,3 +6,6 @@ venv/
 examples/output/
 *.egg-info/
 .plutobt/
+# written by the README's continuous-contract command
+/nq_cont.csv
+/nq_cont.roll.json

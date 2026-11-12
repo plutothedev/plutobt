@@ -1,6 +1,7 @@
 """run_study (3.0 spec §6): the grid, the ledger count, Deflated Sharpe, PBO and the
 out-of-sample blocks, end to end on synthetic bars."""
 import json
+import math
 import re
 
 import numpy as np
@@ -8,7 +9,14 @@ import pytest
 
 from plutobt.config import BacktestConfig
 from plutobt.instruments import get_instrument
-from plutobt.ledger import Ledger, code_sha256, resolved_settings, strategy_id, try_key
+from plutobt.ledger import (
+    Ledger,
+    code_sha256,
+    config_key,
+    resolved_settings,
+    strategy_id,
+    try_key,
+)
 from plutobt.study import StudyResult, expand_grid, run_study
 from tests.study_fixtures import CFG, Coin, Crashes, Hold, NeedsArgs, walk
 
@@ -59,7 +67,7 @@ def test_crash_stops_and_names_the_setting(tmp_path):
 def test_every_completed_run_is_recorded(tmp_path):
     res = study(walk(600, drift=0.3), Hold, {"side": [1, -1, 0]}, tmp_path)
     led = Ledger(tmp_path / "trials.jsonl")
-    assert len(led.tries(strategy_id(Hold), res.data_sha256)) == 3
+    assert len(led.tries(strategy_id(Hold), res.bars_sha256)) == 3
     assert res.n_this == 3 and res.n_earlier == 0 and res.ledger_new
 
 
@@ -123,9 +131,9 @@ def test_noise_end_to_end(tmp_path):
 def test_deflation_reads_the_ledger_spread(tmp_path):
     df = walk(600, drift=0.3)
     res = study(df, Hold, {"side": [1, -1]}, tmp_path)
-    tries = Ledger(tmp_path / "trials.jsonl").tries(strategy_id(Hold), res.data_sha256)
+    tries = Ledger(tmp_path / "trials.jsonl").tries(strategy_id(Hold), res.bars_sha256)
     assert res.deflation["var_sr"] == pytest.approx(np.var(list(tries.values())))
-    key = try_key(resolved_settings(Hold, {"side": 1}), code_sha256(Hold))
+    key = try_key(resolved_settings(Hold, {"side": 1}), code_sha256(Hold), config_key(CFG))
     assert tries[key] == pytest.approx(res.grid.sharpe.iloc[0])
 
 
@@ -186,3 +194,60 @@ def test_huge_grid_refused_before_expansion(tmp_path):
     grid = {"seed": list(range(100_000)), "bias": [x / 100_000 for x in range(100_000)]}
     with pytest.raises(ValueError, match=r"10,000,000,000 settings.*max_configs"):
         run_study(Coin, grid, walk(600), NQ, CFG, ledger=False)
+
+
+# --- 3.0.1, audit finding 4: too few active bars -------------------------------------------
+
+def _sparse_study(every, tmp_path):
+    from tests.study_fixtures import Sparse
+
+    return run_study(Sparse, {"every": [every], "phase": [5, 6]}, walk(1800, drift=0.3), NQ,
+                     CFG, ledger=False, wf_splits=2, cv_folds=2, blocks=2)
+
+
+def test_a_rarely_trading_best_setting_is_not_judged(tmp_path):
+    res = _sparse_study(150, tmp_path)
+    best = int(np.nanargmax(res.grid.sharpe))
+    active = int(np.count_nonzero(res.returns.iloc[:, best]))
+    assert active < 30
+    assert res.deflation["active_bars"] == active
+    assert res.deflation["verdict"] == \
+        f"not judged: only {active} bars with a non-zero return (it takes 30)"
+    assert math.isfinite(res.deflation["dsr"])           # the number still prints
+
+
+def test_a_sometimes_trading_best_setting_keeps_its_verdict(tmp_path):
+    res = _sparse_study(40, tmp_path)
+    assert 30 <= res.deflation["active_bars"] < 100
+    assert not res.deflation["verdict"].startswith("not judged")
+
+
+def test_an_always_in_setting_counts_every_moving_bar(tmp_path):
+    res = study(walk(600, drift=0.3), Hold, {"side": [1, -1]}, tmp_path)
+    assert res.deflation["active_bars"] > 500
+
+
+# --- 3.0.1, audit finding 5: settings that do nothing --------------------------------------
+
+def test_a_grid_of_settings_that_do_nothing_gets_no_pbo(tmp_path):
+    from tests.study_fixtures import Inert
+
+    res = run_study(Inert, {"dummy": [0, 1, 2]}, walk(600, drift=0.3), NQ, CFG, ledger=False)
+    assert res.pbo is None
+    assert res.pbo_note == "every setting produced the same returns: the grid's settings " \
+                           "do nothing, so there is nothing to choose between"
+
+
+def test_identical_settings_inside_a_grid_are_collapsed_for_pbo(tmp_path):
+    from tests.study_fixtures import Inert
+
+    res = run_study(Inert, {"side": [1, -1], "dummy": [0, 1]}, walk(600, drift=0.3), NQ, CFG,
+                    ledger=False)
+    assert res.pbo.collapsed == 2
+    assert res.pbo_note is None
+
+
+def test_one_setting_has_its_own_pbo_note(tmp_path):
+    res = run_study(Hold, {"side": [1]}, walk(600, drift=0.3), NQ, CFG, ledger=False)
+    assert res.pbo is None
+    assert res.pbo_note == "one setting, so there is nothing to choose between"

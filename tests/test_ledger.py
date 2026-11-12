@@ -122,8 +122,8 @@ def test_line_has_exactly_the_schema_keys(tmp_path):
     p = tmp_path / "t.jsonl"
     Ledger(p).record(STRAT, {"fast": np.int64(10)}, DATA, 1000, 0.05)
     line = json.loads(p.read_text(encoding="utf-8"))
-    assert set(line) == {"v", "time", "strategy", "code_sha256", "params", "data_sha256",
-                         "bars", "sharpe", "plutobt"}
+    assert set(line) == {"v", "time", "strategy", "code_sha256", "config", "params",
+                         "data_sha256", "bars", "sharpe", "plutobt"}
     assert line["v"] == 1 and line["params"] == {"fast": 10}
     assert line["plutobt"] == plutobt.__version__
     assert line["time"].endswith("+00:00")

@@ -256,7 +256,7 @@ def test_report_flags_loudly_when_the_sharpe_ci_includes_zero():
     res = _fake_result()
     res.metrics["sharpe_ci"] = (-0.50, 2.97)
     text = format_report(res, symbol="NQ")
-    assert "⚠ " + flag in text
+    assert "WARNING: " + flag in text
 
 
 @pytest.mark.parametrize(
@@ -490,7 +490,7 @@ def test_expectancy_shows_its_unit():
 def test_low_sample_warning_names_every_trade_based_stat():
     res = _fake_result()
     res.metrics["n_trades"] = 5
-    warn = _line(format_report(res, symbol="NQ"), "⚠ insufficient sample")
+    warn = _line(format_report(res, symbol="NQ"), "WARNING: insufficient sample")
     for stat in ("profit factor", "expectancy", "win rate", "Avg R"):
         assert stat in warn, stat
 

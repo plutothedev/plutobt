@@ -39,3 +39,39 @@ def test_cli_refusal_exit_code(tmp_path, capsys):
     assert code == 2
     err = capsys.readouterr().err
     assert "CL" in err and "Traceback" not in err
+
+
+# --- 3.0.1 (audit minors): plain messages for the first mistakes -----------------------------
+
+def _refused(capsys, argv):
+    code = main(argv)
+    out, err = capsys.readouterr()
+    assert code == 2 and out == "" and err.startswith("continuous: ")
+    assert "WinError" not in err and "Errno" not in err and "Traceback" not in err
+    return err
+
+
+def test_a_folder_that_does_not_exist(tmp_path, capsys):
+    err = _refused(capsys, [str(tmp_path / "nope"), "--preset", "generic", "--root", "NQ",
+                            "--ts-is", "open", "-o", str(tmp_path / "o.csv")])
+    assert "does not exist" in err and "nope" in err
+
+
+def test_a_file_given_as_the_folder(tmp_path, capsys):
+    one = next(DIR.glob("*.csv"))
+    err = _refused(capsys, [str(one), "--preset", "generic", "--root", "NQ", "--ts-is", "open",
+                            "-o", str(tmp_path / "o.csv")])
+    assert "is a file, not a folder" in err and "one CSV per contract" in err
+
+
+def test_trigger_dates_without_roll_dates_names_the_flag(tmp_path, capsys):
+    err = _refused(capsys, [str(DIR), "--preset", "generic", "--root", "NQ", "--ts-is", "open",
+                            "--trigger", "dates", "-o", str(tmp_path / "o.csv")])
+    assert "--trigger dates needs --roll-dates" in err
+
+
+def test_a_roll_dates_file_that_does_not_exist(tmp_path, capsys):
+    err = _refused(capsys, [str(DIR), "--preset", "generic", "--root", "NQ", "--ts-is", "open",
+                            "--trigger", "dates", "--roll-dates", str(tmp_path / "no.json"),
+                            "-o", str(tmp_path / "o.csv")])
+    assert "--roll-dates" in err and "does not exist" in err

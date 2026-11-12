@@ -60,6 +60,21 @@ def _num(value) -> str:
     return repr(float(value))
 
 
+def missing_column_hint(df: pd.DataFrame, name: str) -> str:
+    """What to add after "the frame has no '<name>' column": the columns it does have, and
+    the fix when the cause is a capitalised name or a datetime index."""
+    cols = [str(c) for c in df.columns]
+    out = f" (it has: {', '.join(cols) if cols else 'no columns'}"
+    twin = next((c for c in cols if c.lower() == name and c != name), None)
+    if twin is not None:
+        out += (f"; {twin!r} looks like {name!r}: column names are lower case, e.g. "
+                "df.columns = df.columns.str.lower()")
+    elif name == "ts" and isinstance(df.index, pd.DatetimeIndex):
+        out += ("; its index holds datetimes: the engine reads a 'ts' column of whole "
+                "unix seconds, not the index")
+    return out + ")"
+
+
 def ohlcv_problem(df: pd.DataFrame) -> str | None:
     """The first problem with a frame's base bar values, naming row and column; None if
     there is none. open, high, low and close must be present; they and volume (when
@@ -73,7 +88,7 @@ def ohlcv_problem(df: pd.DataFrame) -> str | None:
 
     for col in _PRICE_COLS:
         if col not in df.columns:
-            return f"the frame has no {col!r} column"
+            return f"the frame has no {col!r} column" + missing_column_hint(df, col)
     for col in (*_PRICE_COLS, "volume"):
         if col not in df.columns:
             continue
@@ -113,7 +128,13 @@ def load_bars(path: str) -> pd.DataFrame:
     max(open, close)), so a file that loads is one Engine.run can fill against.
     """
     with open(path, encoding="utf-8") as fh:
-        rows = json.load(fh)
+        try:
+            rows = json.load(fh)
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"{str(path)!r} is not JSON ({err.msg}, line {err.lineno}): load_bars reads "
+                "PlutoBT's JSON bars, an array of [ts, open, high, low, close, volume]; "
+                "for a vendor CSV use load_csv") from None
     if not isinstance(rows, list):
         raise ValueError(
             f"expected a JSON array of bars in {path!r}, got {type(rows).__name__}"
@@ -328,7 +349,7 @@ def assert_positive_prices(df: pd.DataFrame) -> None:
             raise ValueError(
                 f"non-positive price in column '{col}' at row {row} "
                 f"(value={val!r}); percentage/log returns are undefined on "
-                f"non-positive prices (§5.6). Use points/dollar P&L instead."
+                f"non-positive prices. Use points/dollar P&L instead."
             )
 
 
@@ -399,3 +420,33 @@ def frame_sha256(df: pd.DataFrame) -> str:
     # differently on Windows and Linux.
     raw = df.to_csv(index=False, lineterminator=chr(10)).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+_BARS_NUMBERS = ("open", "high", "low", "close", "volume", "adj_offset", "raw_close")
+_BARS_ORDER = ("ts", "open", "high", "low", "close", "volume", "session", "contract",
+               "adj_offset", "raw_close")
+
+
+def bars_sha256(df: pd.DataFrame) -> str:
+    """sha256 of the bars by CONTENT: only the columns the engine reads, in one fixed
+    order, numbers as float64 and ``ts`` as int64. The same bars with volume stored as
+    floats, an extra column or the columns reordered hash the same, which
+    ``frame_sha256`` (the exact frame, format included) does not. The study ledger keys
+    its tries by this. A frame this cannot canonicalize (the engine will refuse it
+    anyway) falls back to ``frame_sha256``."""
+    try:
+        cols = {}
+        for name in _BARS_ORDER:
+            if name not in df.columns:
+                continue
+            col = df[name]
+            if name == "ts":
+                col = col.astype("int64")
+            elif name in _BARS_NUMBERS:
+                col = col.astype("float64")
+            cols[name] = col.to_numpy()
+        if "ts" not in cols:
+            return frame_sha256(df)
+        return frame_sha256(pd.DataFrame(cols))
+    except (TypeError, ValueError):
+        return frame_sha256(df)

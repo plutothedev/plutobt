@@ -29,7 +29,7 @@ import pandas as pd
 from plutobt.engine import Engine
 from plutobt.metrics import psr, sharpe, sharpe_stats
 from plutobt.portfolio import RollEvent
-from plutobt.splits import MIN_BARS, purged_folds, walk_forward_windows
+from plutobt.splits import MIN_BARS, purged_folds, walk_forward_windows, whole
 
 _START = 100_000.0
 
@@ -41,12 +41,18 @@ class WindowRun:
     open_at_end: bool             # a position was still open on bar b
     exit_charge: float            # one exit side charged when open_at_end, else 0
     rolls: list[RollEvent] = field(default_factory=list)
+    margin_calls: int = 0         # margin calls the rerun hit
+    margin_refusals: int = 0      # orders its margin check refused or cut
+    max_contracts: int = 0        # the largest position it held, in contracts
+    held: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
+    #                               contracts held at each bar's close, bars a..b
 
 
 @dataclass
 class WalkForward:
     windows: list[dict]           # train, test, params, is_sharpe, oos_sharpe, open_at_end,
-    #                               pnl, exit_charge
+    #                               pnl, exit_charge, margin_calls, margin_refusals,
+    #                               below_margin, margin_low
     equity: pd.Series             # stitched out-of-sample equity from the starting cash
     sharpe: float                 # per bar, out-of-sample
     sharpe_ann: float
@@ -55,6 +61,13 @@ class WalkForward:
     open_windows: int
     winner_changed: bool
     is_sharpe_mean: float         # per bar: mean in-sample Sharpe of the picks
+    # Every window is rerun flat from the same starting cash, so its sizing and margin
+    # checks do not follow the stitched curve. These say when that mattered.
+    margin_calls: int = 0         # margin calls inside the reruns, all windows
+    margin_refusals: int = 0      # orders the reruns' margin checks refused or cut
+    below_margin_windows: int = 0  # windows where the stitched curve was under the initial
+    #                                margin of the contracts held at that bar
+    below_margin_low: float = float("nan")   # the lowest such level, NaN when none
 
 
 @dataclass
@@ -64,6 +77,8 @@ class PurgedCV:
     spread: float                 # population std of the fold Sharpes
     embargo: int
     capped: bool = False          # the default embargo was cut short to keep training rows
+    margin_calls: int = 0         # margin calls inside the folds' reruns
+    margin_refusals: int = 0      # orders their margin checks refused or cut
 
 
 def _build(strategy_cls, params: dict):
@@ -101,6 +116,9 @@ def rerun_window(strategy_cls, params: dict, df: pd.DataFrame, instrument, confi
     res = Engine(instrument, config).run(cut, _build(strategy_cls, params), roll_meta=meta,
                                          trade_from_ts=start_ts)
     equity = res.equity_curve.iloc[a: b + 1]
+    # The engine's own position at each bar's close. It cannot be rebuilt from the
+    # trades: a pyramid is one Trade entered at its first fill, a scale-out is several.
+    held = np.abs(res.position.iloc[a: b + 1].to_numpy())
     last = res.trades[-1] if res.trades else None
     open_at_end = bool(last is not None and last.open_at_end)
     charge = 0.0
@@ -109,7 +127,10 @@ def rerun_window(strategy_cls, params: dict, df: pd.DataFrame, instrument, confi
             else instrument.slippage_ticks
         charge = last.contracts * (config.commission_per_side + slip * instrument.tick_value)
     return WindowRun(pnl=float(equity.iloc[-1] - equity.iloc[0]), equity=equity,
-                     open_at_end=open_at_end, exit_charge=float(charge), rolls=list(res.rolls))
+                     open_at_end=open_at_end, exit_charge=float(charge), rolls=list(res.rolls),
+                     margin_calls=len(res.margin_calls),
+                     margin_refusals=int(res.margin_refusals),
+                     max_contracts=int(held.max()) if held.size else 0, held=held)
 
 
 def _charged(run: WindowRun) -> np.ndarray:
@@ -140,13 +161,24 @@ def walk_forward(ctx, splits: int, anchored: bool) -> WalkForward:
                 "can be picked; use fewer windows or a longer history")
         run, eq, oos_sr = _test_block(ctx, idx, test)
         steps = np.diff(eq)
-        values.extend(level + np.cumsum(steps))
+        stitched = level + np.cumsum(steps)
+        # Bar by bar: where the one stitched account stood through each bar (its close
+        # and the close before it, which is what the bar's open fill met) against the
+        # initial margin of the contracts held at that bar.
+        needed = run.held[1:] * float(ctx.instrument.initial_margin)
+        through = np.minimum(np.r_[level, stitched[:-1]], stitched)
+        short = (run.held[1:] > 0) & (through < needed)
+        below = bool(short.any())
+        margin_low = float(through[short].min()) if below else float("nan")
+        values.extend(stitched)
         level = values[-1]
         index.extend(run.equity.index[1:])
         windows.append({"train": train, "test": test, "params": dict(ctx.settings[idx]),
                         "is_sharpe": is_sr, "oos_sharpe": oos_sr,
                         "open_at_end": run.open_at_end, "pnl": run.pnl,
-                        "exit_charge": run.exit_charge})
+                        "exit_charge": run.exit_charge, "margin_calls": run.margin_calls,
+                        "margin_refusals": run.margin_refusals, "below_margin": below,
+                        "margin_low": margin_low})
     equity = pd.Series(values, index=pd.Index(index, name="ts"), dtype=float)
     full = np.r_[_START, equity.to_numpy()]
     returns = pd.Series(full[1:] / full[:-1] - 1.0)
@@ -157,7 +189,12 @@ def walk_forward(ctx, splits: int, anchored: bool) -> WalkForward:
         sharpe_ann=float(stats["sharpe"]), sharpe_se=float(stats["sharpe_se"]),
         psr=float(psr(returns)), open_windows=sum(w["open_at_end"] for w in windows),
         winner_changed=len(keys) > 1,
-        is_sharpe_mean=float(np.mean([w["is_sharpe"] for w in windows])))
+        is_sharpe_mean=float(np.mean([w["is_sharpe"] for w in windows])),
+        margin_calls=sum(w["margin_calls"] for w in windows),
+        margin_refusals=sum(w["margin_refusals"] for w in windows),
+        below_margin_windows=sum(w["below_margin"] for w in windows),
+        below_margin_low=min((w["margin_low"] for w in windows if w["below_margin"]),
+                             default=float("nan")))
 
 
 def longest_trade_bars(ctx) -> int:
@@ -193,7 +230,7 @@ def purged_cv(ctx, folds: int, embargo: int | None) -> PurgedCV:
         embargo = max(1, min(longest, most))
         capped = embargo < longest
     else:
-        embargo = int(embargo)
+        embargo = whole("embargo_bars", embargo)
     out, sharpes = [], []
     for k, (train, test) in enumerate(purged_folds(len(ctx.returns), folds, embargo)):
         idx, _ = _pick(ctx.returns, train)
@@ -201,9 +238,13 @@ def purged_cv(ctx, folds: int, embargo: int | None) -> PurgedCV:
             raise ValueError(
                 f"no setting traded in the training rows of CV fold {k + 1}: every setting "
                 "is flat there, so nothing can be picked")
-        _, _, oos_sr = _test_block(ctx, idx, test)
+        run, _, oos_sr = _test_block(ctx, idx, test)
         sharpes.append(oos_sr)
         out.append({"test": test, "params": dict(ctx.settings[idx]), "oos_sharpe": oos_sr,
-                    "not_real_time": bool(train.max() >= test.stop)})
+                    "not_real_time": bool(train.max() >= test.stop),
+                    "margin_calls": run.margin_calls,
+                    "margin_refusals": run.margin_refusals})
     return PurgedCV(folds=out, sharpes=sharpes, spread=float(np.std(sharpes)),
-                    embargo=embargo, capped=capped)
+                    embargo=embargo, capped=capped,
+                    margin_calls=sum(f["margin_calls"] for f in out),
+                    margin_refusals=sum(f["margin_refusals"] for f in out))

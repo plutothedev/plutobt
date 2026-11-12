@@ -23,6 +23,7 @@ from plutobt.config import BacktestConfig
 from plutobt.data import (
     assert_positive_prices,
     frame_sha256,
+    missing_column_hint,
     ohlcv_problem,
     ts_unit_problem,
 )
@@ -64,6 +65,10 @@ class BacktestResult:
     margin_refusals: int = 0
     # Rolls of an open position on a continuous series (2.0 §7.2), in bar order.
     rolls: list[RollEvent] = field(default_factory=list)
+    # Signed contracts held at each bar's close (3.0.1), on the equity curve's index. The
+    # trades cannot give this: a position built in several fills is one Trade entered at
+    # the first fill, and one sold in pieces is several.
+    position: pd.Series = field(default_factory=lambda: pd.Series(dtype="int64"))
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +112,19 @@ _SESSION_RULE = (
     "bar: a number that never decreases (e.g. the CME trading day as an int YYYYMMDD), "
     "not RTH/ETH labels"
 )
+
+
+def _precompute(strategy, frame: pd.DataFrame) -> pd.DataFrame:
+    """``strategy.precompute(frame)``, refusing a return that is not a frame: forgetting
+    ``return df`` is the commonest first mistake, and it used to surface as
+    ``'NoneType' object has no attribute 'reset_index'``."""
+    out = strategy.precompute(frame)
+    if not isinstance(out, pd.DataFrame):
+        got = "None" if out is None else f"a {type(out).__name__}"
+        raise FrameError(
+            f"{type(strategy).__name__}.precompute returned {got}, not the bars: it must "
+            "end with `return df` (the frame it was given, with its new columns added)")
+    return out
 
 
 def _time_problem(frame: pd.DataFrame) -> str | None:
@@ -447,6 +465,9 @@ class Engine:
             exists before it and equity stays at the starting cash. The study tools use
             it to rerun a setting flat inside one test window. ``None`` is a plain run.
         """
+        if isinstance(strategy, type):
+            raise TypeError(
+                f"pass a strategy instance, not the class: {strategy.__name__}()")
         self._check_config()
         self._check_frame(df, precomputed=False)       # the caller's own frame
         self._check_roll_meta(df, roll_meta)
@@ -478,11 +499,11 @@ class Engine:
             classes = _class_state(strategy)
             traded = copy.deepcopy(snapshot)
             own = _state(getattr(traded, "__dict__", {}))
-            data = traded.precompute(df.copy()).reset_index(drop=True)
+            data = _precompute(traded, df.copy()).reset_index(drop=True)
             _refuse_class_changes(classes)
             _warn_set_attributes(own, traded, snapshot)
         else:
-            data = strategy.precompute(df.copy()).reset_index(drop=True)
+            data = _precompute(strategy, df.copy()).reset_index(drop=True)
         self._check_frame(data, precomputed=True)      # what the strategy made of it
         self._check_precompute_kept_the_bars(df, data)
         if self.config.check_causality:
@@ -519,6 +540,7 @@ class Engine:
 
         equity_index: list[int] = []
         equity_vals: list[float] = []
+        position_vals: list[int] = []
         margin_calls: list[MarginCall] = []
         liquidate = self.config.on_margin_call == "liquidate"
         breach_qty: int | None = None    # the position the open breach was called on
@@ -583,6 +605,7 @@ class Engine:
             portfolio.mark(float(bar.close))
             equity_index.append(int(bar.ts))
             equity_vals.append(portfolio.equity(float(bar.close)))
+            position_vals.append(int(portfolio.position.qty))
 
             # §5.2: maintenance is the floor, checked on the book marked at close t.
             call = portfolio.margin_call(ts=int(bar.ts))
@@ -616,6 +639,7 @@ class Engine:
             margin_calls=margin_calls,
             margin_refusals=len(broker._margin_refused),
             rolls=rolls,
+            position=pd.Series(position_vals, index=equity_curve.index, dtype="int64"),
         )
 
     def _check_causality(self, df: pd.DataFrame, strategy: Strategy, snapshot: Strategy,
@@ -690,6 +714,10 @@ class Engine:
                 continue
             if precomputed:
                 raise FrameError(f"the strategy's precompute {what}: {problem}. {rule}")
+            if "ts" not in frame.columns:
+                # the caller's own frame: say what it does hold (capitalised names and a
+                # datetime index are the usual causes)
+                problem += missing_column_hint(frame, "ts")
             raise ValueError(f"{rule}; {problem}")
 
     @staticmethod
@@ -835,6 +863,10 @@ class Engine:
         the bar whose ts is ``trade_from_ts`` (refused when no bar has it)."""
         if trade_from_ts is None:
             return 0
+        if isinstance(trade_from_ts, bool) or not isinstance(trade_from_ts, numbers.Real):
+            raise ValueError(
+                "trade_from_ts must be the ts of a bar: a whole number of unix seconds, "
+                f"got {trade_from_ts!r} ({type(trade_from_ts).__name__})")
         ts = df["ts"].to_numpy()
         hits = (ts == trade_from_ts).nonzero()[0]
         if hits.size == 0:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from plutobt.contracts import ContractSet
 from plutobt.importers import PRESETS
@@ -45,6 +46,20 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        # The first mistakes, said plainly (they used to surface as raw OS error text or
+        # as a refusal that never named the flag).
+        folder = Path(args.folder)
+        if folder.is_file():
+            raise ValueError(f"{args.folder!r} is a file, not a folder: pass the folder "
+                             "that holds one CSV per contract")
+        if not folder.is_dir():
+            raise ValueError(f"the folder {args.folder!r} does not exist")
+        if args.trigger == "dates" and not args.roll_dates:
+            raise ValueError("--trigger dates needs --roll-dates (a JSON file mapping "
+                             'each outgoing contract to its roll day, e.g. {"CLZ5": '
+                             '"2025-11-14"})')
+        if args.roll_dates and not Path(args.roll_dates).is_file():
+            raise ValueError(f"the --roll-dates file {args.roll_dates!r} does not exist")
         load_kwargs = {"tz": args.tz, "ts_is": args.ts_is}
         if args.ts_format:
             load_kwargs["ts_format"] = args.ts_format

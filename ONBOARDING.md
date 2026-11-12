@@ -24,7 +24,7 @@ Everything is **futures-accurate, not stock-approximate**:
 ## 4. Repo map
 ```
 plutobt/
-├─ src/plutobt/          ← the engine (12 modules)
+├─ src/plutobt/          ← the engine (the engine, data, rolls and the 3.0 overfitting tools)
 ├─ tests/                ← the test suite, one file per module (plus property and sample-data tests)
 ├─ examples/run_demo.py  ← the end-to-end demo (the "video payoff")
 ├─ scripts/              ← gen_sample.py (synthetic data), freeze_golden.py
@@ -88,7 +88,7 @@ class EMACross(Strategy):
 
 ## 8. How to run it
 ```bash
-pip install -e ".[dev]"           # Python 3.11+
+pip install -e ".[dev]"           # Python 3.11 or 3.12
 python examples/run_demo.py       # runs EMACross on NQ, ES, CL → 3 reports
 pytest -q                         # full suite + golden-run regression (pytest --slow adds the look-ahead property sweep)
 python scripts/freeze_golden.py   # re-freeze golden after a deliberate change
@@ -96,13 +96,15 @@ python scripts/freeze_golden.py   # re-freeze golden after a deliberate change
 The demo is the thesis in code: **same engine + strategy, swap symbol & cost config → costs do NOT auto-carry.** Proves generalization without pretending costs are universal.
 
 ## 9. Two gotchas a newcomer will hit
-1. **Reports are labeled IN-SAMPLE on purpose.** No out-of-sample split in v1. The honesty defense (and the video) depends on *not* secretly parameter-sweeping off-camera. Don't "tune until it looks good."
+1. **A single run is labeled IN-SAMPLE on purpose.** `Engine.run` has no out-of-sample split. Since 3.0, `run_study` is how you search settings honestly: it counts every try and reports walk-forward and purged-CV results labeled OUT-OF-SAMPLE. The honesty defense (and the video) depends on *not* secretly parameter-sweeping off-camera. Don't "tune until it looks good."
 2. **`parse_price` requires exactly-3-digit 32nds** (`"110'085"` works, `"110'08"` raises). Resolves a contradiction in the build plan. Harmless in practice — the real data path is decimal floats; 32nds strings are a display/edge case.
 
 ## 10. Status
 **v1 is complete; pre-film audit fixes landed 2026-11-02.** A pre-film audit found and fixed look-ahead in the equity curve, entry-bar stops, margin calls that never ran, scale-in margin, stale stops after flips, allow_short, overnight exits, the look-ahead check itself (now run by `Engine.run`, verified by a randomized property sweep), off-session sample data, and report honesty (CI and PSR on the same skew/kurtosis-adjusted basis). Every fix was reviewed by an independent agent with executable probes.
 
 **2.0 (2026-11): continuous contracts.** `importers.py` reads vendor CSVs (Databento, TradingView, NinjaTrader, generic); `contracts.py` parses contract codes, holds CME's equity-index roll calendar (the Monday before the third Friday) and validates a `ContractSet`; `roll.py` picks roll bars (calendar, volume or your dates), back-adjusts additively in whole ticks and pins the series with a `RollMeta`; `python -m plutobt.continuous` does it from a folder. `Engine.run(df, strategy, roll_meta=meta)` books a `RollEvent` with real roll cost when the contract changes under a position, and warns (`PriceLevelWarning`) on signals that read absolute price levels. Proof: `tests/test_roll_reconciliation.py` reconciles the engine with an independent raw-contract simulator to the tick.
+
+**3.0 (2026-11): did you overfit?** `deflation.py` holds the luck bar and the Deflated Sharpe (`python -m plutobt.deflate` is the no-code command); `ledger.py` counts every try in `.plutobt/trials.jsonl`; `pbo.py`, `oos.py` and `splits.py` hold the Probability of Backtest Overfitting, walk-forward and purged CV; `study.py`'s `run_study` runs a grid once and reports all four. 3.0.1 fixed what a post-release audit found: a try now covers the strategy's whole file and your helper modules, the config switches and the bars by content.
 
 **What's left** (none is engine code): keep the data/no-sweep discipline; optional beyond-2.0: MinTRL, ratio adjustment, exchange roll rules for CL, GC and ZN (they roll by volume or your dates today).
 

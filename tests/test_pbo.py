@@ -98,3 +98,49 @@ def test_ties_take_the_average_rank():
 def test_one_setting_refused():
     with pytest.raises(ValueError, match="at least 2 settings"):
         pbo(noise(1600, 1, 0))
+
+
+# --- 3.0.1, audit findings 5 and 6 ---------------------------------------------------------
+
+def _edge_and_noise(rows=960, noise_cols=3, seed=4):
+    rng = np.random.default_rng(seed)
+    edge = rng.normal(0.2, 1.0, rows)
+    return edge, rng.normal(0.0, 1.0, (rows, noise_cols))
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_a_table_with_a_non_finite_return_is_refused(bad):
+    """A NaN first row (pct_change without dropna) used to give PBO 1.0 for a table whose
+    clean PBO is 0.0."""
+    edge, noise = _edge_and_noise()
+    table = np.column_stack([edge, noise])
+    table[0, 1] = bad
+    with pytest.raises(ValueError, match="finite"):
+        pbo(table)
+
+
+def test_identical_settings_count_once():
+    edge, noise = _edge_and_noise()
+    clean = pbo(np.column_stack([edge, noise]))
+    padded = pbo(np.column_stack([edge, edge, noise[:, 0], edge, noise[:, 1:], edge]))
+    assert padded.collapsed == 3 and clean.collapsed == 0
+    assert padded.pbo == clean.pbo
+    assert np.array_equal(padded.logits, clean.logits)
+
+
+def test_settings_that_are_all_identical_are_refused_by_name():
+    from plutobt.pbo import IdenticalSettingsError
+
+    edge, _ = _edge_and_noise()
+    with pytest.raises(IdenticalSettingsError, match="identical"):
+        pbo(np.column_stack([edge] * 10))
+
+
+def test_a_rounding_error_tie_does_not_depend_on_column_order():
+    """Two settings equal to 15 digits tie; which is listed first must not move the PBO."""
+    edge, noise = _edge_and_noise()
+    twin = edge * (1 + 1e-15)
+    a = pbo(np.column_stack([edge, twin, noise]))
+    b = pbo(np.column_stack([twin, edge, noise]))
+    assert a.collapsed == 0                     # not bit-identical, so not collapsed
+    assert a.pbo == b.pbo and np.array_equal(a.logits, b.logits)

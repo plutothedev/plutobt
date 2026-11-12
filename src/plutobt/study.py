@@ -25,14 +25,15 @@ import numpy as np
 import pandas as pd
 
 from plutobt.config import BacktestConfig
-from plutobt.data import frame_sha256
-from plutobt.deflate import deflated_sharpe, expected_max_sharpe, verdict
+from plutobt.data import bars_sha256, frame_sha256
+from plutobt.deflation import deflated_sharpe, expected_max_sharpe, verdict
 from plutobt.engine import Engine
 from plutobt.ledger import (
     DEFAULT_PATH,
     Ledger,
     _plain,
     code_sha256,
+    config_key,
     params_key,
     resolved_settings,
     strategy_id,
@@ -46,8 +47,8 @@ from plutobt.oos import (
     purged_cv,
     walk_forward,
 )
-from plutobt.pbo import PBOResult, pbo
-from plutobt.splits import cscv_blocks, purged_folds, walk_forward_windows
+from plutobt.pbo import IdenticalSettingsError, PBOResult, pbo
+from plutobt.splits import cscv_blocks, purged_folds, walk_forward_windows, whole
 from plutobt.strategy import Strategy
 
 
@@ -64,13 +65,18 @@ class StudyResult:
     tie: bool
     returns: pd.DataFrame         # rows x settings, row i = the return on bar i + 1
     periods_per_year: float
-    data_sha256: str
+    data_sha256: str              # the exact frame, as a run's manifest has it
+    bars_sha256: str              # the bars by content: what the ledger keys tries by
     ledger_path: str | None
     ledger_new: bool
-    n_this: int
-    n_earlier: int
-    deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann, verdict
-    pbo: PBOResult | None         # None for a one-setting study: nothing to choose between
+    n_this: int                   # distinct tries this study ran
+    n_earlier: int                # tries on these bars the ledger held that this study did not run
+    n_repeat: int                 # of n_this, how many the ledger already held
+    n_other_bars: int             # tries of this strategy on other bars (never part of N)
+    deflation: dict               # dsr, n_trials, var_sr, luck_bar, luck_bar_ann,
+    #                               active_bars, verdict
+    pbo: PBOResult | None         # None when there is nothing to choose between
+    pbo_note: str | None          # why pbo is None
     walk_forward: WalkForward
     cv: PurgedCV
 
@@ -127,6 +133,15 @@ def expand_grid(strategy_cls: type, grid: dict, max_configs: int | None = None) 
             "one full backtest, so raise max_configs if you mean it")
     names = list(grid)
     seen, out = set(), []
+    for name in names:
+        for value in grid[name]:
+            plain = _plain(name, value)
+            if isinstance(plain, float) and not math.isfinite(plain):
+                # refused here, before any run: the ledger cannot write it, and it used to
+                # fail there after the first settings had already run
+                raise ValueError(
+                    f"setting {name!r} has the value {plain!r}: a setting must be a "
+                    "finite number (or text, true/false, None)")
     for combo in itertools.product(*(list(grid[n]) for n in names)):
         params = {n: _plain(n, v) for n, v in zip(names, combo, strict=True)}
         key = params_key(params)
@@ -173,6 +188,13 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
         raise ValueError(
             "run_study needs config.periods_per_year (bars a year, e.g. 20412 for 5-minute "
             "RTH index bars) to annualize its Sharpes")
+    # Counts are checked first, by name: a fraction used to fail inside range().
+    blocks, wf_splits = whole("blocks", blocks), whole("wf_splits", wf_splits)
+    cv_folds = whole("cv_folds", cv_folds)
+    if embargo_bars is not None:
+        embargo_bars = whole("embargo_bars", embargo_bars)
+    if max_configs is not None:
+        max_configs = whole("max_configs", max_configs, least=1)
     settings = expand_grid(strategy_cls, grid, max_configs)
     n_rows = len(df) - 1
     # Every split is checked before the first run: too little data fails in a second.
@@ -181,10 +203,15 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     purged_folds(n_rows, cv_folds, 0)
 
     sid, sha, code = strategy_id(strategy_cls), frame_sha256(df), code_sha256(strategy_cls)
+    # The ledger keys bars by content (float volume or an extra column is the same bars)
+    # and a try by its code, settings and the config switches that change what trades.
+    bars, switches = bars_sha256(df), config_key(config)
     led = Ledger(ledger) if ledger else None
-    before = led.tries(sid, sha) if led else {}
-    record = (lambda p, bars, sr: led.record(sid, resolved_settings(strategy_cls, p), sha,
-                                             bars, sr, code=code)) if led else None
+    # 3.0.0 keyed bars by the exact frame: its lines for this frame still count
+    before = led.tries(sid, bars, also=(sha,)) if led else {}
+    other_bars = led.tries_on_other_bars(sid, bars, also=(sha,)) if led else 0
+    record = (lambda p, n, sr: led.record(sid, resolved_settings(strategy_cls, p), bars,
+                                          n, sr, code=code, config=switches)) if led else None
     ctx = _context(strategy_cls, settings, df, instrument, config, roll_meta, on_run=record)
 
     srs = np.array(ctx.sharpes, dtype=float)
@@ -194,15 +221,26 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     best_i = int(np.nanargmax(srs))
     tie = int(np.sum(srs == srs[best_i])) > 1
 
-    this = {try_key(resolved_settings(strategy_cls, p), code): s
+    this = {try_key(resolved_settings(strategy_cls, p), code, switches): s
             for p, s in zip(settings, ctx.sharpes, strict=True)}
-    tries = led.tries(sid, sha) if led else this
+    tries = led.tries(sid, bars, also=(sha,)) if led else this
     values = np.array([v for v in tries.values() if math.isfinite(v)])
     var_sr = float(np.var(values)) if values.size > 1 else 0.0
     n_trials = len(tries)
     dsr = deflated_sharpe(ctx.returns.iloc[:, best_i], n_trials, var_sr)
+    active = int(np.count_nonzero(ctx.returns.iloc[:, best_i].to_numpy()))
     luck = expected_max_sharpe(n_trials, var_sr)
     root = math.sqrt(ctx.ppy)
+
+    overfit, pbo_note = None, None
+    if len(settings) < 2:
+        pbo_note = "one setting, so there is nothing to choose between"
+    else:
+        try:
+            overfit = pbo(ctx.returns.to_numpy(), blocks)
+        except IdenticalSettingsError:
+            pbo_note = ("every setting produced the same returns: the grid's settings do "
+                        "nothing, so there is nothing to choose between")
 
     table = pd.DataFrame(settings)
     table["sharpe"] = srs
@@ -212,12 +250,15 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
 
     return StudyResult(
         strategy=sid, grid=table, best=dict(settings[best_i]), tie=tie,
-        returns=ctx.returns, periods_per_year=ctx.ppy, data_sha256=sha,
-        ledger_path=led.path.as_posix() if led else None, ledger_new=led.is_new if led else False,
+        returns=ctx.returns, periods_per_year=ctx.ppy, data_sha256=sha, bars_sha256=bars,
+        ledger_path=led.path.resolve().as_posix() if led else None,
+        ledger_new=led.is_new if led else False,
         n_this=len(this), n_earlier=len(set(before) - set(this)),
+        n_repeat=len(set(before) & set(this)), n_other_bars=other_bars,
         deflation={"dsr": dsr, "n_trials": n_trials, "var_sr": var_sr, "luck_bar": luck,
-                   "luck_bar_ann": luck * root, "verdict": verdict(dsr, n_trials)},
-        pbo=pbo(ctx.returns.to_numpy(), blocks) if len(settings) > 1 else None,
+                   "luck_bar_ann": luck * root, "active_bars": active,
+                   "verdict": verdict(dsr, n_trials, active)},
+        pbo=overfit, pbo_note=pbo_note,
         walk_forward=walk_forward(ctx, wf_splits, wf_anchored),
         cv=purged_cv(ctx, cv_folds, embargo_bars),
     )

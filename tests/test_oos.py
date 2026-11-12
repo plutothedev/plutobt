@@ -1,4 +1,6 @@
 """Flat reruns, walk-forward and purged CV (3.0 spec §8, §9)."""
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -149,3 +151,166 @@ def test_fold_before_training_is_flagged_not_real_time():
     flags = [f["not_real_time"] for f in cv.folds]
     assert flags == [True] * 5 + [False]
     assert len(cv.sharpes) == 6 and cv.spread == pytest.approx(np.std(cv.sharpes))
+
+
+# --- 3.0.1, audit finding 7: margin inside the reruns --------------------------------------
+
+def _falling(drift):
+    from tests.study_fixtures import Big
+
+    df = walk(600, drift=drift, sigma=2.0, seed=3)
+    settings = [{"size": 4}, {"size": 3}]
+    return df, _context(Big, settings, df, NQ, CFG, None), Big
+
+
+def test_margin_events_inside_a_rerun_are_carried_out():
+    from plutobt.engine import Engine
+
+    df, ctx, big = _falling(-1.3)
+    wf = walk_forward(ctx, 2, True)
+    assert wf.margin_calls >= 1 and wf.margin_refusals >= 1
+    assert wf.margin_calls == sum(w["margin_calls"] for w in wf.windows)
+    assert wf.margin_refusals == sum(w["margin_refusals"] for w in wf.windows)
+    # each window's counts are the engine's own for that rerun
+    for w in wf.windows:
+        a, b = w["test"].start, w["test"].stop
+        strat = big()
+        strat.size = w["params"]["size"]
+        res = Engine(NQ, CFG).run(df.iloc[: b + 1].reset_index(drop=True), strat,
+                                  trade_from_ts=int(df.ts.iloc[a]))
+        assert (len(res.margin_calls), res.margin_refusals) == \
+            (w["margin_calls"], w["margin_refusals"])
+
+
+def test_a_stitched_curve_below_the_margin_it_needed_is_flagged():
+    """Each window restarts from 100,000, so window 2 opens its contracts although the
+    stitched curve is already under their initial margin."""
+    _, ctx, _ = _falling(-0.5)
+    wf = walk_forward(ctx, 2, True)
+    assert wf.margin_calls == 0                          # no rerun saw anything wrong
+    assert wf.below_margin_windows >= 1
+    held = max(w["params"]["size"] for w in wf.windows)
+    assert wf.equity.min() < held * NQ.initial_margin
+
+
+def test_a_calm_study_has_no_margin_flags():
+    df = walk(600, drift=0.3)
+    wf = walk_forward(_context(Hold, [{"side": 1}, {"side": -1}], df, NQ, CFG, None), 2, False)
+    assert (wf.margin_calls, wf.margin_refusals, wf.below_margin_windows) == (0, 0, 0)
+
+
+def test_cv_folds_carry_margin_events_too():
+    _, ctx, _ = _falling(-1.3)
+    cv = purged_cv(ctx, 2, 5)
+    assert cv.margin_calls + cv.margin_refusals >= 1
+    assert cv.margin_calls == sum(f["margin_calls"] for f in cv.folds)
+
+
+# --- whole-branch review of 3.0.1, finding 3: the margin a window needed -----------------
+
+def test_the_position_held_is_counted_not_the_largest_closed_slice():
+    """A 4-lot position sold one contract at a time closes as 1-lot trades; the margin it
+    needed is 4 contracts' worth."""
+    from plutobt.engine import Engine
+    from tests.study_fixtures import ScaleOut
+
+    df = walk(600, drift=-0.8, sigma=2.0, seed=3)
+    res = Engine(NQ, CFG).run(df, ScaleOut())
+    assert {t.contracts for t in res.trades} == {1}              # the premise
+    run = rerun_window(ScaleOut, {"lots": 4}, df, NQ, CFG, None, 200, 400)
+    assert run.max_contracts == 4
+    assert run.held[0] == 0 and run.held.max() == 4 and len(run.held) == len(run.equity)
+
+
+def test_a_scale_out_position_under_its_margin_is_flagged():
+    from tests.study_fixtures import ScaleOut
+
+    df = walk(600, drift=-0.8, sigma=2.0, seed=3)
+    ctx = _context(ScaleOut, [{"lots": 4}, {"lots": 3}], df, NQ, CFG, None)
+    wf = walk_forward(ctx, 2, True)
+    flagged = [w for w in wf.windows if w["below_margin"]]
+    assert flagged and wf.below_margin_windows == len(flagged)
+    # the low it reports is a level the curve stood at while that position was held
+    assert wf.below_margin_low == min(w["margin_low"] for w in flagged)
+    assert wf.below_margin_low < flagged[0]["params"]["lots"] * NQ.initial_margin
+
+
+def test_a_small_position_on_a_sunk_curve_is_not_flagged():
+    df = walk(600, drift=-0.8, sigma=2.0, seed=3)
+    wf = walk_forward(_context(Hold, [{"side": 1}, {"side": -1}], df, NQ, CFG, None), 2, True)
+    assert wf.equity.min() < 100_000                      # the curve did fall
+    assert wf.below_margin_windows == 0 and math.isnan(wf.below_margin_low)
+
+
+# --- re-review of the 3.0.1 fixes: the position comes from the engine, not from slices -----
+
+def _expected_pyramid(n, side=1):
+    """Contracts at each bar's close for ScaleIn: an order on bar i fills at bar i+1."""
+    out = np.zeros(n, dtype=int)
+    for i in range(n):
+        step = i % 100
+        out[i] = side * (sum(step > s for s in (5, 10, 15, 20)) if step <= 60 else 0)
+    return out
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_the_engine_reports_the_position_at_each_bar(side):
+    from plutobt.engine import Engine
+    from tests.study_fixtures import ScaleIn
+
+    df = walk(300, drift=0.3)
+    strat = ScaleIn()
+    strat.side = side
+    res = Engine(NQ, CFG).run(df, strat)
+    assert list(res.position.index) == list(df.ts)
+    assert np.array_equal(res.position.to_numpy(), _expected_pyramid(300, side))
+    assert {(t.contracts, t.entry_ts) for t in res.trades if not t.open_at_end} == \
+        {(4, int(df.ts.iloc[k * 100 + 6])) for k in range(3)}     # one merged trade each
+
+
+def test_a_flip_and_a_flat_run_report_their_positions():
+    from plutobt.engine import Engine
+
+    class Flip(Hold):
+        def on_bar(self, ctx):
+            self.i = getattr(self, "i", -1) + 1
+            if self.i == 3:
+                ctx.broker.buy(contracts=2)
+            elif self.i == 10:
+                ctx.broker.sell(contracts=5)            # long 2 to short 3 on one bar
+
+    res = Engine(NQ, CFG).run(walk(40), Flip())
+    pos = res.position.to_numpy()
+    assert list(pos[:4]) == [0, 0, 0, 0] and set(pos[4:11]) == {2} and set(pos[11:]) == {-3}
+    flat = Engine(NQ, CFG).run(walk(40), _Never())
+    assert not flat.position.to_numpy().any()
+
+
+class _Never(Hold):
+    side = 0
+
+
+def test_a_pyramid_is_held_as_it_was_built_not_at_full_size_from_the_first_fill():
+    """Re-review finding 1: from the trades, a 4-lot pyramid read as 4 lots from its first
+    fill, so the below-margin warning fired on bars that held 1."""
+    from tests.study_fixtures import ScaleIn
+
+    df = walk(300, drift=0.3)
+    run = rerun_window(ScaleIn, {"side": 1}, df, NQ, CFG, None, 100, 299)
+    assert np.array_equal(run.held, np.abs(_expected_pyramid(300))[100:300])
+    assert run.max_contracts == 4
+
+
+def test_a_pyramid_built_on_profits_is_not_flagged():
+    """One lot at 100,000, four only once the curve is far above their margin: never
+    short of margin. (NQ with a 26,000 initial margin: 4 lots need 104,000.)"""
+    from dataclasses import replace
+
+    from tests.study_fixtures import ScaleIn
+
+    nq = replace(NQ, initial_margin=26_000.0, maintenance_margin=20_900.0)
+    df = walk(600, drift=40.0, sigma=1.0, seed=3)          # +800 a bar per contract
+    ctx = _context(ScaleIn, [{"side": 1}, {"side": -1}], df, nq, CFG, None)
+    wf = walk_forward(ctx, 2, True)
+    assert wf.margin_refusals == 0
+    assert wf.below_margin_windows == 0

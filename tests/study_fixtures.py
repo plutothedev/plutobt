@@ -84,3 +84,69 @@ class Crashes(Strategy):
 class NeedsArgs(Strategy):
     def __init__(self, x):
         self.x = x
+
+
+class Sparse(Strategy):
+    """Long for one bar every ``every`` bars, starting at bar ``phase``: a strategy that is
+    rarely in the market, with its few trades spread evenly."""
+    every = 100
+    phase = 5
+
+    def precompute(self, df):
+        df["go"] = (np.arange(len(df)) % self.every) == self.phase
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.go and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=1)
+        elif not ctx.bar.go and ctx.position.qty != 0:
+            ctx.broker.close()
+
+
+class Inert(Hold):
+    """Hold with a setting that does nothing: every ``dummy`` value trades identically."""
+    dummy = 0
+
+
+class Big(Strategy):
+    """Long ``size`` contracts whenever flat: enough contracts to meet the margin rules."""
+    size = 4
+
+    def on_bar(self, ctx):
+        if ctx.position.qty == 0:
+            ctx.broker.buy(contracts=self.size)
+
+
+class ScaleOut(Strategy):
+    """Every 100 bars: long ``lots`` contracts, then sold one at a time near the cycle's
+    end. Its closed trades are one contract each, though it held ``lots`` at once."""
+    lots = 4
+
+    def precompute(self, df):
+        df["step"] = np.arange(len(df)) % 100
+        return df
+
+    def on_bar(self, ctx):
+        step = int(ctx.bar.step)
+        if step == 0 and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=self.lots)
+        elif step in (70, 80, 90, 95) and ctx.position.qty > 0:
+            ctx.broker.sell(contracts=1)
+
+
+class ScaleIn(Strategy):
+    """Adds one contract at bars 5, 10, 15 and 20 of every 100, closes all at bar 60: a
+    pyramid. The engine books it as ONE trade of ``4`` contracts entered at the first
+    fill, so the position at a bar cannot be read off the trades."""
+    side = 1
+
+    def precompute(self, df):
+        df["step"] = np.arange(len(df)) % 100
+        return df
+
+    def on_bar(self, ctx):
+        step = int(ctx.bar.step)
+        if step in (5, 10, 15, 20):
+            (ctx.broker.buy if self.side > 0 else ctx.broker.sell)(contracts=1)
+        elif step == 60 and ctx.position.qty != 0:
+            ctx.broker.close()
