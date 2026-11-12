@@ -86,8 +86,10 @@ class BacktestConfig:
             if not isinstance(value, str):
                 raise ValueError(f"config {name} = {value!r}: must be text")
         for name, optional, least, strict in (
-                ("commission_per_side", False, 0.0, False),
-                ("slippage_ticks", True, 0.0, False),
+                # no sign rule on the two costs: a negative commission is a rebate, and
+                # the engine has run one on purpose since 2026-09-28 (pinned by a test)
+                ("commission_per_side", False, None, False),
+                ("slippage_ticks", True, None, False),
                 ("risk_free", False, None, False),
                 ("periods_per_year", True, 0.0, True)):
             value = getattr(self, name)

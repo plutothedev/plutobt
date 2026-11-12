@@ -59,9 +59,7 @@ def test_the_split_functions_refuse_fractions_themselves():
     ("allow_short", 0, "true or false"),
     ("check_causality", "no", "true or false"),
     ("commission_per_side", "2.5", "a number"),
-    ("commission_per_side", -1.0, "0 or more"),
     ("commission_per_side", float("nan"), "finite"),
-    ("slippage_ticks", -0.5, "0 or more"),
     ("slippage_ticks", True, "a number"),
     ("periods_per_year", 0, "above 0"),
     ("periods_per_year", "20412", "a number"),
@@ -73,6 +71,11 @@ def test_a_config_value_of_the_wrong_kind_is_refused_by_name(field, bad, why):
     assert f"config {field}" in str(err.value) and why in str(err.value)
     with pytest.raises(ValueError):
         replace(CFG, **{field: bad})
+
+
+def test_a_negative_cost_is_still_a_rebate():
+    # deliberate since 2026-09-28 (test_a_negative_commission_is_a_rebate_and_runs)
+    assert BacktestConfig(commission_per_side=-0.5, slippage_ticks=-1.0)
 
 
 def test_ordinary_configs_still_build():

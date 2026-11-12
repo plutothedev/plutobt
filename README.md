@@ -389,7 +389,7 @@ report then answers:
   those files import at the top: editing a threshold constant or a helper function
   counts the same as editing the class. "Survives deflation" means 0.95 or more. A
   strategy that is rarely in the market has less evidence than its bar count suggests
-  (with no edge, one with 10 non-zero returns passed 10% of the time), so under 30
+  (with no edge, one with 10 non-zero returns passed about 10% of the time), so under 30
   bars with a non-zero return there is no verdict, and under 100 a warning.
 - **PBO**, the Probability of Backtest Overfitting (Bailey, Borwein, Lopez de Prado
   and Zhu): the bars are cut into 16 blocks; for each of the 12,870 ways to call half of

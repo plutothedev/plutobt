@@ -184,3 +184,19 @@ def test_a_rerun_says_how_many_tries_were_already_recorded(tmp_path):
     run_study(Coin, {"seed": [0, 1], "bias": [0.5]}, df, NQ, CFG, ledger=led)
     res = run_study(Coin, {"seed": [1, 2], "bias": [0.5]}, df, NQ, CFG, ledger=led)
     assert (res.n_this, res.n_repeat, res.n_earlier) == (2, 1, 1)
+
+
+def test_tries_a_3_0_0_ledger_holds_for_these_bars_still_count(tmp_path):
+    """3.0.0 keyed bars by the exact frame. Its lines must keep counting for the same
+    frame, or upgrading would quietly lower N."""
+    df, led = walk(600, drift=0.3), tmp_path / "t.jsonl"
+    old = {"v": 1, "time": "2026-11-09T00:00:00+00:00", "strategy": "tests.study_fixtures:Hold",
+           "code_sha256": "the-3.0.0-class-hash", "data_sha256": frame_sha256(df),
+           "bars": 600, "plutobt": "3.0.0"}
+    lines = [dict(old, params={"side": 1}, sharpe=0.04),
+             dict(old, params={"side": -1}, sharpe=-0.04),
+             dict(old, params={"side": 0}, sharpe=None)]
+    led.write_text("".join(json.dumps(x) + "\n" for x in lines), encoding="utf-8")
+    res = run_study(Hold, {"side": [1, -1]}, df, NQ, CFG, ledger=led)
+    assert res.n_earlier == 3 and res.deflation["n_trials"] == 5
+    assert res.n_other_bars == 0

@@ -207,8 +207,9 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
     # and a try by its code, settings and the config switches that change what trades.
     bars, switches = bars_sha256(df), config_key(config)
     led = Ledger(ledger) if ledger else None
-    before = led.tries(sid, bars) if led else {}
-    other_bars = led.tries_on_other_bars(sid, bars) if led else 0
+    # 3.0.0 keyed bars by the exact frame: its lines for this frame still count
+    before = led.tries(sid, bars, also=(sha,)) if led else {}
+    other_bars = led.tries_on_other_bars(sid, bars, also=(sha,)) if led else 0
     record = (lambda p, n, sr: led.record(sid, resolved_settings(strategy_cls, p), bars,
                                           n, sr, code=code, config=switches)) if led else None
     ctx = _context(strategy_cls, settings, df, instrument, config, roll_meta, on_run=record)
@@ -222,7 +223,7 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
 
     this = {try_key(resolved_settings(strategy_cls, p), code, switches): s
             for p, s in zip(settings, ctx.sharpes, strict=True)}
-    tries = led.tries(sid, bars) if led else this
+    tries = led.tries(sid, bars, also=(sha,)) if led else this
     values = np.array([v for v in tries.values() if math.isfinite(v)])
     var_sr = float(np.var(values)) if values.size > 1 else 0.0
     n_trials = len(tries)

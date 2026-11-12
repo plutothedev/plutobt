@@ -300,26 +300,32 @@ class Ledger:
                     raise LedgerError(f"{self.path} line {no} lacks {', '.join(missing)}")
                 yield line
 
-    def tries(self, strategy: str, data_sha256: str) -> dict[str, float]:
+    def tries(self, strategy: str, data_sha256: str,
+              also: tuple[str, ...] = ()) -> dict[str, float]:
         """Every distinct try ever recorded for ``strategy`` on these bars, keyed by
         ``try_key`` (code version, settings, config switches) and mapped to its latest
         per-bar Sharpe (NaN for a run with no return volatility). A line 3.0.0 wrote has
-        no config and reads as a try of its own."""
+        no config and reads as a try of its own. ``also`` are further hashes that mean
+        the same bars: 3.0.0 keyed bars by the exact frame (``frame_sha256``), so the
+        study passes that too and an older ledger keeps counting."""
+        same = {data_sha256, *also}
         out: dict[str, float] = {}
         for line in self._lines():
-            if line["strategy"] == strategy and line["data_sha256"] == data_sha256:
+            if line["strategy"] == strategy and line["data_sha256"] in same:
                 s = line["sharpe"]
                 key = try_key(line["params"], line["code_sha256"], line.get("config"))
                 out[key] = float("nan") if s is None else float(s)
         return out
 
-    def tries_on_other_bars(self, strategy: str, data_sha256: str) -> int:
+    def tries_on_other_bars(self, strategy: str, data_sha256: str,
+                            also: tuple[str, ...] = ()) -> int:
         """How many distinct tries the file holds for ``strategy`` on any OTHER bars. N
         never counts them (different bars are a different question), but a report that
         says nothing would hide twenty tries behind one new bar."""
+        same = {data_sha256, *also}
         seen = set()
         for line in self._lines():
-            if line["strategy"] == strategy and line["data_sha256"] != data_sha256:
+            if line["strategy"] == strategy and line["data_sha256"] not in same:
                 seen.add((line["data_sha256"],
                           try_key(line["params"], line["code_sha256"], line.get("config"))))
         return len(seen)
