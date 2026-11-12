@@ -406,7 +406,8 @@ report then answers:
   window's end is charged one exit. Every window restarts from 100,000, so the
   stitched curve adds the windows up; it does not follow one account. Margin calls
   and refused orders inside a window are printed, and so is a stitched curve that
-  fell below the margin its position needed.
+  stood below the initial margin of the contracts held at a bar's close (a position
+  opened and closed inside one bar is not checked).
 - **Purged CV**: every block is the test block once. The bars right after it are
   left out of training (the embargo, by default the longest trade in bars), because
   what happens there still depends on the test block: the position carried out of it,
@@ -420,9 +421,12 @@ honesty aid, not a lock: a strategy is known by its module and class name, so re
 the class starts a fresh count, and deleting the file forgets every try. Comments and
 formatting are not an edit (a docstring is). Any other change to the strategy's files is
 a new try, even one that does not touch the strategy, and near-identical settings count
-separately: both overstate N, so the verdict errs strict. One limit: a class written in a
-notebook cell has no file, so only the class itself and the modules the notebook has
-imported are hashed there.
+separately: both overstate N, so the verdict errs strict. Two limits. A class written in
+a notebook cell has no file, so what is hashed there is the class itself plus every one
+of your own modules the session has loaded; a helper written in another cell is not
+seen. And a module that has not been imported yet (an import inside a function that has
+not run) is found by Python's ordinary file rules: one that only an import hook can
+find, as some editable installs use, is seen once it has been imported.
 
 **Keep the strategy in its own file.** Costs are not part of a try: change the
 commission in your config and rerun, and N stays where it was. But if the `run_study`

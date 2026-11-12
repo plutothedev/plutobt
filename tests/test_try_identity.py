@@ -466,3 +466,108 @@ def test_a_broken_entry_in_sys_modules_does_not_break_the_hash(layout, monkeypat
     name = cls.__module__.replace("strat_", "weird_")
     monkeypatch.setitem(sys.modules, name, Raises())
     assert len(code_sha256(cls)) == 64
+
+
+# --- second re-review of the 3.0.1 fixes ------------------------------------------------------
+
+def test_a_notebook_that_only_took_a_constant_from_a_module_still_counts_its_edits(tmp_path,
+                                                                                  monkeypatch):
+    """`from params import THRESH` in a cell leaves only a number behind, and a cell has no
+    source file to read the import from. So for a class with no file, every one of the
+    user's own modules the session has loaded is code."""
+    import types
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    tag = tmp_path.name.replace("-", "_")
+
+    def notebook(thresh):
+        (tmp_path / f"nbc_{tag}.py").write_text(f"THRESH = {thresh}\n", encoding="utf-8")
+        for name in [m for m in sys.modules if tag in m]:
+            del sys.modules[name]
+        importlib.invalidate_caches()
+        cell = types.ModuleType(f"nbcell_{tag}")
+        sys.modules[cell.__name__] = cell
+        exec("from plutobt.strategy import Strategy\n"       # noqa: S102
+             f"from nbc_{tag} import THRESH\n"
+             "class S(Strategy):\n    def on_bar(self, ctx):\n        pass\n", vars(cell))
+        return cell.S
+
+    try:
+        one = notebook(1)
+        assert [f for f in code_files(one) if f.endswith(f"nbc_{tag}.py")]
+        assert not [f for f in code_files(one) if "site-packages" in f]
+        assert code_sha256(one) != code_sha256(notebook(2))
+    finally:
+        for name in [m for m in sys.modules if tag in m]:
+            del sys.modules[name]
+
+
+def test_a_function_level_from_import_of_a_submodule_not_loaded_yet_is_code(layout):
+    def version(cut):
+        return layout({
+            "kit_{tag}/__init__.py": "",
+            "kit_{tag}/mod.py": f"CUT = {cut}\n",
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              "def late():\n"
+                              "    from kit_{tag} import mod\n"
+                              "    return mod.CUT\n" + BODY,
+        }, "strat_{tag}")
+
+    cls = version(1)
+    assert not any(n.startswith("kit_") for n in sys.modules)
+    assert any(f.endswith("mod.py") for f in code_files(cls))
+    assert code_sha256(cls) != code_sha256(version(2))
+
+
+def test_hashing_does_not_wake_a_lazily_loaded_module(layout):
+    """importlib.util.LazyLoader runs a module on its first attribute access; hashing
+    read vars() and ran it."""
+    cls = layout({
+        "heavy_{tag}.py": "import sys\nsys.modules[__name__].RAN = True\nVALUE = 1\n",
+        "strat_{tag}.py": textwrap.dedent('''
+            import importlib.util
+            import sys
+            from plutobt.strategy import Strategy
+
+
+            def _lazy(name):
+                spec = importlib.util.find_spec(name)
+                spec.loader = importlib.util.LazyLoader(spec.loader)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                spec.loader.exec_module(module)
+                return module
+
+
+            heavy = _lazy("heavy_{tag}")
+        ''') + BODY,
+    }, "strat_{tag}")
+    heavy = sys.modules[cls.__module__.replace("strat_", "heavy_")]
+    assert any(f.endswith(".py") and "heavy_" in f for f in code_files(cls))   # still hashed
+    assert len(code_sha256(cls)) == 64
+    assert "RAN" not in object.__getattribute__(heavy, "__dict__")              # never ran
+
+
+def test_hashing_reads_nothing_from_the_users_objects(layout):
+    """A lazy proxy at module level builds its target on any attribute access; hashing
+    asked every top-level object for `__module__`."""
+    cls = layout({
+        "strat_{tag}.py": textwrap.dedent('''
+            from plutobt.strategy import Strategy
+
+            TOUCHED = []
+
+
+            class Lazy:
+                def __getattribute__(self, name):
+                    TOUCHED.append(name)
+                    return object.__getattribute__(self, name)
+
+
+            thing = Lazy()
+        ''') + BODY,
+    }, "strat_{tag}")
+    module = sys.modules[cls.__module__]
+    module.TOUCHED.clear()
+    assert len(code_sha256(cls)) == 64
+    assert module.TOUCHED == []

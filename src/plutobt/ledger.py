@@ -34,6 +34,7 @@ import site
 import sys
 import sysconfig
 import tokenize
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -116,11 +117,15 @@ def _installed_roots() -> tuple[Path, ...]:
 
 
 def _namespace(module) -> dict:
-    """A module's own names, read without running any of its code: ``vars`` never calls a
-    module-level ``__getattr__``. An object in ``sys.modules`` that is not a module and
-    raises on access (a proxy) reads as empty."""
+    """A module's own names, read without running any of its code. The lookup goes
+    straight to the module type, so it neither calls a module-level ``__getattr__`` nor
+    wakes a module loaded through ``importlib.util.LazyLoader`` (which runs on its first
+    ordinary attribute access). Anything in ``sys.modules`` that is not a module reads as
+    empty."""
+    if not issubclass(type(module), types.ModuleType):
+        return {}
     try:
-        names = vars(module)
+        names = types.ModuleType.__getattribute__(module, "__dict__")
     except Exception:
         return {}
     return names if isinstance(names, dict) else {}
@@ -150,14 +155,19 @@ def _modules_held(module) -> list[str]:
     notebook cell, which has no source file to read)."""
     names = set()
     for value in list(_namespace(module).values()):
+        # Nothing is read from the object itself, only from its type: a lazy proxy at
+        # module level builds its target on any attribute access.
+        kind = type(value)
         try:
-            if inspect.ismodule(value):
-                name = value.__name__
+            if issubclass(kind, types.ModuleType):
+                name = _namespace(value).get("__name__")
+            elif kind in (types.FunctionType, types.BuiltinFunctionType):
+                name = value.__module__
+            elif issubclass(kind, type):
+                name = type.__getattribute__(value, "__module__")
             else:
-                name = getattr(value, "__module__", None)
-                if not isinstance(name, str):
-                    name = getattr(type(value), "__module__", None)
-        except Exception:           # an object that raises on attribute access: skip it
+                name = type.__getattribute__(kind, "__module__")
+        except Exception:
             continue
         if isinstance(name, str) and name:
             names.add(name)
@@ -188,9 +198,12 @@ def _imports_written(tree: ast.AST, package: str) -> list[str]:
 
 
 def _find_on_disk(parts: list[str], locations: list[str], name: str) -> tuple[Path | None, str]:
-    """Follow ``parts`` down from ``locations`` the way the import system would (a package
+    """Follow ``parts`` down from ``locations`` by Python's standard file rules (a package
     folder, then a module file, in each location in turn; a bare folder is a namespace
-    package), reading only the file system. (file, package) of what is found."""
+    package), reading only the file system. (file, package) of what is found. It knows
+    folders and ``.py`` files only: a module that an import hook, a zip file, a
+    sourceless ``.pyc`` or a ``__path__`` edited at run time would supply is not found
+    here, and is seen once it has been imported."""
     for i, part in enumerate(parts):
         last = i == len(parts) - 1
         hit, folders = None, []
@@ -222,11 +235,11 @@ def _find_on_disk(parts: list[str], locations: list[str], name: str) -> tuple[Pa
 
 
 def _locate(name: str) -> tuple[Path | None, str]:
-    """(source file, package) of the module called ``name``, without importing it and
-    without running any user code. A loaded module answers from its own names. One that
-    is not loaded yet (an import inside a function that has not run) is found on disk,
-    starting from its nearest loaded parent package, or from ``sys.path`` for a top-level
-    name, so the code is the same before and after that import first runs."""
+    """(source file, package) of the module called ``name``, without importing it. A
+    loaded module answers from its own names. One that is not loaded yet (an import
+    inside a function that has not run) is found on disk, starting from its nearest
+    loaded parent package, or from ``sys.path`` for a top-level name, so for an ordinary
+    project the code is the same before and after that import first runs."""
     module = sys.modules.get(name)
     if module is not None:
         names = _namespace(module)
@@ -261,17 +274,23 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     (``import x``, ``from x import NAME``, relative imports, imports inside functions
     whether or not they have run yet, and the parent packages they run), and as held by
     the loaded module (which also catches ``importlib.import_module`` and is all a class
-    with no source file, such as a notebook cell, has). Installed packages, the standard
-    library and plutobt itself are never followed, nothing is imported to do this, and no
-    user code runs."""
+    with no source file, such as a notebook cell, has). A class with no file has no
+    import statements to read, and ``from params import THRESH`` leaves only a number
+    behind, so for it every user module the session has loaded counts. Installed
+    packages, the standard library and plutobt itself are never followed. Nothing is
+    imported to do this, no lazily loaded module is woken, and no attribute is read from
+    the user's own objects (only from their types)."""
     roots = _installed_roots()
     owners, owner_files, other_files = [], [], set()
     seen: set[Path] = set()
     queue: list[tuple[Path | None, str, object]] = []
+    located: dict[str, tuple[Path | None, str]] = {}
 
     def visit(name: str) -> None:
         """Queue the module called ``name`` if it is the user's."""
-        path, package = _locate(name)
+        if name not in located:
+            located[name] = _locate(name)
+        path, package = located[name]
         if path is None or path in seen or not _is_user_file(path, roots):
             return
         seen.add(path)
@@ -292,6 +311,10 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
         queue.append((path, package, module))    # followed even with no file (a notebook)
         for parent in _with_parents(k.__module__)[:-1]:         # the packages it lives in
             visit(parent)
+        if path is None:
+            # no file, so no import statements to read: every loaded user module counts
+            for name in sorted(n for n in list(sys.modules) if isinstance(n, str)):
+                visit(name)
 
     while queue:
         path, package, module = queue.pop(0)
@@ -349,8 +372,8 @@ def code_sha256(cls: type) -> str:
     (a module-level constant or a helper function counts), plus every user module those
     files import, followed through (``code_files`` lists them). Comments
     and formatting are not an edit. A class with no file (a notebook cell, ``exec``) falls
-    back to its own source or bytecode, so a helper edited in another notebook cell is
-    not seen."""
+    back to its own source or bytecode plus every user module the session has loaded; a
+    helper written in another notebook cell is not seen."""
     owners, files = _code_modules(cls)
     h = hashlib.sha256()
     own = []
