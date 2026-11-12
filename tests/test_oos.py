@@ -1,4 +1,6 @@
 """Flat reruns, walk-forward and purged CV (3.0 spec §8, §9)."""
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -202,3 +204,39 @@ def test_cv_folds_carry_margin_events_too():
     cv = purged_cv(ctx, 2, 5)
     assert cv.margin_calls + cv.margin_refusals >= 1
     assert cv.margin_calls == sum(f["margin_calls"] for f in cv.folds)
+
+
+# --- whole-branch review of 3.0.1, finding 3: the margin a window needed -----------------
+
+def test_the_position_held_is_counted_not_the_largest_closed_slice():
+    """A 4-lot position sold one contract at a time closes as 1-lot trades; the margin it
+    needed is 4 contracts' worth."""
+    from plutobt.engine import Engine
+    from tests.study_fixtures import ScaleOut
+
+    df = walk(600, drift=-0.8, sigma=2.0, seed=3)
+    res = Engine(NQ, CFG).run(df, ScaleOut())
+    assert {t.contracts for t in res.trades} == {1}              # the premise
+    run = rerun_window(ScaleOut, {"lots": 4}, df, NQ, CFG, None, 200, 400)
+    assert run.max_contracts == 4
+    assert run.held[0] == 0 and run.held.max() == 4 and len(run.held) == len(run.equity)
+
+
+def test_a_scale_out_position_under_its_margin_is_flagged():
+    from tests.study_fixtures import ScaleOut
+
+    df = walk(600, drift=-0.8, sigma=2.0, seed=3)
+    ctx = _context(ScaleOut, [{"lots": 4}, {"lots": 3}], df, NQ, CFG, None)
+    wf = walk_forward(ctx, 2, True)
+    flagged = [w for w in wf.windows if w["below_margin"]]
+    assert flagged and wf.below_margin_windows == len(flagged)
+    # the low it reports is a level the curve stood at while that position was held
+    assert wf.below_margin_low == min(w["margin_low"] for w in flagged)
+    assert wf.below_margin_low < flagged[0]["params"]["lots"] * NQ.initial_margin
+
+
+def test_a_small_position_on_a_sunk_curve_is_not_flagged():
+    df = walk(600, drift=-0.8, sigma=2.0, seed=3)
+    wf = walk_forward(_context(Hold, [{"side": 1}, {"side": -1}], df, NQ, CFG, None), 2, True)
+    assert wf.equity.min() < 100_000                      # the curve did fall
+    assert wf.below_margin_windows == 0 and math.isnan(wf.below_margin_low)

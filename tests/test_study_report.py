@@ -175,6 +175,6 @@ def test_a_stitched_curve_below_its_margin_is_printed():
     wf, text = res.walk_forward, format_study(res, "NQ")
     assert wf.below_margin_windows >= 1
     assert (f"  WARNING: in {wf.below_margin_windows} window(s) the stitched curve stood "
-            "below the initial margin of the contracts held (its low: "
-            f"{wf.equity.min():,.0f}): one account could not have carried them") in text
+            "below the initial margin of the contracts held (its low there: "
+            f"{wf.below_margin_low:,.0f}): one account could not have carried them") in text
     assert "inside the walk-forward reruns" not in text

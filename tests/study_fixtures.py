@@ -115,3 +115,20 @@ class Big(Strategy):
     def on_bar(self, ctx):
         if ctx.position.qty == 0:
             ctx.broker.buy(contracts=self.size)
+
+
+class ScaleOut(Strategy):
+    """Every 100 bars: long ``lots`` contracts, then sold one at a time near the cycle's
+    end. Its closed trades are one contract each, though it held ``lots`` at once."""
+    lots = 4
+
+    def precompute(self, df):
+        df["step"] = np.arange(len(df)) % 100
+        return df
+
+    def on_bar(self, ctx):
+        step = int(ctx.bar.step)
+        if step == 0 and ctx.position.qty == 0:
+            ctx.broker.buy(contracts=self.lots)
+        elif step in (70, 80, 90, 95) and ctx.position.qty > 0:
+            ctx.broker.sell(contracts=1)

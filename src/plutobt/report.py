@@ -305,7 +305,8 @@ def format_study(result, symbol: str) -> str:
                      "count once here")
     if p is not None and p.pbo > 0.05 and p.prob_oos_loss < 0.05:
         lines.append("  the in-sample winner rarely lost money out-of-sample: a PBO this "
-                     "high then says the settings are too alike to rank, not that they fail")
+                     "high then says the ranking between these settings does not hold, not "
+                     "that they lose")
 
     wf = result.walk_forward
     kind = "anchored" if len(wf.windows) > 1 and wf.windows[1]["train"].start == 0 \
@@ -333,8 +334,9 @@ def format_study(result, symbol: str) -> str:
                      "reruns: those windows did not trade as the settings table shows")
     if wf.below_margin_windows:
         lines.append(f"  WARNING: in {wf.below_margin_windows} window(s) the stitched curve "
-                     "stood below the initial margin of the contracts held (its low: "
-                     f"{wf.equity.min():,.0f}): one account could not have carried them")
+                     "stood below the initial margin of the contracts held (its low "
+                     f"there: {wf.below_margin_low:,.0f}): one account could not have "
+                     "carried them")
     if wf.winner_changed:
         lines.append("  WARNING: winner changed between windows: the pick is not stable")
 
