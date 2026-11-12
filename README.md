@@ -386,7 +386,9 @@ report then answers:
   config switches that change what trades (`allow_short`, `break_on`,
   `carry_overnight`, `on_margin_call`), and a hash of the strategy's code. The code is
   the whole file of every module that defines the strategy, plus your own modules
-  those files import (followed through; installed packages are left out): editing a
+  those files import (followed through; installed packages are left out, and the
+  package a vendored copy of PlutoBT sits inside counts only if your file imports that
+  package by name): editing a
   threshold constant or a helper function, in that file or in a `params.py` it imports
   from, counts the same as editing the class. "Survives deflation" means 0.95 or more. A
   strategy that is rarely in the market has less evidence than its bar count suggests

@@ -101,6 +101,38 @@ def _own_classes(cls: type) -> list[type]:
     return list(reversed(out))
 
 
+# plutobt's own import name: "plutobt", or "host._vendor.plutobt" for a copy vendored
+# inside another package.
+_OWN = __name__.rpartition(".")[0]
+
+
+def _is_plutobt(name: str) -> bool:
+    return name == _OWN or name.startswith(_OWN + ".")
+
+
+def _above_plutobt(name: str) -> bool:
+    """True for a package a vendored plutobt sits inside (``host`` and ``host._vendor``
+    for ``host._vendor.plutobt``). An ordinary install has none."""
+    return _OWN.startswith(name + ".")
+
+
+def _reached(name: str) -> list[str]:
+    """The modules a mention of ``name`` makes part of the code: the packages above it,
+    which importing it runs, then the module itself.
+
+    The packages a vendored plutobt sits inside are left out when they are only on the
+    way: their ``__init__.py`` files run whenever plutobt, another host module or a
+    strategy kept inside the host is imported, and that is the price of the layout, not
+    code the strategy chose. Named outright (``import host``, ``from host import NAME``)
+    they count like any other module. The cost: a side effect of such an ``__init__``
+    (it patching a value elsewhere) is not seen unless a file names the package.
+
+    Plutobt's own names are not dropped here: its files are left out by where they are
+    (``_installed_roots``), so a user module that sits under plutobt's name from another
+    folder still counts."""
+    return [n for n in _with_parents(name) if n == name or not _above_plutobt(n)]
+
+
 def _installed_roots() -> tuple[Path, ...]:
     # Where code that is not the user's lives: the standard library, every site-packages
     # folder Python knows (the user site and Debian's dist-packages included), and
@@ -189,11 +221,17 @@ def _imports_written(tree: ast.AST, package: str) -> list[str]:
     """Every module name a file's import statements can mean, wherever they stand (top
     level or inside a function), relative ones resolved against ``package``.
     ``from params import THRESH`` yields ``params`` and ``params.THRESH``: the second is
-    tried as a submodule, since ``from pkg import mod`` reads the same."""
+    tried as a submodule, since ``from pkg import mod`` reads the same.
+
+    Two forms are told apart for the sake of a vendored plutobt. ``import a.b.c`` with no
+    ``as`` binds ``a``, so every package on the way is named outright: the file can use
+    any of them. ``from a.b import NAME`` where every NAME is a plutobt module or lives in
+    one is only an import of plutobt, so ``a.b`` is not named."""
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            out += [alias.name for alias in node.names]
+            for alias in node.names:
+                out += [alias.name] if alias.asname else _with_parents(alias.name)
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
             if node.level:
@@ -203,8 +241,10 @@ def _imports_written(tree: ast.AST, package: str) -> list[str]:
                 home = ".".join(parts[:len(parts) - (node.level - 1)])
                 base = f"{home}.{base}" if base else home
             if base:
-                out.append(base)
-                out += [f"{base}.{a.name}" for a in node.names if a.name != "*"]
+                names = [f"{base}.{a.name}" for a in node.names if a.name != "*"]
+                if not (names and all(_is_plutobt(n) for n in names)):
+                    out.append(base)
+                out += names
     return out
 
 
@@ -248,15 +288,19 @@ def _find_on_disk(parts: list[str], locations: list[str], name: str) -> tuple[Pa
 
 def _locate(name: str) -> tuple[Path | None, str]:
     """(source file, package) of the module called ``name``, without importing it. A
-    loaded module answers from its own names. One that is not loaded yet (an import
-    inside a function that has not run) is found on disk, starting from its nearest
-    loaded parent package, or from ``sys.path`` for a top-level name, so for an ordinary
-    project the code is the same before and after that import first runs."""
+    loaded module answers from its own names, its package from ``__package__``, which is
+    right for ``python -m pkg.mod`` too (there the name is ``__main__``). One that is
+    not loaded yet (an import inside a function that has not run) is found on disk,
+    starting from its nearest loaded parent package, or from ``sys.path`` for a top-level
+    name, so for an ordinary project the code is the same before and after that import
+    first runs."""
     module = sys.modules.get(name)
     if module is not None:
         names = _namespace(module)
-        return _source_file(module), (name if "__path__" in names
-                                      else name.rpartition(".")[0])
+        package = names.get("__package__")      # set for ``python -m pkg.mod`` too, where
+        if not isinstance(package, str):        # the name is "__main__" and says nothing
+            package = name if "__path__" in names else name.rpartition(".")[0]
+        return _source_file(module), package
     parts = name.split(".")
     for depth in range(len(parts) - 1, 0, -1):
         parent = sys.modules.get(".".join(parts[:depth]))
@@ -289,7 +333,10 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     with no source file, such as a notebook cell, has). A class with no file has no
     import statements to read, and ``from params import THRESH`` leaves only a number
     behind, so for it every user module the session has loaded counts. Installed
-    packages, the standard library and plutobt itself are never followed. Nothing is
+    packages, the standard library and plutobt itself are never followed, and the
+    packages a vendored copy sits inside count only when a file names them, a loaded
+    module holds them or one of the strategy's classes is defined in them (``_reached``),
+    or when the class has no file. Nothing is
     imported to do this and no lazily loaded module is woken. From the user's own objects
     only the home module of their type is read, so a proxy is not triggered (a metaclass
     that makes ``__module__`` a property is the one way user code can still run)."""
@@ -322,8 +369,9 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
             seen.add(path)
             owner_files.append(path)
         queue.append((path, package, module))    # followed even with no file (a notebook)
-        for parent in _with_parents(k.__module__)[:-1]:         # the packages it lives in
-            visit(parent)
+        for parent in (_with_parents(package) if package else []):
+            if not _above_plutobt(parent):      # the packages it lives in
+                visit(parent)
         if path is None:
             # no file, so no import statements to read: every loaded user module counts
             for name in sorted(n for n in list(sys.modules) if isinstance(n, str)):
@@ -339,11 +387,11 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
             except (SyntaxError, ValueError, OSError):
                 tree = None
         for name in (_imports_written(tree, package) if tree is not None else []):
-            for part in _with_parents(name):
+            for part in _reached(name):
                 visit(part)
         if module is not None:
             for name in _modules_held(module):
-                for part in _with_parents(name):
+                for part in _reached(name):
                     visit(part)
     return owners, owner_files + sorted(other_files - set(owner_files))
 
