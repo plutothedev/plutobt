@@ -21,7 +21,7 @@ from itertools import combinations
 
 import numpy as np
 
-from plutobt.splits import cscv_blocks
+from plutobt.splits import cscv_blocks, whole
 
 _BATCH = 2048   # splits per vectorised batch; bounds memory at large N
 _TIE = 1e-12    # Sharpes this close are one value: the split sums are matrix products,
@@ -79,6 +79,7 @@ def pbo(returns: np.ndarray, blocks: int = 16) -> PBOResult:
             f"all {given} settings have identical returns: the grid's settings do "
             "nothing, so there is nothing to choose between")
     n_rows, n = r.shape
+    blocks = whole("blocks", blocks)
     dropped, parts = cscv_blocks(n_rows, blocks)
     size = len(parts[0])
     sums = np.stack([r[p].sum(axis=0) for p in parts])          # blocks x N

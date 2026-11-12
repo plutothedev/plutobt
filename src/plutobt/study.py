@@ -48,7 +48,7 @@ from plutobt.oos import (
     walk_forward,
 )
 from plutobt.pbo import IdenticalSettingsError, PBOResult, pbo
-from plutobt.splits import cscv_blocks, purged_folds, walk_forward_windows
+from plutobt.splits import cscv_blocks, purged_folds, walk_forward_windows, whole
 from plutobt.strategy import Strategy
 
 
@@ -133,6 +133,15 @@ def expand_grid(strategy_cls: type, grid: dict, max_configs: int | None = None) 
             "one full backtest, so raise max_configs if you mean it")
     names = list(grid)
     seen, out = set(), []
+    for name in names:
+        for value in grid[name]:
+            plain = _plain(name, value)
+            if isinstance(plain, float) and not math.isfinite(plain):
+                # refused here, before any run: the ledger cannot write it, and it used to
+                # fail there after the first settings had already run
+                raise ValueError(
+                    f"setting {name!r} has the value {plain!r}: a setting must be a "
+                    "finite number (or text, true/false, None)")
     for combo in itertools.product(*(list(grid[n]) for n in names)):
         params = {n: _plain(n, v) for n, v in zip(names, combo, strict=True)}
         key = params_key(params)
@@ -179,6 +188,13 @@ def run_study(strategy_cls, grid, df, instrument, config=None, *, roll_meta=None
         raise ValueError(
             "run_study needs config.periods_per_year (bars a year, e.g. 20412 for 5-minute "
             "RTH index bars) to annualize its Sharpes")
+    # Counts are checked first, by name: a fraction used to fail inside range().
+    blocks, wf_splits = whole("blocks", blocks), whole("wf_splits", wf_splits)
+    cv_folds = whole("cv_folds", cv_folds)
+    if embargo_bars is not None:
+        embargo_bars = whole("embargo_bars", embargo_bars)
+    if max_configs is not None:
+        max_configs = whole("max_configs", max_configs, least=1)
     settings = expand_grid(strategy_cls, grid, max_configs)
     n_rows = len(df) - 1
     # Every split is checked before the first run: too little data fails in a second.

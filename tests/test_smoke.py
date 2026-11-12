@@ -36,15 +36,17 @@ def test_package_imports():
 
 def test_version_is_pep440_string():
     assert isinstance(plutobt.__version__, str)
-    assert plutobt.__version__ == "3.0.0"
+    assert plutobt.__version__ == "3.0.1"
 
 
 def test_pyproject_declares_package_and_src_layout():
     with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
         cfg = tomllib.load(fh)
     assert cfg["project"]["name"] == "plutobt"
-    assert cfg["project"]["version"] == "3.0.0"
-    assert cfg["project"]["requires-python"] == ">=3.11"
+    assert cfg["project"]["version"] == "3.0.1"
+    # 3.0.1: the pinned numpy, pandas and matplotlib have no 3.13 builds, so the
+    # project says so instead of failing in a source build
+    assert cfg["project"]["requires-python"] == ">=3.11,<3.13"
     assert cfg["tool"]["setuptools"]["packages"]["find"]["where"] == ["src"]
     assert "tests" in cfg["tool"]["pytest"]["ini_options"]["testpaths"]
     assert "--import-mode=importlib" in cfg["tool"]["pytest"]["ini_options"]["addopts"]
@@ -139,3 +141,41 @@ def test_cli_import_does_not_shadow_build_continuous():
     assert isinstance(build_continuous, types.FunctionType)
     assert not hasattr(plutobt, "build_continuous") or callable(plutobt.build_continuous)
     assert not isinstance(plutobt.build_continuous, types.ModuleType)
+
+
+def test_readme_states_the_python_versions_the_pins_support():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "Requires Python 3.11 or 3.12" in readme
+    assert "Python 3.11+" not in readme
+    lock = (REPO_ROOT / "requirements.lock").read_text(encoding="utf-8")
+    assert "# Python: 3.11 or 3.12" in lock
+
+
+def test_the_readme_roll_example_runs_as_written(tmp_path, monkeypatch, capsys):
+    """3.0.1, audit finding 11: the block used an undefined `strategy` and stopped before
+    compute_metrics, so a reader could not get a report from it."""
+    from plutobt.continuous import main
+
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("```python\nfrom plutobt import (BacktestConfig, Engine, compute_metrics")
+    block = readme[start + len("```python\n"):readme.index("```", start + 10)]
+    assert 'load_continuous("nq_cont.csv")' in block and "format_report" in block
+    monkeypatch.chdir(tmp_path)
+    assert main([str(REPO_ROOT / "data" / "sample" / "nq_contracts"), "--preset", "generic",
+                 "--root", "NQ", "--ts-is", "open", "-o", "nq_cont.csv"]) == 0
+    capsys.readouterr()
+    exec(compile(block, "README.md", "exec"), {})        # noqa: S102
+    out = capsys.readouterr().out
+    assert "Sharpe" in out and "IN-SAMPLE" in out and "engine version = 3.0.1" in out
+
+
+def test_the_repo_ignores_what_the_readme_commands_write():
+    ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "/nq_cont.csv" in ignore and "/nq_cont.roll.json" in ignore
+
+
+def test_onboarding_matches_3_0():
+    text = (REPO_ROOT / "ONBOARDING.md").read_text(encoding="utf-8")
+    assert "No out-of-sample split in v1" not in text
+    assert "12 modules" not in text
+    assert "3.0" in text and "run_study" in text

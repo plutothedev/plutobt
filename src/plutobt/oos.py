@@ -29,7 +29,7 @@ import pandas as pd
 from plutobt.engine import Engine
 from plutobt.metrics import psr, sharpe, sharpe_stats
 from plutobt.portfolio import RollEvent
-from plutobt.splits import MIN_BARS, purged_folds, walk_forward_windows
+from plutobt.splits import MIN_BARS, purged_folds, walk_forward_windows, whole
 
 _START = 100_000.0
 
@@ -218,7 +218,7 @@ def purged_cv(ctx, folds: int, embargo: int | None) -> PurgedCV:
         embargo = max(1, min(longest, most))
         capped = embargo < longest
     else:
-        embargo = int(embargo)
+        embargo = whole("embargo_bars", embargo)
     out, sharpes = [], []
     for k, (train, test) in enumerate(purged_folds(len(ctx.returns), folds, embargo)):
         idx, _ = _pick(ctx.returns, train)

@@ -2,8 +2,22 @@
 
 from __future__ import annotations
 
+import difflib
+import math
+import numbers
 import tomllib
 from dataclasses import dataclass, fields
+
+_BOOLS = ("carry_overnight", "allow_short", "check_causality", "allow_nonpositive_prices")
+_TEXTS = ("break_on", "on_margin_call")
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def _is_bool(value) -> bool:
+    return isinstance(value, bool) or type(value).__name__ == "bool_"      # numpy's bool
 
 
 @dataclass
@@ -56,6 +70,40 @@ class BacktestConfig:
     # points/dollar P&L stays valid there, ratio returns on the prices do not.
     allow_nonpositive_prices: bool = False
 
+    def __post_init__(self) -> None:
+        """Refuse a value of the wrong kind, by name. A quoted "false" in a TOML file is
+        text, and text counts as true: ``carry_overnight = "false"`` used to run with
+        carry ON. Whether ``break_on`` and ``on_margin_call`` hold a known word is still
+        ``Engine``'s check."""
+        for name in _BOOLS:
+            value = getattr(self, name)
+            if not _is_bool(value):
+                raise ValueError(
+                    f"config {name} = {value!r}: must be true or false (in a TOML file "
+                    "write true or false without quotes; quoted text counts as true)")
+        for name in _TEXTS:
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ValueError(f"config {name} = {value!r}: must be text")
+        for name, optional, least, strict in (
+                ("commission_per_side", False, 0.0, False),
+                ("slippage_ticks", True, 0.0, False),
+                ("risk_free", False, None, False),
+                ("periods_per_year", True, 0.0, True)):
+            value = getattr(self, name)
+            if value is None and optional:
+                continue
+            if not _is_number(value):
+                raise ValueError(
+                    f"config {name} = {value!r}: must be a number"
+                    + (" or left out" if optional else ""))
+            if not math.isfinite(value):
+                raise ValueError(f"config {name} = {value!r}: must be a finite number")
+            if least is not None and (value <= least if strict else value < least):
+                raise ValueError(
+                    f"config {name} = {value!r}: must be "
+                    + (f"above {least:g}" if strict else f"{least:g} or more"))
+
 
 def load_config(path: str) -> BacktestConfig:
     """Load a BacktestConfig from a TOML file (stdlib tomllib).
@@ -65,8 +113,11 @@ def load_config(path: str) -> BacktestConfig:
     """
     with open(path, "rb") as fh:
         raw = tomllib.load(fh)
-    allowed = {f.name for f in fields(BacktestConfig)}
+    allowed = [f.name for f in fields(BacktestConfig)]
     for key in raw:
         if key not in allowed:
-            raise ValueError(f"unknown config key: {key}")
+            close = difflib.get_close_matches(key, allowed, n=1)
+            hint = f" (did you mean {close[0]!r}?)" if close else ""
+            raise ValueError(
+                f"unknown config key: {key}{hint}. The keys are: {', '.join(allowed)}")
     return BacktestConfig(**raw)

@@ -121,8 +121,17 @@ What it does not do, stated plainly:
 pip install -e ".[dev]"
 ```
 
-Requires Python 3.11+. The dev extras include pytest, ruff, and matplotlib.
-The exact stack used for the golden run is pinned in `requirements.lock`.
+Requires Python 3.11 or 3.12: the pinned numpy, pandas and matplotlib have no builds for
+3.13, so pip refuses to install there. The dev extra adds pytest and ruff.
+
+The golden run and CI use the exact stack in `requirements.lock`. The command above pins
+the same numpy, pandas and matplotlib but takes whatever versions of their own
+dependencies are current. To reproduce the tested stack exactly:
+
+```bash
+pip install -r requirements.lock
+pip install -e . --no-deps
+```
 
 ## Run the demo
 
@@ -200,7 +209,9 @@ See `data/sample/NOTICE.md` for the full data license.
 ## Contract specs
 
 Point values and tick sizes follow the CME contract specs (NQ, ES, CL, GC, ZN,
-etc.; `src/plutobt/instruments.py`). Initial and maintenance margins are
+etc.; `src/plutobt/instruments.py`). The registry also holds three stocks (AAPL, MSFT,
+SPY: one share a point, no margin) for the projects that vendor this engine; PlutoBT's
+own tests and examples are futures. Initial and maintenance margins are
 representative defaults as of 2026-06-07, not live values: check your broker's
 before relying on margin behaviour. A plain frame never rolls: each run is one
 series as given (the `*_5m.json` samples are a single synthetic expiry), and the
@@ -260,11 +271,20 @@ roll day    from      to           gap pts       gap $
 ```
 
 ```python
-from plutobt import Engine, BacktestConfig, get_instrument, load_continuous
+from plutobt import (BacktestConfig, Engine, compute_metrics, format_report,
+                     get_instrument, load_continuous)
+from plutobt.strategies.ema_cross import EMACross
 
 df, meta = load_continuous("nq_cont.csv")
-result = Engine(get_instrument("NQ"), BacktestConfig()).run(df, strategy, roll_meta=meta)
+config = BacktestConfig(periods_per_year=20412)   # bars a year: 5-minute RTH index bars
+result = Engine(get_instrument("NQ"), config).run(df, EMACross(), roll_meta=meta)
+result.metrics = compute_metrics(result, periods_per_year=config.periods_per_year)
+print(format_report(result, symbol="NQ"))
 ```
+
+`Engine.run` returns the run; `compute_metrics` is a separate step, and `format_report`
+needs its result in `result.metrics`. A plain series runs the same way without
+`roll_meta` (`load_bars("data/sample/nq_5m.json")`).
 
 **When it rolls.** `calendar` (equity-index roots NQ, ES, MNQ, MES, YM, RTY): CME's
 customary roll date, the Monday before the third Friday of the expiry month
@@ -361,18 +381,31 @@ report then answers:
 
 - **Deflated Sharpe** (Bailey and Lopez de Prado, 2014): the probability the best
   setting truly beats the luck bar, the Sharpe the best of N zero-edge tries reaches by
-  luck. N is every distinct try ever recorded for this strategy on these exact bars,
-  read from the ledger. A try is the fully resolved setting (class defaults included)
-  plus a hash of the strategy's code, so changing a default or editing the logic and
-  rerunning the same grid counts every rerun. "Survives deflation" means 0.95 or more.
+  luck. N is every distinct try ever recorded for this strategy on these bars, read
+  from the ledger. A try is the fully resolved setting (class defaults included), the
+  config switches that change what trades (`allow_short`, `break_on`,
+  `carry_overnight`, `on_margin_call`), and a hash of the strategy's code. The code is
+  the whole file of every module that defines the strategy, plus your own modules
+  those files import at the top: editing a threshold constant or a helper function
+  counts the same as editing the class. "Survives deflation" means 0.95 or more. A
+  strategy that is rarely in the market has less evidence than its bar count suggests
+  (with no edge, one with 10 non-zero returns passed 10% of the time), so under 30
+  bars with a non-zero return there is no verdict, and under 100 a warning.
 - **PBO**, the Probability of Backtest Overfitting (Bailey, Borwein, Lopez de Prado
   and Zhu): the bars are cut into 16 blocks; for each of the 12,870 ways to call half of
   them in-sample, how often does the in-sample winner land in the bottom half on the
   other half? 0.5 is a coin flip. The paper treats anything above 0.05 as a warning.
+  PBO measures whether the ranking holds, not whether there is an edge: settings that
+  are nearly the same read high even when all of them work, so read it with the
+  out-of-sample loss line beside it. Settings with identical returns count once, and a
+  grid whose settings all do nothing gets no PBO.
 - **Walk-forward**: pick the best on one window, trade it on the next, five times.
   Each pick is rerun flat in its test window (earlier bars only warm up the
-  indicators), so the stitched curve could actually have been traded. A position open
-  at a window's end is charged one exit.
+  indicators), so each window could actually have been traded. A position open at a
+  window's end is charged one exit. Every window restarts from 100,000, so the
+  stitched curve adds the windows up; it does not follow one account. Margin calls
+  and refused orders inside a window are printed, and so is a stitched curve that
+  fell below the margin its position needed.
 - **Purged CV**: every block is the test block once. The bars right after it are
   left out of training (the embargo, by default the longest trade in bars), because
   what happens there still depends on the test block: the position carried out of it,
@@ -383,18 +416,31 @@ report then answers:
 **The ledger.** Every completed run is one line in `.plutobt/trials.jsonl` (change it
 with `ledger=`, turn it off with `ledger=False`, which the report then stamps). It is an
 honesty aid, not a lock: a strategy is known by its module and class name, so renaming
-the class starts a fresh count, and deleting the file forgets every try. Any edit to the
-code counts as a new try, a comment included, and near-identical settings count
-separately: both overstate N, so the verdict errs strict. Costs and the data window are
-not part of a try: a different set of bars is a different count. The report prints the
-ledger's path, since the default is relative to the folder you run from.
+the class starts a fresh count, and deleting the file forgets every try. Comments and
+formatting are not an edit. Any other change to the strategy's files is a new try, even
+one that does not touch the strategy, and near-identical settings count separately: both
+overstate N, so the verdict errs strict. Two limits: a helper imported inside a function
+is not followed, and a class written in a notebook cell has no file, so only the class
+itself is hashed there. Costs are not part of a try.
+
+Bars are matched by what they hold (timestamps, prices, volume, session and roll
+columns), not by how the frame is formatted, and a different window is a different count.
+When the ledger holds tries of the same strategy on other bars, the report says how many,
+since N does not include them. The report prints the ledger's full path: the default is
+relative to the folder you run from, so a run from another folder starts a new count.
+The ledger is your research record. This repo ignores its own; in the project that holds
+your strategies, commit it if the count should travel with the code.
 
 **How it is proven.** On pure noise, 2,000 seeded studies of 50 independent settings:
 the best setting survived deflation in 0.25% of them. Real grids are correlated (EMA
-20/50 and 21/50 move together), and there the margin is thinner: 1.6%, 4.1% and 4.7%
-at correlations of 0.5, 0.9 and 0.99, still under the 5% the 0.95 bar promises. With
-one setting carrying a real edge, it was found and survived in 97.7% of 300. The luck bar matches a brute-force simulation
-and the paper's worked example (Deflated Sharpe 0.9004); PBO gives about 0.5 on noise,
-near 0 for a planted steady edge and above 0.7 for settings that only got lucky; a
-planted regime change makes walk-forward fall below in-sample. All test data is
-synthetic: no real-data sweep was run to build this.
+20/50 and 21/50 move together), and there the margin is thinner. Pooled over 40 seeds
+of 1,000 studies each: 1.6%, 4.3% and 4.9% at correlations of 0.5, 0.9 and 0.99. That
+is the 5% the 0.95 bar promises, not safely under it: at 0.99, 17 of the 40 seeds landed
+above 5% on their own. With one setting carrying a real edge (a Sharpe of 0.20 a period
+over 1,000 returns), it was found and survived in 97.7% of 300. The luck bar matches a
+brute-force simulation and the paper's worked example (Deflated Sharpe 0.9004). PBO
+averages about 0.5 on noise over 30 seeds, near 0 for a planted steady edge and above
+0.7 for settings that only got lucky; one study can land far from the average (the
+example above prints 0.873 on bars with no edge). A planted regime change makes
+walk-forward fall below in-sample. All test data is synthetic: no real-data sweep was
+run to build this.

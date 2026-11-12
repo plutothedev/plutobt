@@ -10,6 +10,8 @@ data can support.
 """
 from __future__ import annotations
 
+import numbers
+
 import numpy as np
 
 MIN_BARS = 30
@@ -17,6 +19,18 @@ MIN_BARS = 30
 
 class SplitError(ValueError):
     """A split the data cannot support."""
+
+
+def whole(name: str, value, *, least: int = 0) -> int:
+    """``value`` as an int when it is a whole number (16 or 16.0), else a refusal naming
+    ``name``: a fraction, a bool or text here used to fail deep inside ``range()``."""
+    ok = not isinstance(value, bool) and isinstance(value, numbers.Real) \
+        and float(value).is_integer()
+    if not ok:
+        raise SplitError(f"{name} must be a whole number, got {value!r}")
+    if int(value) < least:
+        raise SplitError(f"{name} must be {least} or more, got {value!r}")
+    return int(value)
 
 
 def _too_short(n_rows: int, what: str) -> SplitError:
@@ -29,6 +43,7 @@ def cscv_blocks(n_rows: int, blocks: int) -> tuple[int, list[range]]:
     """``blocks`` equal blocks of rows for CSCV. The ``n_rows % blocks`` remainder rows
     are dropped from the START, so the most recent bars always count. Returns
     (rows dropped, the blocks)."""
+    blocks = whole("blocks", blocks)
     if blocks < 2 or blocks % 2:
         raise SplitError(f"blocks must be an even number of at least 2, got {blocks}")
     size = n_rows // blocks
@@ -54,6 +69,7 @@ def _chunks(n_rows: int, count: int) -> list[range]:
 def walk_forward_windows(n_rows: int, splits: int, anchored: bool) -> list[tuple[range, range]]:
     """``splits + 1`` equal chunks (remainder to the last); window i tests chunk i + 1 and
     trains on chunk i (rolling) or chunks 0..i (anchored). Returns (train, test) pairs."""
+    splits = whole("wf_splits", splits)
     if splits < 1:
         raise SplitError(f"walk-forward needs at least 1 split, got {splits}")
     if n_rows // (splits + 1) < MIN_BARS:
@@ -77,8 +93,10 @@ def purged_folds(n_rows: int, folds: int, embargo: int) -> list[tuple[np.ndarray
     is every other row except the ``embargo`` rows right after the test block, which still
     depend on it (the position carried out of it, indicators remembering it, the same
     regime). Returns (train rows, test range) pairs."""
+    folds = whole("cv_folds", folds)
     if folds < 2:
         raise SplitError(f"purged CV needs at least 2 folds, got {folds}")
+    embargo = whole("embargo_bars", embargo)
     if embargo < 0:
         raise SplitError(f"embargo must be 0 or more bars, got {embargo}")
     if n_rows // folds < MIN_BARS:
