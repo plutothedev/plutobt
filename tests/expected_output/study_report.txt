@@ -40,4 +40,4 @@ Purged CV   (6 folds, embargo 232 bars)
   fold 6: test rows 1345-1618: fast_span=20, slow_span=50   out-of-sample -6.549
   Spread of fold Sharpes = 7.798
 data_sha256   = 123af852f8fb1364e02b5761d048a397adb5b87a53301567c85410b139fc8ca7
-engine version = 3.0.1
+engine version = 3.0.2
