@@ -200,3 +200,145 @@ def test_tries_a_3_0_0_ledger_holds_for_these_bars_still_count(tmp_path):
     res = run_study(Hold, {"side": [1, -1]}, df, NQ, CFG, ledger=led)
     assert res.n_earlier == 3 and res.deflation["n_trials"] == 5
     assert res.n_other_bars == 0
+
+
+# --- whole-branch review of 3.0.1 ----------------------------------------------------------
+
+@pytest.fixture
+def layout(tmp_path, monkeypatch):
+    """Write a small project from {relative path: source} and import its strategy `S`."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    tag = tmp_path.name.replace("-", "_")
+    made = []
+
+    def load(files, strategy_module):
+        for rel, source in files.items():
+            path = tmp_path / rel.format(tag=tag)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(textwrap.dedent(source).format(tag=tag), encoding="utf-8")
+        for name in [m for m in sys.modules if tag in m]:
+            del sys.modules[name]
+        importlib.invalidate_caches()
+        made.append(tag)
+        return importlib.import_module(strategy_module.format(tag=tag)).S
+
+    yield load
+    for name in [m for m in sys.modules if tag in m]:
+        del sys.modules[name]
+
+
+BODY = '''
+
+class S(Strategy):
+    def on_bar(self, ctx):
+        pass
+'''
+
+
+def test_a_constant_imported_by_name_from_another_file_is_code(layout):
+    """Review finding 1: `from params import THRESH` reached builtins, never params.py."""
+    def version(thresh):
+        return layout({
+            "params_{tag}.py": f"THRESH = {thresh}\nWINDOWS = [10, 20]\n",
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              "from params_{tag} import THRESH, WINDOWS\n" + BODY,
+        }, "strat_{tag}")
+
+    a, b = code_sha256(version(1.0)), code_sha256(version(2.0))
+    assert a != b
+    assert len(code_files(version(2.0))) == 2
+
+
+def test_a_module_in_a_package_without_init_is_code(layout):
+    """Review finding 1: `import lib.helpers` binds `lib`, a namespace package with no
+    file, so helpers.py was never reached."""
+    def version(cut):
+        return layout({
+            "lib_{tag}/helpers.py": f"CUT = {cut}\n",
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              "import lib_{tag}.helpers\n" + BODY,
+        }, "strat_{tag}")
+
+    assert code_sha256(version(1)) != code_sha256(version(2))
+
+
+def test_a_relative_import_inside_a_package_is_code(layout):
+    def version(cut):
+        return layout({
+            "pkg_{tag}/__init__.py": "",
+            "pkg_{tag}/params.py": f"CUT = {cut}\n",
+            "pkg_{tag}/strat.py": "from plutobt.strategy import Strategy\n"
+                                  "from .params import CUT\n"
+                                  "from . import params as p\n" + BODY,
+        }, "pkg_{tag}.strat")
+
+    assert code_sha256(version(1)) != code_sha256(version(2))
+    assert len(code_files(version(2))) == 3            # strat, params, the package __init__
+
+
+def test_an_import_inside_a_function_is_code_once_it_has_run(layout):
+    def version(cut):
+        cls = layout({
+            "late_{tag}.py": f"CUT = {cut}\n",
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              "def cut():\n"
+                              "    from late_{tag} import CUT\n"
+                              "    return CUT\n" + BODY,
+        }, "strat_{tag}")
+        return cls
+
+    assert code_sha256(version(1)) != code_sha256(version(2))
+
+
+def test_an_import_cycle_between_user_modules_ends(layout):
+    cls = layout({
+        "a_{tag}.py": "import b_{tag}\nX = 1\n",
+        "b_{tag}.py": "import a_{tag}\nY = 2\n",
+        "strat_{tag}.py": "from plutobt.strategy import Strategy\nimport a_{tag}\n" + BODY,
+    }, "strat_{tag}")
+    assert len(code_files(cls)) == 3
+
+
+def test_an_object_that_raises_on_attribute_access_does_not_break_the_hash(layout):
+    """Review finding 9: a proxy at module level raised from inside code_sha256."""
+    cls = layout({
+        "strat_{tag}.py": textwrap.dedent('''
+            from plutobt.strategy import Strategy
+
+
+            class Proxy:
+                def __getattribute__(self, name):
+                    raise RuntimeError("working outside of application context")
+
+
+            current = Proxy()
+        ''') + BODY,
+    }, "strat_{tag}")
+    assert len(code_sha256(cls)) == 64
+
+
+def test_libraries_outside_the_default_install_paths_are_not_user_code(monkeypatch):
+    """Review finding 10: with numpy under `pip install --user` or Debian's dist-packages
+    the hash took in hundreds of library files and moved on every upgrade."""
+    import site
+    from pathlib import Path
+
+    from plutobt import ledger
+
+    roots = ledger._installed_roots()
+    for extra in [site.getusersitepackages(), *site.getsitepackages()]:
+        assert Path(extra).resolve() in roots
+    assert not ledger._is_user_file(Path("/usr/lib/python3/dist-packages/numpy/core.py"), ())
+    assert not ledger._is_user_file(Path("C:/x/Lib/site-packages/pandas/api.py"), ())
+    assert ledger._is_user_file(Path("C:/work/research/strat.py"), ())
+
+
+def test_a_numpy_bool_switch_does_not_break_the_ledger(tmp_path):
+    """Review finding 2: accepted by the config, then json could not write it."""
+    from dataclasses import replace
+
+    cfg = replace(CFG, allow_short=np.bool_(False))
+    assert config_key(cfg)["allow_short"] is False
+    res = run_study(Hold, {"side": [1]}, walk(600, drift=0.3), NQ, cfg,
+                    ledger=tmp_path / "t.jsonl")
+    assert res.deflation["n_trials"] == 1

@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
 import inspect
 import json
 import math
 import os
+import site
 import sys
 import sysconfig
 import tokenize
@@ -95,16 +97,25 @@ def _own_classes(cls: type) -> list[type]:
 
 
 def _installed_roots() -> tuple[Path, ...]:
-    # Where code that is not the user's lives: the standard library, site-packages, and
+    # Where code that is not the user's lives: the standard library, every site-packages
+    # folder Python knows (the user site and Debian's dist-packages included), and
     # plutobt itself.
-    roots = {Path(p).resolve() for key, p in sysconfig.get_paths().items()
-             if key in ("stdlib", "platstdlib", "purelib", "platlib") and p}
+    found = [p for key, p in sysconfig.get_paths().items()
+             if key in ("stdlib", "platstdlib", "purelib", "platlib") and p]
+    try:
+        found += [*site.getsitepackages(), site.getusersitepackages()]
+    except AttributeError:          # some embedded or old virtualenv builds lack these
+        pass
+    roots = {Path(p).resolve() for p in found if p}
     roots.add(Path(__file__).resolve().parent)
     return tuple(roots)
 
 
 def _source_file(module) -> Path | None:
-    path = getattr(module, "__file__", None)
+    try:
+        path = getattr(module, "__file__", None)
+    except Exception:               # a proxy object that raises on attribute access
+        return None
     if not path or not str(path).endswith(".py"):
         return None
     path = Path(path).resolve()
@@ -112,59 +123,144 @@ def _source_file(module) -> Path | None:
 
 
 def _is_user_file(path: Path, roots: tuple[Path, ...]) -> bool:
+    if {"site-packages", "dist-packages"} & set(path.parts):
+        return False
     return not any(path == root or root in path.parents for root in roots)
 
 
-def _modules_used(module) -> list:
-    """The modules a module's top level names: imported modules, and the home modules of
-    the functions, classes and objects it imported or built."""
-    found = {}
+def _modules_held(module) -> list[str]:
+    """Names of the modules a loaded module's top level holds: modules themselves, and
+    the home modules of the functions, classes and objects found there. This catches what
+    the source's import statements do not show (``importlib.import_module``)."""
+    names = set()
     for value in list(vars(module).values()):
-        if inspect.ismodule(value):
-            target = value
-        else:
-            name = getattr(value, "__module__", None)
-            if not isinstance(name, str):
-                name = getattr(type(value), "__module__", None)
-            target = sys.modules.get(name) if isinstance(name, str) else None
-        if target is not None and target is not module:
-            found[getattr(target, "__name__", repr(target))] = target
-    return [found[name] for name in sorted(found)]
+        try:
+            if inspect.ismodule(value):
+                name = value.__name__
+            else:
+                name = getattr(value, "__module__", None)
+                if not isinstance(name, str):
+                    name = getattr(type(value), "__module__", None)
+        except Exception:           # an object that raises on attribute access: skip it
+            continue
+        if isinstance(name, str) and name:
+            names.add(name)
+    return sorted(names)
+
+
+def _imports_written(tree: ast.AST, package: str) -> list[tuple[str, list[str]]]:
+    """(module name, the names taken from it) for every import statement in a file,
+    wherever it stands (top level or inside a function), relative ones resolved against
+    ``package``. ``from params import THRESH`` yields ("params", ["params.THRESH"]): the
+    second part is tried as a submodule, since ``from pkg import mod`` reads the same."""
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out += [(alias.name, []) for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = package.split(".") if package else []
+                if node.level - 1 > len(parts) or not parts:
+                    continue
+                home = ".".join(parts[:len(parts) - (node.level - 1)])
+                base = f"{home}.{base}" if base else home
+            if base:
+                out.append((base, [f"{base}.{a.name}" for a in node.names if a.name != "*"]))
+    return out
+
+
+def _locate(name: str) -> tuple[Path | None, str]:
+    """(source file, package) of the module called ``name``, without importing anything
+    new: a loaded module answers for itself; one not loaded yet (an import inside a
+    function that has not run) is looked up only when that cannot run code, which is when
+    it is top-level or its parent package is already loaded."""
+    module = sys.modules.get(name)
+    if module is not None:
+        package = getattr(module, "__package__", None)
+        if not isinstance(package, str):
+            package = name if hasattr(module, "__path__") else name.rpartition(".")[0]
+        return _source_file(module), package
+    parent = name.rpartition(".")[0]
+    if parent and parent not in sys.modules:
+        return None, ""
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError, AttributeError):
+        return None, ""
+    origin = getattr(spec, "origin", None)
+    if not origin or not str(origin).endswith(".py"):
+        return None, ""
+    path = Path(origin).resolve()
+    return (path if path.is_file() else None), (spec.parent or "")
+
+
+def _with_parents(name: str) -> list[str]:
+    parts = name.split(".")
+    return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
 def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     """(each of the strategy's classes with its module, the files that make up its code).
+
     The files: every module that defines one of the classes, then every USER module those
-    name at their top level, followed through. Installed packages, the standard library
-    and plutobt itself are never followed."""
+    import, followed through. An import is found two ways: as written in the source
+    (``import x``, ``from x import NAME``, relative imports, imports inside functions,
+    and the parent packages they run), and as held by the loaded module (which also
+    catches ``importlib.import_module``). Installed packages, the standard library and
+    plutobt itself are never followed."""
     roots = _installed_roots()
-    owners, files, seen, queue = [], [], set(), []
+    owners, owner_files, other_files = [], [], set()
+    seen: set[Path] = set()
+    queue: list[tuple[Path, str, object]] = []
+
+    def visit(name: str) -> bool:
+        """Queue the module called ``name`` if it is the user's; True when it is one."""
+        path, package = _locate(name)
+        if path is None or not _is_user_file(path, roots):
+            return path is None and name in sys.modules     # e.g. a namespace package
+        if path not in seen:
+            seen.add(path)
+            other_files.add(path)
+            queue.append((path, package, sys.modules.get(name)))
+        return True
+
     for k in _own_classes(cls):
         module = sys.modules.get(k.__module__)
         owners.append((k, module))
-        if module is not None and id(module) not in seen:
-            seen.add(id(module))
-            queue.append((module, True))
+        path = _source_file(module) if module is not None else None
+        if path is not None and path not in seen:
+            seen.add(path)
+            owner_files.append(path)
+            _, package = _locate(k.__module__)
+            queue.append((path, package, module))
+        if module is not None:
+            for parent in _with_parents(k.__module__)[:-1]:     # the packages it lives in
+                visit(parent)
+
     while queue:
-        module, is_owner = queue.pop(0)
-        path = _source_file(module)
-        if path is not None and (is_owner or _is_user_file(path, roots)):
-            if path not in files:
-                files.append(path)
-        elif not is_owner:
-            continue                    # installed code: not hashed, not followed
-        for used in _modules_used(module):
-            if id(used) in seen:
-                continue
-            used_path = _source_file(used)
-            if used_path is not None and _is_user_file(used_path, roots):
-                seen.add(id(used))
-                queue.append((used, False))
-    return owners, files
+        path, package, module = queue.pop(0)
+        try:
+            with tokenize.open(path) as fh:
+                tree = ast.parse(fh.read())
+        except (SyntaxError, ValueError, OSError):
+            tree = None
+        written = _imports_written(tree, package) if tree is not None else []
+        for base, taken in written:
+            ours = [visit(part) for part in _with_parents(base)]
+            if ours and ours[-1]:
+                for name in taken:              # `from pkg import mod`: mod may be a module
+                    visit(name)
+        if module is not None:
+            for name in _modules_held(module):
+                for part in _with_parents(name):
+                    visit(part)
+    return owners, owner_files + sorted(other_files - set(owner_files))
 
 
 def code_files(cls: type) -> list[str]:
-    """The files ``code_sha256`` reads for this strategy, in hashing order."""
+    """The files ``code_sha256`` reads for this strategy: its own modules first, then the
+    user modules they import, by path."""
     return [str(p) for p in _code_modules(cls)[1]]
 
 
@@ -203,12 +299,22 @@ def code_sha256(cls: type) -> str:
     not seen."""
     owners, files = _code_modules(cls)
     h = hashlib.sha256()
+    own = []
     for k, module in owners:
         h.update(k.__qualname__.encode("utf-8") + b"\0")
-        if module is None or _source_file(module) is None:
+        path = _source_file(module) if module is not None else None
+        if path is None:
             _class_fallback(h, k)
-    for path in files:
+        elif path not in own:
+            own.append(path)
+    for path in own:                            # the strategy's own files, base class first
         h.update(_normalized(path).encode("utf-8") + b"\0")
+    # The imported files go in as a sorted set of digests: which one was found first
+    # (and the folder the project sits in) must not change the hash.
+    rest = sorted(hashlib.sha256(_normalized(p).encode("utf-8")).hexdigest()
+                  for p in files if p not in own)
+    for digest in rest:
+        h.update(digest.encode("ascii") + b"\0")
     return h.hexdigest()
 
 
@@ -219,7 +325,7 @@ def config_key(config) -> dict:
     """The config switches that change what a strategy trades, which makes them part of a
     try. Costs are left out on purpose (a cost sweep is not a parameter sweep), and so are
     the look-ahead check switches, which change no result."""
-    return {name: getattr(config, name) for name in _TRY_CONFIG}
+    return {name: _plain(name, getattr(config, name)) for name in _TRY_CONFIG}
 
 
 def resolved_settings(cls: type, params: dict) -> dict:
