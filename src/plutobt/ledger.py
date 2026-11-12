@@ -7,11 +7,16 @@ each, and N is read back from the file rather than reported by the user.
 A try is the distinct (strategy, data, code, settings). The settings are fully resolved:
 every public class attribute after the grid is applied, so editing a default that is not in
 the grid and rerunning is a new try, and naming a default in the grid is not. The code is a
-hash of the strategy's source, so editing the logic and rerunning is a new try too (any
-edit counts, a comment included: the count errs strict). Rerunning the same setting on the
-same bars and code is one try, and its latest Sharpe is the one used. Costs and margin are
-not part of the key, since a cost sweep is not a parameter sweep. ``Engine.run`` alone
-never writes here.
+hash of the strategy's files and of the user modules they import (``code_sha256``), so
+editing the logic and rerunning is a new try wherever the logic lives; comments and
+formatting are not an edit, and any other change to those files is, which errs strict.
+The config switches that change what trades are part of a try (``config_key``); costs and
+margin are not, since a cost sweep is not a parameter sweep. Rerunning the same setting on
+the same bars, code and switches is one try, and its latest Sharpe is the one used.
+``Engine.run`` alone never writes here.
+
+The strategy belongs in its own file: a ``run_study`` call in the same file makes every
+edit to that call an edit to the strategy's code.
 
 An honesty aid, not a lock: a strategy is identified by its module and class name, so
 renaming the class starts a fresh count, and deleting the file forgets every try. Python
@@ -293,7 +298,7 @@ def code_sha256(cls: type) -> str:
     """sha256 of the strategy's code, so an edit to the logic is a new try wherever the
     logic lives: the whole file of every module that defines one of the strategy's classes
     (a module-level constant or a helper function counts), plus every user module those
-    files name at their top level, followed through (``code_files`` lists them). Comments
+    files import, followed through (``code_files`` lists them). Comments
     and formatting are not an edit. A class with no file (a notebook cell, ``exec``) falls
     back to its own source or bytecode, so a helper edited in another notebook cell is
     not seen."""

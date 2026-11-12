@@ -386,8 +386,9 @@ report then answers:
   config switches that change what trades (`allow_short`, `break_on`,
   `carry_overnight`, `on_margin_call`), and a hash of the strategy's code. The code is
   the whole file of every module that defines the strategy, plus your own modules
-  those files import at the top: editing a threshold constant or a helper function
-  counts the same as editing the class. "Survives deflation" means 0.95 or more. A
+  those files import (followed through; installed packages are left out): editing a
+  threshold constant or a helper function, in that file or in a `params.py` it imports
+  from, counts the same as editing the class. "Survives deflation" means 0.95 or more. A
   strategy that is rarely in the market has less evidence than its bar count suggests
   (with no edge, one with 10 non-zero returns passed about 10% of the time), so under 30
   bars with a non-zero return there is no verdict, and under 100 a warning.
@@ -417,11 +418,17 @@ report then answers:
 with `ledger=`, turn it off with `ledger=False`, which the report then stamps). It is an
 honesty aid, not a lock: a strategy is known by its module and class name, so renaming
 the class starts a fresh count, and deleting the file forgets every try. Comments and
-formatting are not an edit. Any other change to the strategy's files is a new try, even
-one that does not touch the strategy, and near-identical settings count separately: both
-overstate N, so the verdict errs strict. Two limits: a helper imported inside a function
-is not followed, and a class written in a notebook cell has no file, so only the class
-itself is hashed there. Costs are not part of a try.
+formatting are not an edit (a docstring is). Any other change to the strategy's files is
+a new try, even one that does not touch the strategy, and near-identical settings count
+separately: both overstate N, so the verdict errs strict. One limit: a class written in a
+notebook cell has no file, so only the class itself and the modules the notebook has
+imported are hashed there.
+
+**Keep the strategy in its own file.** Costs are not part of a try: change the
+commission in your config and rerun, and N stays where it was. But if the `run_study`
+call sits in the same file as the strategy, every edit to that call (the grid, the costs,
+the config) is an edit to the strategy's file, and rerunning the same settings counts
+them again. Put the strategy in one file and the study that runs it in another.
 
 Bars are matched by what they hold (timestamps, prices, volume, session and roll
 columns), not by how the frame is formatted, and a different window is a different count.

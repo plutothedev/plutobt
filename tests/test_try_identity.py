@@ -13,6 +13,7 @@ from plutobt.data import bars_sha256, frame_sha256
 from plutobt.instruments import get_instrument
 from plutobt.ledger import Ledger, code_files, code_sha256, config_key, try_key
 from plutobt.study import run_study
+from tests.conftest import REPO_ROOT
 from tests.study_fixtures import CFG, Coin, Hold, walk
 
 NQ = get_instrument("NQ")
@@ -342,3 +343,27 @@ def test_a_numpy_bool_switch_does_not_break_the_ledger(tmp_path):
     res = run_study(Hold, {"side": [1]}, walk(600, drift=0.3), NQ, cfg,
                     ledger=tmp_path / "t.jsonl")
     assert res.deflation["n_trials"] == 1
+
+
+def test_a_study_call_in_the_strategys_own_file_is_part_of_its_code(layout):
+    """Review finding 4, pinned as documented: the whole file is the code, so the README
+    tells users to keep the study that runs a strategy in another file."""
+    def version(commission):
+        return layout({
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              f"COMMISSION = {commission}   # the study call's cost\n" + BODY,
+        }, "strat_{tag}")
+
+    assert code_sha256(version(2.5)) != code_sha256(version(3.0))
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "Keep the strategy in its own file." in readme
+
+
+def test_a_docstring_is_code_and_a_comment_is_not(layout):
+    def version(extra):
+        return layout({
+            "strat_{tag}.py": '"""' + extra + '"""\n'
+                              "from plutobt.strategy import Strategy\n# note\n" + BODY,
+        }, "strat_{tag}")
+
+    assert code_sha256(version("one")) != code_sha256(version("two"))
