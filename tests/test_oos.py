@@ -240,3 +240,77 @@ def test_a_small_position_on_a_sunk_curve_is_not_flagged():
     wf = walk_forward(_context(Hold, [{"side": 1}, {"side": -1}], df, NQ, CFG, None), 2, True)
     assert wf.equity.min() < 100_000                      # the curve did fall
     assert wf.below_margin_windows == 0 and math.isnan(wf.below_margin_low)
+
+
+# --- re-review of the 3.0.1 fixes: the position comes from the engine, not from slices -----
+
+def _expected_pyramid(n, side=1):
+    """Contracts at each bar's close for ScaleIn: an order on bar i fills at bar i+1."""
+    out = np.zeros(n, dtype=int)
+    for i in range(n):
+        step = i % 100
+        out[i] = side * (sum(step > s for s in (5, 10, 15, 20)) if step <= 60 else 0)
+    return out
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_the_engine_reports_the_position_at_each_bar(side):
+    from plutobt.engine import Engine
+    from tests.study_fixtures import ScaleIn
+
+    df = walk(300, drift=0.3)
+    strat = ScaleIn()
+    strat.side = side
+    res = Engine(NQ, CFG).run(df, strat)
+    assert list(res.position.index) == list(df.ts)
+    assert np.array_equal(res.position.to_numpy(), _expected_pyramid(300, side))
+    assert {(t.contracts, t.entry_ts) for t in res.trades if not t.open_at_end} == \
+        {(4, int(df.ts.iloc[k * 100 + 6])) for k in range(3)}     # one merged trade each
+
+
+def test_a_flip_and_a_flat_run_report_their_positions():
+    from plutobt.engine import Engine
+
+    class Flip(Hold):
+        def on_bar(self, ctx):
+            self.i = getattr(self, "i", -1) + 1
+            if self.i == 3:
+                ctx.broker.buy(contracts=2)
+            elif self.i == 10:
+                ctx.broker.sell(contracts=5)            # long 2 to short 3 on one bar
+
+    res = Engine(NQ, CFG).run(walk(40), Flip())
+    pos = res.position.to_numpy()
+    assert list(pos[:4]) == [0, 0, 0, 0] and set(pos[4:11]) == {2} and set(pos[11:]) == {-3}
+    flat = Engine(NQ, CFG).run(walk(40), _Never())
+    assert not flat.position.to_numpy().any()
+
+
+class _Never(Hold):
+    side = 0
+
+
+def test_a_pyramid_is_held_as_it_was_built_not_at_full_size_from_the_first_fill():
+    """Re-review finding 1: from the trades, a 4-lot pyramid read as 4 lots from its first
+    fill, so the below-margin warning fired on bars that held 1."""
+    from tests.study_fixtures import ScaleIn
+
+    df = walk(300, drift=0.3)
+    run = rerun_window(ScaleIn, {"side": 1}, df, NQ, CFG, None, 100, 299)
+    assert np.array_equal(run.held, np.abs(_expected_pyramid(300))[100:300])
+    assert run.max_contracts == 4
+
+
+def test_a_pyramid_built_on_profits_is_not_flagged():
+    """One lot at 100,000, four only once the curve is far above their margin: never
+    short of margin. (NQ with a 26,000 initial margin: 4 lots need 104,000.)"""
+    from dataclasses import replace
+
+    from tests.study_fixtures import ScaleIn
+
+    nq = replace(NQ, initial_margin=26_000.0, maintenance_margin=20_900.0)
+    df = walk(600, drift=40.0, sigma=1.0, seed=3)          # +800 a bar per contract
+    ctx = _context(ScaleIn, [{"side": 1}, {"side": -1}], df, nq, CFG, None)
+    wf = walk_forward(ctx, 2, True)
+    assert wf.margin_refusals == 0
+    assert wf.below_margin_windows == 0

@@ -132,3 +132,21 @@ class ScaleOut(Strategy):
             ctx.broker.buy(contracts=self.lots)
         elif step in (70, 80, 90, 95) and ctx.position.qty > 0:
             ctx.broker.sell(contracts=1)
+
+
+class ScaleIn(Strategy):
+    """Adds one contract at bars 5, 10, 15 and 20 of every 100, closes all at bar 60: a
+    pyramid. The engine books it as ONE trade of ``4`` contracts entered at the first
+    fill, so the position at a bar cannot be read off the trades."""
+    side = 1
+
+    def precompute(self, df):
+        df["step"] = np.arange(len(df)) % 100
+        return df
+
+    def on_bar(self, ctx):
+        step = int(ctx.bar.step)
+        if step in (5, 10, 15, 20):
+            (ctx.broker.buy if self.side > 0 else ctx.broker.sell)(contracts=1)
+        elif step == 60 and ctx.position.qty != 0:
+            ctx.broker.close()

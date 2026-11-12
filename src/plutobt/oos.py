@@ -103,19 +103,6 @@ def _pick(returns: pd.DataFrame, rows: np.ndarray) -> tuple[int | None, float]:
     return idx, float(srs[idx])
 
 
-def _held(trades, ts: np.ndarray) -> np.ndarray:
-    """Contracts held at the close of each bar in ``ts``. A Trade is one closed slice of
-    a position (four contracts sold one at a time are four 1-lot trades), so the position
-    is the sum of the slices open at that bar: filled at or before it, not yet exited."""
-    held = np.zeros(len(ts), dtype=int)
-    for t in trades:
-        mask = ts >= t.entry_ts
-        if not (t.open_at_end or t.exit_ts is None):
-            mask &= ts < t.exit_ts
-        held[mask] += abs(int(t.contracts))
-    return held
-
-
 def rerun_window(strategy_cls, params: dict, df: pd.DataFrame, instrument, config,
                  roll_meta, a: int, b: int) -> WindowRun:
     """Rerun one setting flat over rows ``[a, b)`` (bars ``a..b``)."""
@@ -129,7 +116,9 @@ def rerun_window(strategy_cls, params: dict, df: pd.DataFrame, instrument, confi
     res = Engine(instrument, config).run(cut, _build(strategy_cls, params), roll_meta=meta,
                                          trade_from_ts=start_ts)
     equity = res.equity_curve.iloc[a: b + 1]
-    held = _held(res.trades, equity.index.to_numpy())
+    # The engine's own position at each bar's close. It cannot be rebuilt from the
+    # trades: a pyramid is one Trade entered at its first fill, a scale-out is several.
+    held = np.abs(res.position.iloc[a: b + 1].to_numpy())
     last = res.trades[-1] if res.trades else None
     open_at_end = bool(last is not None and last.open_at_end)
     charge = 0.0
