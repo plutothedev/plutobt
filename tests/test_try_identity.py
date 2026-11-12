@@ -367,3 +367,102 @@ def test_a_docstring_is_code_and_a_comment_is_not(layout):
         }, "strat_{tag}")
 
     assert code_sha256(version("one")) != code_sha256(version("two"))
+
+
+# --- re-review of the 3.0.1 fixes: imports are resolved on disk, loaded or not ---------------
+
+def test_a_function_import_from_a_package_nothing_loaded_yet_is_code(layout):
+    """Re-review finding 2: `from tools.rules import CUT` inside a function was skipped
+    while `tools` was not loaded, so the hash the study recorded left rules.py out: an
+    edit there was not a try, and the hash changed once the function had run."""
+    def version(cut):
+        return layout({
+            "tools_{tag}/__init__.py": "",
+            "tools_{tag}/rules.py": f"CUT = {cut}\n",
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              "def cut():\n"
+                              "    from tools_{tag}.rules import CUT\n"
+                              "    return CUT\n" + BODY,
+        }, "strat_{tag}")
+
+    cls = version(1)
+    package = next(n for n in code_files(cls) if n.endswith("rules.py"))
+    assert package and len(code_files(cls)) == 3            # strat, tools/__init__, rules
+    before = code_sha256(cls)
+    assert not any(name.startswith("tools_") for name in sys.modules)   # hashing imports nothing
+    assert sys.modules[cls.__module__].cut() == 1           # now the import has run
+    assert code_sha256(cls) == before                       # and the hash has not moved
+    assert code_sha256(version(2)) != before                # an edit there is new code
+
+
+def test_a_submodule_taken_with_from_import_is_code(layout):
+    def version(cut):
+        return layout({
+            "kit_{tag}/__init__.py": "",
+            "kit_{tag}/mod.py": f"CUT = {cut}\n",
+            "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                              "from kit_{tag} import mod\n" + BODY,
+        }, "strat_{tag}")
+
+    assert code_sha256(version(1)) != code_sha256(version(2))
+    assert any(f.endswith("mod.py") for f in code_files(version(2)))
+
+
+def test_a_class_with_no_file_still_follows_what_its_module_imported(tmp_path, monkeypatch):
+    """Re-review finding 3: in a notebook the class has no file, and the modules the
+    notebook imported were not followed either."""
+    import types
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    tag = tmp_path.name.replace("-", "_")
+
+    def notebook(side):
+        (tmp_path / f"nbparams_{tag}.py").write_text(f"SIDE = {side}\n", encoding="utf-8")
+        for name in [m for m in sys.modules if tag in m]:
+            del sys.modules[name]
+        importlib.invalidate_caches()
+        cell = types.ModuleType(f"nb_{tag}")                 # like __main__: no __file__
+        sys.modules[cell.__name__] = cell
+        exec("from plutobt.strategy import Strategy\n"       # noqa: S102
+             f"import nbparams_{tag}\nfrom nbparams_{tag} import SIDE\n"
+             "class S(Strategy):\n    def on_bar(self, ctx):\n        pass\n", vars(cell))
+        return cell.S
+
+    one = notebook(1)
+    assert [f for f in code_files(one) if f.endswith(f"nbparams_{tag}.py")]
+    assert code_sha256(one) != code_sha256(notebook(-1))
+    for name in [m for m in sys.modules if tag in m]:
+        del sys.modules[name]
+
+
+def test_hashing_runs_none_of_the_users_code(layout):
+    """Re-review finding 4: resolving `from lazy import Q` asked the module for __path__,
+    which called the user's module-level __getattr__ during hashing."""
+    cls = layout({
+        "lazy_{tag}.py": "CALLS = []\nQ = 1\n"
+                         "def __getattr__(name):\n"
+                         "    CALLS.append(name)\n"
+                         "    raise AttributeError(name)\n",
+        "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                          "from lazy_{tag} import Q\n" + BODY,
+    }, "strat_{tag}")
+    lazy = next(m for n, m in sys.modules.items() if n.startswith("lazy_"))
+    lazy.CALLS.clear()
+    assert len(code_sha256(cls)) == 64
+    assert lazy.CALLS == []
+
+
+def test_a_broken_entry_in_sys_modules_does_not_break_the_hash(layout, monkeypatch):
+    class Raises:
+        def __getattribute__(self, name):
+            raise RuntimeError("no context")
+
+    cls = layout({
+        "strat_{tag}.py": "from plutobt.strategy import Strategy\n"
+                          "def late():\n"
+                          "    import weird_{tag}\n"
+                          "    from weird_{tag} import thing\n" + BODY,
+    }, "strat_{tag}")
+    name = cls.__module__.replace("strat_", "weird_")
+    monkeypatch.setitem(sys.modules, name, Raises())
+    assert len(code_sha256(cls)) == 64

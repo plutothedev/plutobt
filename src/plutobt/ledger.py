@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import importlib.util
 import inspect
 import json
 import math
@@ -116,15 +115,26 @@ def _installed_roots() -> tuple[Path, ...]:
     return tuple(roots)
 
 
-def _source_file(module) -> Path | None:
+def _namespace(module) -> dict:
+    """A module's own names, read without running any of its code: ``vars`` never calls a
+    module-level ``__getattr__``. An object in ``sys.modules`` that is not a module and
+    raises on access (a proxy) reads as empty."""
     try:
-        path = getattr(module, "__file__", None)
-    except Exception:               # a proxy object that raises on attribute access
+        names = vars(module)
+    except Exception:
+        return {}
+    return names if isinstance(names, dict) else {}
+
+
+def _source_file(module) -> Path | None:
+    path = _namespace(module).get("__file__")
+    if not isinstance(path, str) or not path.endswith(".py"):
         return None
-    if not path or not str(path).endswith(".py"):
+    try:
+        path = Path(path).resolve()
+        return path if path.is_file() else None
+    except OSError:
         return None
-    path = Path(path).resolve()
-    return path if path.is_file() else None
 
 
 def _is_user_file(path: Path, roots: tuple[Path, ...]) -> bool:
@@ -136,9 +146,10 @@ def _is_user_file(path: Path, roots: tuple[Path, ...]) -> bool:
 def _modules_held(module) -> list[str]:
     """Names of the modules a loaded module's top level holds: modules themselves, and
     the home modules of the functions, classes and objects found there. This catches what
-    the source's import statements do not show (``importlib.import_module``)."""
+    the source's import statements do not show (``importlib.import_module``, and a
+    notebook cell, which has no source file to read)."""
     names = set()
-    for value in list(vars(module).values()):
+    for value in list(_namespace(module).values()):
         try:
             if inspect.ismodule(value):
                 name = value.__name__
@@ -153,15 +164,15 @@ def _modules_held(module) -> list[str]:
     return sorted(names)
 
 
-def _imports_written(tree: ast.AST, package: str) -> list[tuple[str, list[str]]]:
-    """(module name, the names taken from it) for every import statement in a file,
-    wherever it stands (top level or inside a function), relative ones resolved against
-    ``package``. ``from params import THRESH`` yields ("params", ["params.THRESH"]): the
-    second part is tried as a submodule, since ``from pkg import mod`` reads the same."""
+def _imports_written(tree: ast.AST, package: str) -> list[str]:
+    """Every module name a file's import statements can mean, wherever they stand (top
+    level or inside a function), relative ones resolved against ``package``.
+    ``from params import THRESH`` yields ``params`` and ``params.THRESH``: the second is
+    tried as a submodule, since ``from pkg import mod`` reads the same."""
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            out += [(alias.name, []) for alias in node.names]
+            out += [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
             if node.level:
@@ -171,33 +182,70 @@ def _imports_written(tree: ast.AST, package: str) -> list[tuple[str, list[str]]]
                 home = ".".join(parts[:len(parts) - (node.level - 1)])
                 base = f"{home}.{base}" if base else home
             if base:
-                out.append((base, [f"{base}.{a.name}" for a in node.names if a.name != "*"]))
+                out.append(base)
+                out += [f"{base}.{a.name}" for a in node.names if a.name != "*"]
     return out
 
 
+def _find_on_disk(parts: list[str], locations: list[str], name: str) -> tuple[Path | None, str]:
+    """Follow ``parts`` down from ``locations`` the way the import system would (a package
+    folder, then a module file, in each location in turn; a bare folder is a namespace
+    package), reading only the file system. (file, package) of what is found."""
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        hit, folders = None, []
+        for loc in locations:
+            base = Path(loc or ".")
+            try:
+                if (base / part / "__init__.py").is_file():
+                    hit = (base / part / "__init__.py", True)
+                    break
+                if (base / f"{part}.py").is_file():
+                    hit = (base / f"{part}.py", False)
+                    break
+                if (base / part).is_dir():
+                    folders.append(str(base / part))
+            except OSError:
+                continue
+        if hit is None:
+            if last or not folders:
+                return None, ""                 # not found, or a namespace package: no file
+            locations = folders
+            continue
+        path, is_package = hit
+        if last:
+            return path.resolve(), (name if is_package else name.rpartition(".")[0])
+        if not is_package:
+            return None, ""                     # a plain module has no submodules
+        locations = [str(path.parent)]
+    return None, ""
+
+
 def _locate(name: str) -> tuple[Path | None, str]:
-    """(source file, package) of the module called ``name``, without importing anything
-    new: a loaded module answers for itself; one not loaded yet (an import inside a
-    function that has not run) is looked up only when that cannot run code, which is when
-    it is top-level or its parent package is already loaded."""
+    """(source file, package) of the module called ``name``, without importing it and
+    without running any user code. A loaded module answers from its own names. One that
+    is not loaded yet (an import inside a function that has not run) is found on disk,
+    starting from its nearest loaded parent package, or from ``sys.path`` for a top-level
+    name, so the code is the same before and after that import first runs."""
     module = sys.modules.get(name)
     if module is not None:
-        package = getattr(module, "__package__", None)
-        if not isinstance(package, str):
-            package = name if hasattr(module, "__path__") else name.rpartition(".")[0]
-        return _source_file(module), package
-    parent = name.rpartition(".")[0]
-    if parent and parent not in sys.modules:
-        return None, ""
-    try:
-        spec = importlib.util.find_spec(name)
-    except (ImportError, ValueError, AttributeError):
-        return None, ""
-    origin = getattr(spec, "origin", None)
-    if not origin or not str(origin).endswith(".py"):
-        return None, ""
-    path = Path(origin).resolve()
-    return (path if path.is_file() else None), (spec.parent or "")
+        names = _namespace(module)
+        return _source_file(module), (name if "__path__" in names
+                                      else name.rpartition(".")[0])
+    parts = name.split(".")
+    for depth in range(len(parts) - 1, 0, -1):
+        parent = sys.modules.get(".".join(parts[:depth]))
+        if parent is None:
+            continue
+        search = _namespace(parent).get("__path__")
+        try:
+            locations = [str(p) for p in search] if search is not None else None
+        except Exception:
+            locations = None
+        if locations is None:
+            return None, ""                     # its parent is a plain module
+        return _find_on_disk(parts[depth:], locations, name)
+    return _find_on_disk(parts, [p for p in sys.path if isinstance(p, str)], name)
 
 
 def _with_parents(name: str) -> list[str]:
@@ -210,52 +258,53 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
 
     The files: every module that defines one of the classes, then every USER module those
     import, followed through. An import is found two ways: as written in the source
-    (``import x``, ``from x import NAME``, relative imports, imports inside functions,
-    and the parent packages they run), and as held by the loaded module (which also
-    catches ``importlib.import_module``). Installed packages, the standard library and
-    plutobt itself are never followed."""
+    (``import x``, ``from x import NAME``, relative imports, imports inside functions
+    whether or not they have run yet, and the parent packages they run), and as held by
+    the loaded module (which also catches ``importlib.import_module`` and is all a class
+    with no source file, such as a notebook cell, has). Installed packages, the standard
+    library and plutobt itself are never followed, nothing is imported to do this, and no
+    user code runs."""
     roots = _installed_roots()
     owners, owner_files, other_files = [], [], set()
     seen: set[Path] = set()
-    queue: list[tuple[Path, str, object]] = []
+    queue: list[tuple[Path | None, str, object]] = []
 
-    def visit(name: str) -> bool:
-        """Queue the module called ``name`` if it is the user's; True when it is one."""
+    def visit(name: str) -> None:
+        """Queue the module called ``name`` if it is the user's."""
         path, package = _locate(name)
-        if path is None or not _is_user_file(path, roots):
-            return path is None and name in sys.modules     # e.g. a namespace package
-        if path not in seen:
-            seen.add(path)
-            other_files.add(path)
-            queue.append((path, package, sys.modules.get(name)))
-        return True
+        if path is None or path in seen or not _is_user_file(path, roots):
+            return
+        seen.add(path)
+        other_files.add(path)
+        queue.append((path, package, sys.modules.get(name)))
 
+    done = set()
     for k in _own_classes(cls):
         module = sys.modules.get(k.__module__)
         owners.append((k, module))
-        path = _source_file(module) if module is not None else None
+        if module is None or id(module) in done:
+            continue
+        done.add(id(module))
+        path, package = _locate(k.__module__)
         if path is not None and path not in seen:
             seen.add(path)
             owner_files.append(path)
-            _, package = _locate(k.__module__)
-            queue.append((path, package, module))
-        if module is not None:
-            for parent in _with_parents(k.__module__)[:-1]:     # the packages it lives in
-                visit(parent)
+        queue.append((path, package, module))    # followed even with no file (a notebook)
+        for parent in _with_parents(k.__module__)[:-1]:         # the packages it lives in
+            visit(parent)
 
     while queue:
         path, package, module = queue.pop(0)
-        try:
-            with tokenize.open(path) as fh:
-                tree = ast.parse(fh.read())
-        except (SyntaxError, ValueError, OSError):
-            tree = None
-        written = _imports_written(tree, package) if tree is not None else []
-        for base, taken in written:
-            ours = [visit(part) for part in _with_parents(base)]
-            if ours and ours[-1]:
-                for name in taken:              # `from pkg import mod`: mod may be a module
-                    visit(name)
+        tree = None
+        if path is not None:
+            try:
+                with tokenize.open(path) as fh:
+                    tree = ast.parse(fh.read())
+            except (SyntaxError, ValueError, OSError):
+                tree = None
+        for name in (_imports_written(tree, package) if tree is not None else []):
+            for part in _with_parents(name):
+                visit(part)
         if module is not None:
             for name in _modules_held(module):
                 for part in _with_parents(name):
