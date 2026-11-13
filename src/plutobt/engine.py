@@ -10,6 +10,7 @@ import keyword
 import math
 import numbers
 import pickle
+import types
 import warnings
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -211,20 +212,64 @@ def _snapshot(strategy: Strategy) -> Strategy:
         ) from e
 
 
-def _fingerprint(value) -> tuple:
-    """(value, its pickle, or None when it has none): what _changed compares."""
+# What pickle writes as a name and nothing else: a function, a builtin, a class. Two
+# different objects under one name pickle the same, so the comparison key writes these by
+# identity instead (3.0.3: a precompute that replaced on_bar with a same-named wrapper
+# looked unchanged).
+_BY_NAME = (types.FunctionType, types.BuiltinFunctionType, type)
+
+
+class _ById(pickle.Pickler):
+    """A pickler that writes each function, builtin and class as its identity, keeping
+    every one it wrote in ``held`` so that identity cannot be reused while the
+    fingerprint lives."""
+
+    def __init__(self, file, held: list):
+        super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
+        self.held = held
+
+    def persistent_id(self, obj):
+        if isinstance(obj, _BY_NAME):
+            self.held.append(obj)
+            return ("id", id(obj))
+        return None
+
+
+def _keyed(value) -> tuple[bytes | None, list]:
+    """(the identity-keyed pickle of ``value`` or None when it has none, the objects it
+    wrote by identity)."""
+    import io
+
+    held: list = []
+    buffer = io.BytesIO()
     try:
-        return value, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:  # a lock, a local function, a property: compared by identity
-        return value, None
+        _ById(buffer, held).dump(value)
+    except Exception:  # a lock, a generator: compared by identity
+        return None, held
+    return buffer.getvalue(), held
+
+
+def _fingerprint(value) -> tuple:
+    """(value, its pickle or None, its identity-keyed pickle or None, the objects that key
+    holds): what _changed compares. The ordinary pickle is what the restore rebuilds an
+    object edited in place from; the keyed one is what is compared, so a function or a
+    class replaced by another under the same name is a change."""
+    try:
+        raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:  # a lock, a local function, a property: no restore from a pickle
+        raw = None
+    key, held = _keyed(value)
+    return value, raw, key, held
 
 
 def _changed(before: tuple, after: tuple) -> bool:
-    """Whether an attribute changed: by its pickle when both have one (an in-place
-    edit keeps the object but not its pickle), else by identity."""
-    (u, pu), (v, pv) = before, after
-    if pu is not None and pv is not None:
-        return pu != pv
+    """Whether an attribute changed: by its identity-keyed pickle when both have one (an
+    in-place edit keeps the object but not its pickle, and a same-named replacement keeps
+    the name but not the identity), else by identity."""
+    u, _, ku, _ = before
+    v, _, kv, _ = after
+    if ku is not None and kv is not None:
+        return ku != kv
     return u is not v
 
 
@@ -276,7 +321,7 @@ def _refuse_class_changes(saved: list) -> None:
             if name not in before:
                 delattr(cls, name)
                 continue
-            value, raw = before[name]
+            value, raw = before[name][:2]
             if name in after and after[name][0] is value and raw is not None:
                 old = pickle.loads(raw)        # edited in place: its old contents
                 if _restore_in_place(value, old):
