@@ -554,3 +554,49 @@ def test_a_rerun_after_an_edit_that_could_not_be_put_back_is_refused():
         _eng().run(_bars(), FitsOnceAndCannotBeRestored())
     with pytest.raises(LookaheadError, match="FitsOnceAndCannotBeRestored.a"):
         _eng().run(_bars(), FitsOnceAndCannotBeRestored())
+
+
+# ---- fix pass 5's re-review: a restore that writes the swap back
+
+
+class _Predictor:
+    def __init__(self):
+        self.coef = 0.0
+
+    def predict(self, x):
+        return x * self.coef
+
+
+_PREDICTOR = _Predictor()
+_FITTED: dict = {}
+
+
+class RebindsTheMethodItHolds(Strategy):
+    """Rebinds _Predictor.predict to a same-named wrapper carrying the whole frame's mean,
+    and stores the new bound method in the list it holds: unpickling the old list looks the
+    method up by name, so it gets the new one."""
+
+    attr = [_PREDICTOR.predict]
+
+    def precompute(self, df):
+        if "mean" not in _FITTED:
+            _FITTED["mean"] = float(df["close"].mean())
+
+            @functools.wraps(_Predictor.predict)
+            def predict(self_, x):
+                return x - _FITTED["mean"]
+            _Predictor.predict = predict
+            type(self).attr[0] = _PREDICTOR.predict
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_restore_that_cannot_undo_the_swap_says_so_and_refuses_the_rerun():
+    # The refusal said "Restored" while the swapped method stayed, and a rerun traded on it
+    # (fix pass 5's re-review, I2).
+    with pytest.raises(LookaheadError, match="could not be put back: RebindsTheMethodItHolds.attr"):
+        _eng().run(_bars(), RebindsTheMethodItHolds())
+    with pytest.raises(LookaheadError, match="RebindsTheMethodItHolds.attr still holds"):
+        _eng().run(_bars(), RebindsTheMethodItHolds())

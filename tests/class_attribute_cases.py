@@ -387,6 +387,38 @@ class S_lambda_model_mutate(Strategy):
         pass
 
 
+class Proxy:
+    """A proxy whose __class__ raises until it is resolved; its pickle never reads
+    __class__ (it has its own __reduce__)."""
+
+    def __init__(self):
+        self.target = None
+
+    @property
+    def __class__(self):
+        if self.target is None:
+            raise LookupError("not resolved")
+        return type(self.target)
+
+    def __reduce__(self):
+        return (Proxy, ())
+
+
+class S_list_with_proxy_mutate(Strategy):
+    """Holds a proxy beside a list it fills in place with a value of the whole frame."""
+
+    attr = [Proxy(), []]
+
+    def precompute(self, df):
+        if not type(self).attr[1]:
+            type(self).attr[1].append(float(df["close"].mean()))
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+CASES["S_list_with_proxy_mutate"] = ("proxy", "mutate")
 CASES["S_lossy_model_swap"] = ("lossy_model", "swap")
 CASES["S_lazy_client_read"] = ("lazy_client", "read")
 CASES["S_lazy_table_read"] = ("lazy_table", "read")

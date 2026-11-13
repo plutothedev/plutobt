@@ -232,9 +232,10 @@ class _Recording(pickle.Pickler):
         self.held = held
 
     def persistent_id(self, obj):
-        if isinstance(obj, types.MethodType):
+        kind = type(obj)        # its type, not its __class__ (a proxy's may raise)
+        if issubclass(kind, types.MethodType):
             self.held.append(obj.__func__)
-        elif isinstance(obj, _BY_NAME):
+        elif issubclass(kind, _BY_NAME):
             self.held.append(obj)
         return None
 
@@ -249,8 +250,14 @@ def _fingerprint(value) -> tuple:
     buffer = io.BytesIO()
     try:
         _Recording(buffer, held).dump(value)
-    except Exception:  # a lock, a local function, a property: compared by identity
-        return value, None, None, []
+    except Exception:
+        # Where the record cannot be taken (its hook adds a frame, so a structure at
+        # Python's recursion limit can fail here and not in pickle.dumps), 3.0.2's pickle
+        # alone, so the comparison is never less than 3.0.2's.
+        try:
+            return value, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), None, []
+        except Exception:  # a lock, a local function, a property: compared by identity
+            return value, None, None, []
     return value, buffer.getvalue(), tuple(id(obj) for obj in held), held
 
 
@@ -264,7 +271,7 @@ def _changed(before: tuple, after: tuple) -> bool:
     u, pu, nu, _ = before
     v, pv, nv, _ = after
     if pu is not None and pv is not None:
-        return pu != pv or nu != nv
+        return pu != pv or (nu is not None and nv is not None and nu != nv)
     return u is not v
 
 
@@ -342,10 +349,17 @@ def _refuse_class_changes(saved: list) -> None:
                     kept.append(f"{cls.__name__}.{name}")
                     _LEFT_EDITED.setdefault(cls, {})[name] = value
                     continue
-                if _restore_in_place(value, old):
-                    continue
-                value = old
-            setattr(cls, name, value)
+                if not _restore_in_place(value, old):
+                    setattr(cls, name, old)
+            else:
+                setattr(cls, name, value)
+            # A pickle rebuilds a function or a class by looking its name up, which can
+            # find what the precompute put there: a restore that does not read as the
+            # attribute before the run is no restore (fix pass 5's re-review).
+            now = vars(cls).get(name)
+            if _changed(before[name], _fingerprint(now)):
+                kept.append(f"{cls.__name__}.{name}")
+                _LEFT_EDITED.setdefault(cls, {})[name] = now
     if changed:
         raise LookaheadError(
             f"the strategy's precompute changed class attribute {', '.join(changed)}. "
