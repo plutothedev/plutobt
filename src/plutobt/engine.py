@@ -370,7 +370,7 @@ def _refuse_class_changes(saved: list) -> None:
     its old contents back in place (so aliases of it are restored too); any other
     object is replaced by a copy rebuilt from its pickle, which leaves other references
     to it holding the edit. The run is refused either way."""
-    changed = []
+    changed, kept = [], []
     for cls, before in saved:
         after = _state(vars(cls))
         for name in _set_since(before, after) + [k for k in before if k not in after]:
@@ -388,6 +388,7 @@ def _refuse_class_changes(saved: list) -> None:
                 try:
                     old = pickle.loads(raw) if raw is not None else _from_key(key, held)
                 except Exception:
+                    kept.append(f"{cls.__name__}.{name}")
                     continue
                 if _restore_in_place(value, old):
                     continue
@@ -403,7 +404,10 @@ def _refuse_class_changes(saved: list) -> None:
             "for an object edited in place: a list, dict or set is restored in place; "
             "other objects are replaced, and other references to them keep the edit). "
             "Module-level globals are out of the check's reach: keep them out of "
-            "precompute")
+            "precompute" + (
+                f". The edit could not be put back: {', '.join(kept)} still holds what "
+                "precompute left in it, so restart the process (or reload the module the "
+                "strategy is in) before running it again" if kept else ""))
 
 
 def _bar_free_cached_property(strategy: Strategy, snapshot: Strategy, name: str,

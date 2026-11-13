@@ -416,3 +416,14 @@ def test_state_changed_through_a_bound_method_the_class_holds_is_refused(strateg
     # method by its object's identity alone hid the change (fix pass 2's re-review, C1).
     with pytest.raises(LookaheadError, match="changed class attribute"):
         _eng().run(_bars(), strategy())
+
+
+def test_the_refusal_names_an_attribute_it_could_not_put_back():
+    # It stays as precompute left it, so a rerun in the same process runs on the leaked
+    # value; the words say so instead of "restored" (fix pass 2's re-review).
+    RestoreCannotRebuild.a["t"] = None
+    with pytest.raises(LookaheadError) as refused:
+        _eng().run(_bars(), RestoreCannotRebuild())
+    words = str(refused.value)
+    assert "could not be put back: RestoreCannotRebuild.a" in words
+    assert "restart" in words
