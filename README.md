@@ -69,9 +69,9 @@ checks it before the first bar (`check_causality`, on by default):
   so a `precompute` that changes one (a mean fitted "once" and stored on the class,
   a cache) is refused with a `LookaheadError` naming it, and the attribute is put
   back (`Strategy` itself included; an object edited in place is restored best-effort:
-  a list, dict or set in place, anything else by a rebuilt copy; one whose old value
-  cannot be rebuilt is named in the refusal, which says to restart before running
-  again). That includes replacing a method (an `lru_cache`d one too), a class nested in
+  a list, dict or set in place, anything else by a rebuilt copy; one it cannot put back
+  is named in the refusal, which says to restart, and later runs of the class are refused
+  until then). That includes replacing a method (an `lru_cache`d one too), a class nested in
   the strategy, or a bound method the class holds (alone or in a list) with a new one
   under the same name. Not seen: an attribute of a nested class edited in place, and any
   change in place to a value with no ordinary pickle (one holding a lambda, a lock or an
