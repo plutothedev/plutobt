@@ -435,3 +435,38 @@ CASES["S_bound_method_swap"] = ("bound_method", "swap")
 CASES["S_bound_method_in_list_swap"] = ("bound_method", "swap")
 CASES["S_deep_chain_read"] = ("deep_chain", "read")
 CASES["S_deep_chain_mutate"] = ("deep_chain", "mutate")
+
+
+class S_string_set_mutate(Strategy):
+    """Adds a value of the whole frame to a small set of strings it holds."""
+
+    attr = {"a", "b", "c"}
+
+    def precompute(self, df):
+        type(self).attr.add(str(round(float(df["close"].min()), 2)))
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class S_mixed_frame_mutate(Strategy):
+    """Writes one cell of a mixed-dtype frame it holds with a value of the whole frame."""
+
+    attr = pd.DataFrame({"a": [0.0, 0.0], "b": ["x", "y"]})
+
+    def precompute(self, df):
+        type(self).attr.loc[0, "a"] = float(df["close"].min())
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+CASES["S_string_set_mutate"] = ("string_set", "mutate")
+CASES["S_mixed_frame_mutate"] = ("mixed_frame", "mutate")
+
+# Refusals whose restore works, run twice by the matrix: neither run may say "could not be
+# put back", and the second is checked afresh.
+RESTORES_CLEANLY = {"S_string_set_mutate", "S_mixed_frame_mutate", "S_set_mutate",
+                    "S_list_mutate", "S_dict_mutate", "S_np_array_mutate", "S_frame_mutate"}

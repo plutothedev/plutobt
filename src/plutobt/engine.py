@@ -349,17 +349,14 @@ def _refuse_class_changes(saved: list) -> None:
                     kept.append(f"{cls.__name__}.{name}")
                     _LEFT_EDITED.setdefault(cls, {})[name] = value
                     continue
-                if not _restore_in_place(value, old):
-                    setattr(cls, name, old)
-            else:
-                setattr(cls, name, value)
-            # A pickle rebuilds a function or a class by looking its name up, which can
-            # find what the precompute put there: a restore that does not read as the
-            # attribute before the run is no restore (fix pass 5's re-review).
-            now = vars(cls).get(name)
-            if _changed(before[name], _fingerprint(now)):
-                kept.append(f"{cls.__name__}.{name}")
-                _LEFT_EDITED.setdefault(cls, {})[name] = now
+                # A pickle rebuilds a function or a class by looking its name up: where
+                # the precompute also rebound one elsewhere, the rebuilt value holds the new
+                # one (a documented limit; checking the rebuild by its bytes refused good
+                # restores of sets and mixed frames, fix pass 6's re-review).
+                if _restore_in_place(value, old):
+                    continue
+                value = old
+            setattr(cls, name, value)
     if changed:
         raise LookaheadError(
             f"the strategy's precompute changed class attribute {', '.join(changed)}. "

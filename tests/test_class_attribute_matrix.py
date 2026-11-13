@@ -54,3 +54,14 @@ def test_changing_a_class_attribute_with_the_whole_frame_is_refused(name):
 def test_an_in_place_change_to_a_value_with_no_pickle_runs_as_on_3_0_2(name):
     # A known limit, pinned so that seeing it later is a decision, not an accident.
     assert _run(name) is not None
+
+
+@pytest.mark.parametrize("name", sorted(cases.RESTORES_CLEANLY))
+def test_a_refusal_whose_restore_works_does_not_refuse_the_next_run(name):
+    # A refused run is put back; the next run of the same class is checked afresh, not
+    # refused for the last one (fix pass 6's re-review: a byte-for-byte check of the restore
+    # named good restores of a set or a mixed frame as failed and refused every later run).
+    for _ in range(2):
+        with pytest.raises(LookaheadError, match="changed class attribute") as refused:
+            _run(name)
+        assert "could not be put back" not in str(refused.value)
