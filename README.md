@@ -72,8 +72,10 @@ checks it before the first bar (`check_causality`, on by default):
   a list, dict or set in place, anything else by a rebuilt copy; one whose old value
   cannot be rebuilt is named in the refusal, which says to restart before running again). That includes replacing
   a method (an `lru_cache`d one too), a class nested in the strategy or a helper in a
-  list it holds with a new one under the same name. An attribute of a nested class edited
-  in place is not seen. An attribute `precompute` sets on `self` (a full-sample quantile kept for
+  list it holds with a new one under the same name, a bound method included. Not seen: an
+  attribute of a nested class edited in place, and an object the class holds that has no
+  pickle at all (it holds a lambda or a lock) changed in place, as by fitting it through a
+  bound method of it the class holds. An attribute `precompute` sets on `self` (a full-sample quantile kept for
   `on_bar`) draws a `LookaheadWarning` naming it at your `Engine.run` line: the check
   compares columns, so if `on_bar` reads that value and it came from the bars, it is
   look-ahead nobody checked. A `cached_property` a fresh copy computes to the same
@@ -430,9 +432,10 @@ a new try, even one that does not touch the strategy, and near-identical setting
 separately: both overstate N, so the verdict errs strict. Two limits. A class written in
 a notebook cell has no file, so what is hashed there is the class itself plus every one
 of your own modules the session has loaded; a helper written in another cell is not
-seen; that hash is the same in every run (bar a default value whose printed form is cut
-short, as a big frame's is, or holds a set), but depends on the Python version, so moving
-from 3.11 to 3.12 counts those tries again. A strategy loaded without registering its
+seen; that hash is the same in every run (bar a default value whose printed form holds a
+set), but depends on the Python version, so moving from 3.11 to 3.12 counts those tries
+again, and an edit to a default whose printed form is cut short (a middle row of a big
+frame) is not seen. A strategy loaded without registering its
 module (`importlib.util.spec_from_file_location` with no `sys.modules` entry, or
 `runpy.run_path`) is hashed from the file its methods were written in, with the user
 modules that file imports by name (its relative imports are not followed; a method behind a
