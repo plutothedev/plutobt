@@ -350,10 +350,12 @@ def _methods_file(k: type) -> Path | None:
     found: set[Path] = set()
     for value in list(vars(k).values()):
         for func in _functions_of(value):
-            qualname = getattr(func, "__qualname__", None)
             code = getattr(func, "__code__", None)
-            if not (isinstance(qualname, str) and qualname.startswith(prefix)
-                    and isinstance(code, types.CodeType)):
+            # The code object's own qualified name: functools.wraps copies a method's
+            # __qualname__ onto a wrapper written in another file, never this.
+            qualname = getattr(code, "co_qualname", None)
+            if not (isinstance(code, types.CodeType) and isinstance(qualname, str)
+                    and qualname.startswith(prefix)):
                 continue
             name = code.co_filename
             if not name.endswith(".py"):
@@ -467,19 +469,48 @@ def _normalized(path: Path) -> str:
         return text.replace("\r\n", "\n")
 
 
+def _named(value) -> str | None:
+    """``module:qualname`` of a value that carries its own (a function, a class, or a
+    callable such as numpy's ``np.mean``), or None. An instance of an ordinary class
+    carries neither."""
+    try:
+        module = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", None)
+    except Exception:
+        return None
+    if isinstance(module, str) and isinstance(qualname, str):
+        return f"{module}:{qualname}"
+    return None
+
+
+# Values whose repr is the value itself in every process.
+_PLAIN = (type(None), bool, int, float, complex, str, bytes, type(Ellipsis))
+
+
 def _const_digest(value) -> str:
-    """A digest of one constant of a code object, the same in every process: a code object
-    by ``_code_digest``, a tuple by its elements in order, a set or frozenset by its
-    elements' digests sorted (never the elements: mixed types do not sort, and a set's own
-    order follows the hash seed), anything else by its type and repr."""
-    if isinstance(value, types.CodeType):
+    """A digest of a constant of a code object or a default value, the same in every
+    process: a code object by ``_code_digest``; a tuple or list by its elements in order; a
+    set or frozenset by its elements' digests sorted, and a dict by its items' digests
+    sorted (never the elements: mixed types do not sort, and a set's own order follows the
+    hash seed); a plain value (``_PLAIN``) by its repr; a function, a class or another
+    callable that carries its own name by its module and qualified name (``_named``);
+    anything else by its type alone, since its repr may carry an address (a sentinel
+    ``object()``)."""
+    kind = type(value)
+    if issubclass(kind, types.CodeType):
         part = "code:" + _code_digest(value)
-    elif isinstance(value, tuple):
-        part = "tuple:" + ",".join(_const_digest(v) for v in value)
-    elif isinstance(value, set | frozenset):
+    elif kind is tuple or kind is list:
+        part = kind.__name__ + ":" + ",".join(_const_digest(v) for v in value)
+    elif kind is set or kind is frozenset:
         part = "set:" + ",".join(sorted(_const_digest(v) for v in value))
+    elif kind is dict:
+        part = "dict:" + ",".join(sorted(_const_digest(item) for item in value.items()))
+    elif kind in _PLAIN:
+        part = kind.__qualname__ + ":" + repr(value)
+    elif _named(value) is not None:
+        part = "named:" + _named(value)
     else:
-        part = type(value).__qualname__ + ":" + repr(value)
+        part = "object:" + kind.__module__ + "." + kind.__qualname__
     return hashlib.sha256(part.encode("utf-8")).hexdigest()
 
 

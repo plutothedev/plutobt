@@ -127,3 +127,30 @@ def test_a_class_with_only_values_keeps_the_fallback(tmp_path):
     values.write_text("from plutobt.strategy import Strategy\n\n\nclass V(Strategy):\n"
                       "    x = 1\n", encoding="utf-8")
     assert code_files(load(values).V) == []
+
+
+def test_a_method_wrapped_by_a_decorator_from_another_file_is_not_that_files(tmp_path, tag):
+    # functools.wraps copies the method's __qualname__ onto the wrapper, whose code is the
+    # decorator's file: that file is not the class's (review I2). The code object's own
+    # qualified name, which wraps cannot change, decides.
+    deco = tmp_path / f"{tag}_deco.py"
+    deco.write_text('''import functools
+
+
+def logged(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+    return wrapper
+''', encoding="utf-8")
+    mine = tmp_path / "mine.py"
+    mine.write_text(f'''from plutobt.strategy import Strategy
+from {tag}_deco import logged
+
+
+class Mine(Strategy):
+    @logged
+    def on_bar(self, ctx):
+        pass
+''', encoding="utf-8")
+    assert str(deco.resolve()) not in code_files(load(mine).Mine)

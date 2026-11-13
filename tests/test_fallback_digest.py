@@ -87,3 +87,31 @@ def test_the_same_cell_is_the_same_hash():
 
 def test_a_different_method_body_is_new_code():
     assert cell_hash(PLAIN, 1) != cell_hash(PLAIN.replace("> 5", "> 6"), 1)
+
+
+# ---- the whole-branch review's findings (3.0.3)
+
+UNSTABLE_DEFAULTS = {
+    # a function default: its repr carries its address
+    "function": ("import numpy as np\n\n", "self, ctx, agg=np.mean"),
+    # a sentinel object: its repr carries its address
+    "sentinel": ("_MISSING = object()\n\n", "self, ctx, flag=_MISSING"),
+    # a dict holding a set of strings: the set's order follows the hash seed
+    "set_in_dict": ("", "self, ctx, opts={'side': {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'}}"),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(UNSTABLE_DEFAULTS))
+def test_a_default_whose_repr_moves_still_hashes_the_same_in_every_process(kind):
+    # The defaults were added to the fallback in 3.0.3; hashed by repr, these differed in
+    # every process (review I1), where 3.0.2 left defaults out and was stable.
+    extra, signature = UNSTABLE_DEFAULTS[kind]
+    src = _cell("pass", signature=signature, extra=extra)
+    first = cell_hash(src, 1)
+    assert first == cell_hash(src, 2) == cell_hash(src, 1)
+
+
+def test_a_function_default_changed_for_another_is_new_code():
+    mean = _cell("pass", signature="self, ctx, agg=np.mean", extra="import numpy as np\n\n")
+    median = _cell("pass", signature="self, ctx, agg=np.median", extra="import numpy as np\n\n")
+    assert cell_hash(mean, 1) != cell_hash(median, 1)
