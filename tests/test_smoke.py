@@ -36,14 +36,14 @@ def test_package_imports():
 
 def test_version_is_pep440_string():
     assert isinstance(plutobt.__version__, str)
-    assert plutobt.__version__ == "3.0.2"
+    assert plutobt.__version__ == "3.0.3"
 
 
 def test_pyproject_declares_package_and_src_layout():
     with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
         cfg = tomllib.load(fh)
     assert cfg["project"]["name"] == "plutobt"
-    assert cfg["project"]["version"] == "3.0.2"
+    assert cfg["project"]["version"] == "3.0.3"
     # 3.0.1: the pinned numpy, pandas and matplotlib have no 3.13 builds, so the
     # project says so instead of failing in a source build
     assert cfg["project"]["requires-python"] == ">=3.11,<3.13"
@@ -166,7 +166,7 @@ def test_the_readme_roll_example_runs_as_written(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     exec(compile(block, "README.md", "exec"), {})        # noqa: S102
     out = capsys.readouterr().out
-    assert "Sharpe" in out and "IN-SAMPLE" in out and "engine version = 3.0.2" in out
+    assert "Sharpe" in out and "IN-SAMPLE" in out and "engine version = 3.0.3" in out
 
 
 def test_the_repo_ignores_what_the_readme_commands_write():

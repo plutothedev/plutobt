@@ -10,7 +10,9 @@ import keyword
 import math
 import numbers
 import pickle
+import types
 import warnings
+import weakref
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -211,20 +213,65 @@ def _snapshot(strategy: Strategy) -> Strategy:
         ) from e
 
 
+# What pickle writes as its name alone: a function, a class, an lru_cache wrapper. Two
+# different objects under one name pickle the same, so the check also records which ones
+# it wrote (3.0.3: a precompute that replaced on_bar with a same-named wrapper looked
+# unchanged).
+_BY_NAME = (types.FunctionType, type, type(functools.lru_cache(maxsize=None)(len)))
+
+
+class _Recording(pickle.Pickler):
+    """The ordinary pickle, byte for byte what 3.0.2 compared, recording on the side every
+    function, class and lru_cache wrapper it writes, and the function of every bound method
+    it writes (a bound method pickles as its object and its name, so which function it is
+    would drop out). Nothing is pickled twice and nothing else is compared: the drafts of
+    3.0.3 that added a second pickle each broke something 3.0.2 got right."""
+
+    def __init__(self, file, held: list):
+        super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
+        self.held = held
+
+    def persistent_id(self, obj):
+        kind = type(obj)        # its type, not its __class__ (a proxy's may raise)
+        if issubclass(kind, types.MethodType):
+            self.held.append(obj.__func__)
+        elif issubclass(kind, _BY_NAME):
+            self.held.append(obj)
+        return None
+
+
 def _fingerprint(value) -> tuple:
-    """(value, its pickle, or None when it has none): what _changed compares."""
+    """(value, its pickle or None when it has none, the identities that pickle wrote by name,
+    the objects behind them, held so no identity is reused): what _changed compares. The
+    pickle is byte for byte 3.0.2's; the record comes from the same pass."""
+    import io
+
+    held: list = []
+    buffer = io.BytesIO()
     try:
-        return value, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:  # a lock, a local function, a property: compared by identity
-        return value, None
+        _Recording(buffer, held).dump(value)
+    except Exception:
+        # Where the record cannot be taken (its hook adds a frame, so a structure at
+        # Python's recursion limit can fail here and not in pickle.dumps), 3.0.2's pickle
+        # alone, so the comparison is never less than 3.0.2's.
+        try:
+            return value, pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), None, []
+        except Exception:  # a lock, a local function, a property: compared by identity
+            return value, None, None, []
+    return value, buffer.getvalue(), tuple(id(obj) for obj in held), held
 
 
 def _changed(before: tuple, after: tuple) -> bool:
-    """Whether an attribute changed: by its pickle when both have one (an in-place
-    edit keeps the object but not its pickle), else by identity."""
-    (u, pu), (v, pv) = before, after
+    """Whether an attribute changed: 3.0.2's verdict (by its pickle when both have one, an
+    in-place edit keeps the object but not its pickle; else by identity), or, where both
+    pickles are byte for byte the same, a different function, class or bound method's
+    function behind a name (a same-named replacement keeps the pickle but not the
+    identity). Nothing else: each extra way of comparing that 3.0.3's drafts tried broke a
+    case 3.0.2 got right."""
+    u, pu, nu, _ = before
+    v, pv, nv, _ = after
     if pu is not None and pv is not None:
-        return pu != pv
+        return pu != pv or (nu is not None and nv is not None and nu != nv)
     return u is not v
 
 
@@ -239,10 +286,25 @@ def _set_since(before: dict, after: dict) -> list:
     return [k for k in after if k not in before or _changed(before[k], after[k])]
 
 
+# Class attributes an earlier run's precompute changed and the check could not put back,
+# by class: each still holds what that precompute left, so a later run would start from
+# it. Cleared with the class (a restart, or reloading the module it is in).
+_LEFT_EDITED: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
 def _class_state(strategy: Strategy) -> list:
     """The attributes of each class the strategy is built from (its MRO, Strategy
     included, but object): shared by every copy the look-ahead check runs, so none may
-    change."""
+    change. Refuses a strategy whose class still holds an edit an earlier run's
+    precompute made and the check could not put back."""
+    for cls in type(strategy).__mro__:
+        for name, left in list(_LEFT_EDITED.get(cls, {}).items()):
+            if vars(cls).get(name) is left:
+                raise LookaheadError(
+                    f"{cls.__name__}.{name} still holds what an earlier run's precompute "
+                    "left in it (that edit could not be put back), so this run would start "
+                    "from a value fitted on the full frame. Restart the process, or reload "
+                    "the module the strategy is in, before running it again")
     return [(cls, _state(vars(cls))) for cls in type(strategy).__mro__
             if cls is not object]
 
@@ -268,7 +330,7 @@ def _refuse_class_changes(saved: list) -> None:
     its old contents back in place (so aliases of it are restored too); any other
     object is replaced by a copy rebuilt from its pickle, which leaves other references
     to it holding the edit. The run is refused either way."""
-    changed = []
+    changed, kept = [], []
     for cls, before in saved:
         after = _state(vars(cls))
         for name in _set_since(before, after) + [k for k in before if k not in after]:
@@ -276,9 +338,21 @@ def _refuse_class_changes(saved: list) -> None:
             if name not in before:
                 delattr(cls, name)
                 continue
-            value, raw = before[name]
+            value, raw = before[name][:2]
             if name in after and after[name][0] is value and raw is not None:
-                old = pickle.loads(raw)        # edited in place: its old contents
+                # edited in place: its old contents, from its pickle. Where they cannot be
+                # rebuilt from it, this attribute stays as the precompute left it; the run
+                # is refused all the same and the others are still put back.
+                try:
+                    old = pickle.loads(raw)
+                except Exception:
+                    kept.append(f"{cls.__name__}.{name}")
+                    _LEFT_EDITED.setdefault(cls, {})[name] = value
+                    continue
+                # A pickle rebuilds a function or a class by looking its name up: where
+                # the precompute also rebound one elsewhere, the rebuilt value holds the new
+                # one (a documented limit; checking the rebuild by its bytes refused good
+                # restores of sets and mixed frames, fix pass 6's re-review).
                 if _restore_in_place(value, old):
                     continue
                 value = old
@@ -293,7 +367,10 @@ def _refuse_class_changes(saved: list) -> None:
             "for an object edited in place: a list, dict or set is restored in place; "
             "other objects are replaced, and other references to them keep the edit). "
             "Module-level globals are out of the check's reach: keep them out of "
-            "precompute")
+            "precompute" + (
+                f". The edit could not be put back: {', '.join(kept)} still holds what "
+                "precompute left in it, so restart the process (or reload the module the "
+                "strategy is in) before running it again" if kept else ""))
 
 
 def _bar_free_cached_property(strategy: Strategy, snapshot: Strategy, name: str,
