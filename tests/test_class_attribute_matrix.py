@@ -33,7 +33,8 @@ def _run(name):
 
 
 BENIGN = sorted(n for n, (_, op) in cases.CASES.items() if op in ("read", "same"))
-LEAKS = sorted(n for n, (_, op) in cases.CASES.items() if op in ("mutate", "swap"))
+LEAKS = sorted(n for n, (_, op) in cases.CASES.items()
+               if op in ("mutate", "swap") and n not in cases.KNOWN_UNSEEN)
 
 
 @pytest.mark.parametrize("name", BENIGN)
@@ -47,3 +48,9 @@ def test_reading_or_resetting_a_class_attribute_runs_unwarned(name):
 def test_changing_a_class_attribute_with_the_whole_frame_is_refused(name):
     with pytest.raises(LookaheadError, match="changed class attribute"):
         _run(name)
+
+
+@pytest.mark.parametrize("name", sorted(cases.KNOWN_UNSEEN))
+def test_an_in_place_change_to_a_value_with_no_pickle_runs_as_on_3_0_2(name):
+    # A known limit, pinned so that seeing it later is a decision, not an accident.
+    assert _run(name) is not None

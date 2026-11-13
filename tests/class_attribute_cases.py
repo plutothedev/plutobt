@@ -265,6 +265,140 @@ class S_deep_chain_mutate(Strategy):
         pass
 
 
+class LossyModel:
+    """A model whose pickle leaves out its fitted state (a cache), held with a lambda."""
+
+    def __init__(self, loss):
+        self.loss = loss
+        self.coef = None
+
+    def __getstate__(self):
+        return {"loss": self.loss, "coef": None}
+
+    def fit(self, x):
+        self.coef = float(x.mean())
+
+
+class S_lossy_model_swap(Strategy):
+    """Replaces the model with one fitted on the whole frame: neither has an ordinary pickle
+    and their identity-keyed pickles drop the fit, so only identity tells them apart."""
+
+    attr = LossyModel(lambda r: r * r)
+
+    def precompute(self, df):
+        fitted = LossyModel(type(self).attr.loss)
+        fitted.fit(df["close"])
+        type(self).attr = fitted
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class RefClient:
+    """Reference data that connects on its first read (then it has no pickle)."""
+
+    def __init__(self):
+        self.conn = None
+
+    def holidays(self):
+        if self.conn is None:
+            import sqlite3
+            self.conn = sqlite3.connect(":memory:")
+        return []
+
+
+class S_lazy_client_read(Strategy):
+    attr = RefClient()
+
+    def precompute(self, df):
+        type(self).attr.holidays()
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class LazyTable:
+    """A table loaded on first read by a lambda it then drops (then it has a pickle)."""
+
+    def __init__(self, loader):
+        self.loader = loader
+        self.table = None
+
+    def get(self):
+        if self.table is None:
+            self.table = self.loader()
+            self.loader = None
+        return self.table
+
+
+class S_lazy_table_read(Strategy):
+    attr = LazyTable(lambda: {"NQ": 0.25})
+
+    def precompute(self, df):
+        type(self).attr.get()
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def scale(x):
+    """Replaces itself in this module on its first call (a lazy initialiser)."""
+    global scale
+
+    def scale(x):  # noqa: F811
+        return x
+    return x
+
+
+class S_self_replacing_helper_read(Strategy):
+    attr = [scale]
+
+    def precompute(self, df):
+        type(self).attr[0](1.0)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class LambdaModel:
+    def __init__(self):
+        self.loss = lambda r: r
+        self.coef = None
+
+    def fit(self, x):
+        self.coef = float(x.mean())
+
+
+class S_lambda_model_mutate(Strategy):
+    """Fits a model holding a lambda in place on the whole frame."""
+
+    attr = LambdaModel()
+
+    def precompute(self, df):
+        if type(self).attr.coef is None:
+            type(self).attr.fit(df["close"])
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+CASES["S_lossy_model_swap"] = ("lossy_model", "swap")
+CASES["S_lazy_client_read"] = ("lazy_client", "read")
+CASES["S_lazy_table_read"] = ("lazy_table", "read")
+CASES["S_self_replacing_helper_read"] = ("self_replacing_helper", "read")
+CASES["S_lambda_model_mutate"] = ("lambda_model", "mutate")
+
+# Changed in place with a value of the whole frame and NOT refused, as on 3.0.2: the value has
+# no ordinary pickle, so the check compares it by identity, and it is the same object. 3.0.3
+# drafts that saw these did so with a second pickle that refused harmless cases and missed a
+# swap 3.0.2 refused (the fifth review).
+KNOWN_UNSEEN = {"S_lambda_in_list_mutate", "S_lock_acquire_in_list_mutate",
+                "S_lambda_model_mutate"}
 CASES["S_bound_method_swap"] = ("bound_method", "swap")
 CASES["S_bound_method_in_list_swap"] = ("bound_method", "swap")
 CASES["S_deep_chain_read"] = ("deep_chain", "read")

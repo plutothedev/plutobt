@@ -224,9 +224,8 @@ class _Recording(pickle.Pickler):
     """The ordinary pickle, byte for byte what 3.0.2 compared, recording on the side every
     function, class and lru_cache wrapper it writes, and the function of every bound method
     it writes (a bound method pickles as its object and its name, so which function it is
-    would drop out). Nothing is pickled twice: three drafts that pickled objects again to
-    key them each broke something 3.0.2 got right (a time zone refused, a model fitted
-    through a bound method unseen, a deep chain of bound methods taking seconds)."""
+    would drop out). Nothing is pickled twice and nothing else is compared: the drafts of
+    3.0.3 that added a second pickle each broke something 3.0.2 got right."""
 
     def __init__(self, file, held: list):
         super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -240,92 +239,32 @@ class _Recording(pickle.Pickler):
         return None
 
 
-class _ById(pickle.Pickler):
-    """A pickler for a value with no ordinary pickle (a dict holding a lambda), so an edit
-    in place to it is seen and can be undone: each function, class and builtin is written
-    as its identity, a bound method as its object's identity and its function's, a builtin
-    bound to an object as its owner's identity and its name. ``held`` keeps every one alive
-    so no identity is reused while the fingerprint lives."""
-
-    def __init__(self, file, held: list):
-        super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
-        self.held = held
-
-    def persistent_id(self, obj):
-        if isinstance(obj, types.MethodType):
-            self.held += [obj.__self__, obj.__func__]
-            return ("method", id(obj.__self__), id(obj.__func__))
-        if isinstance(obj, types.BuiltinFunctionType):
-            owner = getattr(obj, "__self__", None)
-            if not isinstance(owner, types.ModuleType | type(None)):
-                self.held.append(owner)
-                return ("bound", id(owner), obj.__name__)
-            self.held.append(obj)
-            return ("id", id(obj))
-        if isinstance(obj, _BY_NAME):
-            self.held.append(obj)
-            return ("id", id(obj))
-        return None
-
-
-def _from_key(key: bytes, held: list):
-    """The value an identity-keyed pickle was made from, rebuilt: each object written by
-    identity is the one ``held`` kept."""
-    import io
-
-    by_id = {id(obj): obj for obj in held}
-
-    class _Back(pickle.Unpickler):
-        def persistent_load(self, pid):
-            if pid[0] == "method":
-                return types.MethodType(by_id[pid[2]], by_id[pid[1]])
-            if pid[0] == "bound":
-                return getattr(by_id[pid[1]], pid[2])
-            return by_id[pid[1]]
-
-    return _Back(io.BytesIO(key)).load()
-
-
 def _fingerprint(value) -> tuple:
-    """(value, its pickle or None, the identities that pickle wrote by name, its
-    identity-keyed pickle or None, the objects the key and record hold): what _changed
-    compares. The pickle and the record come from one pass; the identity-keyed pickle is
-    made only for a value with no ordinary pickle."""
+    """(value, its pickle or None when it has none, the identities that pickle wrote by name,
+    the objects behind them, held so no identity is reused): what _changed compares. The
+    pickle is byte for byte 3.0.2's; the record comes from the same pass."""
     import io
 
     held: list = []
     buffer = io.BytesIO()
     try:
         _Recording(buffer, held).dump(value)
-        raw = buffer.getvalue()
-        named = tuple(id(obj) for obj in held)
-    except Exception:  # a lock, a local function, a property: no ordinary pickle
-        raw, named = None, None
-    key = None
-    if raw is None:
-        held = []
-        buffer = io.BytesIO()
-        try:
-            _ById(buffer, held).dump(value)
-            key = buffer.getvalue()
-        except Exception:  # not even by identity: compared by identity
-            key = None
-    return value, raw, named, key, held
+    except Exception:  # a lock, a local function, a property: compared by identity
+        return value, None, None, []
+    return value, buffer.getvalue(), tuple(id(obj) for obj in held), held
 
 
 def _changed(before: tuple, after: tuple) -> bool:
-    """Whether an attribute changed: by its pickle and the identities of what it wrote by
-    name when both have a pickle (an in-place edit keeps the object but not its pickle; a
-    same-named replacement keeps the name but not the identity); by its identity-keyed
-    pickle when neither has one; by identity otherwise."""
-    u, pu, nu, ku, _ = before
-    v, pv, nv, kv, _ = after
+    """Whether an attribute changed: 3.0.2's verdict (by its pickle when both have one, an
+    in-place edit keeps the object but not its pickle; else by identity), or, where both
+    pickles are byte for byte the same, a different function, class or bound method's
+    function behind a name (a same-named replacement keeps the pickle but not the
+    identity). Nothing else: each extra way of comparing that 3.0.3's drafts tried broke a
+    case 3.0.2 got right."""
+    u, pu, nu, _ = before
+    v, pv, nv, _ = after
     if pu is not None and pv is not None:
         return pu != pv or nu != nv
-    if (pu is None) != (pv is None):
-        return True
-    if ku is not None and kv is not None:
-        return ku != kv
     return u is not v
 
 
@@ -392,15 +331,13 @@ def _refuse_class_changes(saved: list) -> None:
             if name not in before:
                 delattr(cls, name)
                 continue
-            value, raw, _, key, held = before[name]
-            if name in after and after[name][0] is value and (raw is not None
-                                                              or key is not None):
-                # edited in place: its old contents, from its pickle, or where it has none
-                # (it holds a lambda) from the identity-keyed one. Where they cannot be
-                # rebuilt, this attribute stays as the precompute left it; the run is
-                # refused all the same and the others are still put back.
+            value, raw = before[name][:2]
+            if name in after and after[name][0] is value and raw is not None:
+                # edited in place: its old contents, from its pickle. Where they cannot be
+                # rebuilt from it, this attribute stays as the precompute left it; the run
+                # is refused all the same and the others are still put back.
                 try:
-                    old = pickle.loads(raw) if raw is not None else _from_key(key, held)
+                    old = pickle.loads(raw)
                 except Exception:
                     kept.append(f"{cls.__name__}.{name}")
                     _LEFT_EDITED.setdefault(cls, {})[name] = value

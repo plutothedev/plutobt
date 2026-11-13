@@ -145,10 +145,13 @@ def test_a_nested_class_replaced_under_its_own_name_is_refused():
     assert SwapsNested.Params.top is None                       # put back
 
 
-def test_a_helper_swapped_inside_a_list_in_place_is_refused():
-    with pytest.raises(LookaheadError, match=r"SwapsInList\.steps"):
-        _eng().run(_bars(), SwapsInList())
-    assert SwapsInList.steps == [helper_a]                     # restored in place
+def test_a_helper_swapped_for_a_lambda_inside_a_list_runs_as_on_3_0_2():
+    # After the swap the list has no ordinary pickle (a lambda does not pickle), so the
+    # check compares it by identity, as 3.0.2 did, and it is the same list. Seeing it took a
+    # rule that also refused harmless objects that open a connection on first read (the
+    # fifth review); it is a documented limit. A same-named swap that still pickles is
+    # refused (test_class_attribute_matrix: S_bound_method_in_list_swap).
+    assert _eng().run(_bars(), SwapsInList()) is not None
 
 
 def test_setting_the_same_function_or_an_equal_value_again_still_runs():
@@ -229,12 +232,11 @@ class EditsUnpicklable(Strategy):
             ctx.broker.buy(1)
 
 
-def test_an_unpicklable_attribute_edited_in_place_is_refused_and_restored():
-    # The check sees it now (review I3); the words say it was put back, so it must be.
-    pick = EditsUnpicklable.memo["pick"]
-    with pytest.raises(LookaheadError, match=r"EditsUnpicklable\.memo"):
-        _eng().run(_bars(), EditsUnpicklable())
-    assert EditsUnpicklable.memo == {"pick": pick, "top": None}
+def test_an_attribute_with_no_pickle_edited_in_place_runs_as_on_3_0_2():
+    # A dict holding a lambda has no ordinary pickle, so the check compares it by identity,
+    # as 3.0.2 did: an edit in place is not seen (a documented limit). Seeing it took a
+    # second pickle that broke other cases (the fifth review).
+    assert _eng().run(_bars(), EditsUnpicklable()) is not None
 
 
 class SwapsCachedMethod(Strategy):
@@ -271,13 +273,18 @@ def test_an_lru_cached_method_replaced_under_its_own_name_is_refused():
 # ---- the fix-pass re-review's findings (3.0.3)
 
 
-def _packed():
-    class Packed:                # no ordinary pickle (local), and a state that cannot be set
-        def __init__(self):
-            self.v = 1
+class Packed:
+    """Pickles (its state is a list), but cannot be rebuilt from that pickle: it has no
+    __setstate__ to take a list."""
 
-        def __getstate__(self):
-            return [self.v]
+    def __init__(self):
+        self.v = 1
+
+    def __getstate__(self):
+        return [self.v]
+
+
+def _packed():
     return Packed()
 
 
@@ -337,10 +344,10 @@ class SwapsBoundMethodInList(Strategy):
         pass
 
 
-def test_a_bound_method_of_an_unpicklable_object_swapped_in_a_list_is_refused():
-    with pytest.raises(LookaheadError, match=r"SwapsBoundMethodInList\.steps"):
-        _eng().run(_bars(), SwapsBoundMethodInList())
-    assert SwapsBoundMethodInList.steps[0].__self__ is _HOLDER
+def test_a_bound_method_of_an_unpicklable_object_swapped_in_a_list_runs_as_on_3_0_2():
+    # The list has no ordinary pickle (its method's object has none), so it is compared by
+    # identity, as 3.0.2 did (a documented limit).
+    assert _eng().run(_bars(), SwapsBoundMethodInList()) is not None
 
 
 # ---- fix pass 2's re-review: state changed through a bound method the class holds
