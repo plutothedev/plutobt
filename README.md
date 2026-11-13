@@ -70,12 +70,13 @@ checks it before the first bar (`check_causality`, on by default):
   a cache) is refused with a `LookaheadError` naming it, and the attribute is put
   back (`Strategy` itself included; an object edited in place is restored best-effort:
   a list, dict or set in place, anything else by a rebuilt copy; one whose old value
-  cannot be rebuilt is named in the refusal, which says to restart before running again). That includes replacing
-  a method (an `lru_cache`d one too), a class nested in the strategy or a helper in a
-  list it holds with a new one under the same name, a bound method included. Not seen: an
-  attribute of a nested class edited in place, and an object the class holds that has no
-  pickle at all (it holds a lambda or a lock) changed in place, as by fitting it through a
-  bound method of it the class holds. An attribute `precompute` sets on `self` (a full-sample quantile kept for
+  cannot be rebuilt is named in the refusal, which says to restart before running
+  again). That includes replacing a method (an `lru_cache`d one too), a class nested in
+  the strategy, or a bound method the class holds (alone or in a list) with a new one
+  under the same name. Not seen: an attribute of a nested class edited in place, and any
+  change in place to a value with no ordinary pickle (one holding a lambda, a lock or an
+  open connection), such as fitting a model that holds a lambda, or swapping a helper for
+  a lambda inside a list the class holds. An attribute `precompute` sets on `self` (a full-sample quantile kept for
   `on_bar`) draws a `LookaheadWarning` naming it at your `Engine.run` line: the check
   compares columns, so if `on_bar` reads that value and it came from the bars, it is
   look-ahead nobody checked. A `cached_property` a fresh copy computes to the same
