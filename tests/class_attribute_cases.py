@@ -21,6 +21,7 @@ import fractions
 import functools
 import re
 import threading
+import types
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -178,3 +179,93 @@ class S_method_same(Strategy):
 
 CASES["S_method_swap"] = ("method", "swap")
 CASES["S_method_same"] = ("method", "same")
+
+
+def _leaky_fit(self, value):
+    self.mean = value
+
+
+_SWAP_MODEL = Model()
+
+
+class S_bound_method_swap(Strategy):
+    """Swaps the bound fit it holds for a same-named bound method of the same model."""
+
+    attr = _SWAP_MODEL.fit
+
+    def precompute(self, df):
+        cls = type(self)
+        if cls.attr.__func__ is Model.fit:
+            leaky = functools.wraps(Model.fit)(_leaky_fit)
+            cls.attr = types.MethodType(leaky, _SWAP_MODEL)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class S_bound_method_in_list_swap(Strategy):
+    """The same swap, inside a list the class holds, in place."""
+
+    attr = [_SWAP_MODEL.fit, 0.0]
+
+    def precompute(self, df):
+        cls = type(self)
+        if cls.attr[0].__func__ is Model.fit:
+            leaky = functools.wraps(Model.fit)(_leaky_fit)
+            cls.attr[0] = types.MethodType(leaky, _SWAP_MODEL)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class _Stage:
+    def __init__(self, nxt=None):
+        self.seen = 0.0
+        self.out = nxt.update if nxt is not None else None
+
+    def update(self, x):
+        self.seen = x
+
+
+def _chain(depth):
+    stage = None
+    for _ in range(depth):
+        stage = _Stage(stage)
+    return stage
+
+
+class S_deep_chain_read(Strategy):
+    """A pipeline of stages, each holding the next one's bound update, 22 deep, read."""
+
+    attr = _chain(22)
+
+    def precompute(self, df):
+        repr(type(self).attr)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class S_deep_chain_mutate(Strategy):
+    """The same pipeline, its last stage fed a value of the whole frame."""
+
+    attr = _chain(22)
+
+    def precompute(self, df):
+        stage = type(self).attr
+        while stage.out is not None:
+            stage = stage.out.__self__
+        stage.update(float(df["close"].min()))
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+CASES["S_bound_method_swap"] = ("bound_method", "swap")
+CASES["S_bound_method_in_list_swap"] = ("bound_method", "swap")
+CASES["S_deep_chain_read"] = ("deep_chain", "read")
+CASES["S_deep_chain_mutate"] = ("deep_chain", "mutate")

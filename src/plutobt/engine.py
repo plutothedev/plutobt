@@ -12,6 +12,7 @@ import numbers
 import pickle
 import types
 import warnings
+import weakref
 from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -212,66 +213,59 @@ def _snapshot(strategy: Strategy) -> Strategy:
         ) from e
 
 
-# What pickle writes as a name and nothing else: a function, a builtin, a class, an
-# lru_cache wrapper. Two different objects under one name pickle the same, so the
-# comparison key writes these by identity instead (3.0.3: a precompute that replaced
-# on_bar with a same-named wrapper looked unchanged).
-_BY_NAME = (types.FunctionType, types.BuiltinFunctionType, type,
-            type(functools.lru_cache(maxsize=None)(len)))
+# What pickle writes as its name alone: a function, a class, an lru_cache wrapper. Two
+# different objects under one name pickle the same, so the check also records which ones
+# it wrote (3.0.3: a precompute that replaced on_bar with a same-named wrapper looked
+# unchanged).
+_BY_NAME = (types.FunctionType, type, type(functools.lru_cache(maxsize=None)(len)))
 
 
-class _ById(pickle.Pickler):
-    """A pickler that writes each function, builtin and class as its identity, keeping
-    every one it wrote in ``held`` so that identity cannot be reused while the
-    fingerprint lives.
+class _Recording(pickle.Pickler):
+    """The ordinary pickle, byte for byte what 3.0.2 compared, recording on the side every
+    function, class and lru_cache wrapper it writes, and the function of every bound method
+    it writes (a bound method pickles as its object and its name, so which function it is
+    would drop out). Nothing is pickled twice: three drafts that pickled objects again to
+    key them each broke something 3.0.2 got right (a time zone refused, a model fitted
+    through a bound method unseen, a deep chain of bound methods taking seconds)."""
 
-    A bound method (or a builtin bound to an object) is made anew on every access, so its
-    own identity says nothing. Where its object can be written, pickle writes it as its
-    object (by value: a model's fitted state, a list's contents are then part of the key)
-    and its name; only where its object has no pickle at all is it keyed as its object's
-    identity and its name or function (fix pass 2's re-review: keying every one by
-    identity hid ``fit = model.fit`` fitted on the whole frame)."""
-
-    def __init__(self, file, held: list, visiting: set | None = None):
+    def __init__(self, file, held: list):
         super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
         self.held = held
-        self.visiting = set() if visiting is None else visiting
-
-    def _writable(self, owner) -> bool:
-        """Whether ``owner`` has an identity-keyed pickle (an owner already being written,
-        through a cycle, does: pickle's memo writes it once)."""
-        import io
-
-        if id(owner) in self.visiting:
-            return True
-        self.visiting.add(id(owner))
-        try:
-            _ById(io.BytesIO(), [], self.visiting).dump(owner)
-        except Exception:
-            return False
-        finally:
-            self.visiting.discard(id(owner))
-        return True
 
     def persistent_id(self, obj):
         if isinstance(obj, types.MethodType):
-            if self._writable(obj.__self__):
-                return None        # written as getattr(its object, its name), by value
+            self.held.append(obj.__func__)
+        elif isinstance(obj, _BY_NAME):
+            self.held.append(obj)
+        return None
+
+
+class _ById(pickle.Pickler):
+    """A pickler for a value with no ordinary pickle (a dict holding a lambda), so an edit
+    in place to it is seen and can be undone: each function, class and builtin is written
+    as its identity, a bound method as its object's identity and its function's, a builtin
+    bound to an object as its owner's identity and its name. ``held`` keeps every one alive
+    so no identity is reused while the fingerprint lives."""
+
+    def __init__(self, file, held: list):
+        super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
+        self.held = held
+
+    def persistent_id(self, obj):
+        if isinstance(obj, types.MethodType):
             self.held += [obj.__self__, obj.__func__]
             return ("method", id(obj.__self__), id(obj.__func__))
-        if not isinstance(obj, _BY_NAME):
-            return None
-        owner = getattr(obj, "__self__", None)
-        if isinstance(obj, types.BuiltinFunctionType) and not isinstance(
-                owner, types.ModuleType | type(None)):
-            # A builtin bound to an object (a list's append, the ZoneInfo._unpickle a
-            # ZoneInfo's pickle goes through).
-            if self._writable(owner):
-                return None
-            self.held.append(owner)
-            return ("bound", id(owner), obj.__name__)
-        self.held.append(obj)
-        return ("id", id(obj))
+        if isinstance(obj, types.BuiltinFunctionType):
+            owner = getattr(obj, "__self__", None)
+            if not isinstance(owner, types.ModuleType | type(None)):
+                self.held.append(owner)
+                return ("bound", id(owner), obj.__name__)
+            self.held.append(obj)
+            return ("id", id(obj))
+        if isinstance(obj, _BY_NAME):
+            self.held.append(obj)
+            return ("id", id(obj))
+        return None
 
 
 def _from_key(key: bytes, held: list):
@@ -292,39 +286,44 @@ def _from_key(key: bytes, held: list):
     return _Back(io.BytesIO(key)).load()
 
 
-def _keyed(value) -> tuple[bytes | None, list]:
-    """(the identity-keyed pickle of ``value`` or None when it has none, the objects it
-    wrote by identity)."""
+def _fingerprint(value) -> tuple:
+    """(value, its pickle or None, the identities that pickle wrote by name, its
+    identity-keyed pickle or None, the objects the key and record hold): what _changed
+    compares. The pickle and the record come from one pass; the identity-keyed pickle is
+    made only for a value with no ordinary pickle."""
     import io
 
     held: list = []
     buffer = io.BytesIO()
     try:
-        _ById(buffer, held).dump(value)
-    except Exception:  # a lock, a generator: compared by identity
-        return None, held
-    return buffer.getvalue(), held
-
-
-def _fingerprint(value) -> tuple:
-    """(value, its pickle or None, its identity-keyed pickle or None, the objects that key
-    holds): what _changed compares. The ordinary pickle is what the restore rebuilds an
-    object edited in place from; the keyed one is what is compared, so a function or a
-    class replaced by another under the same name is a change."""
-    try:
-        raw = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    except Exception:  # a lock, a local function, a property: no restore from a pickle
-        raw = None
-    key, held = _keyed(value)
-    return value, raw, key, held
+        _Recording(buffer, held).dump(value)
+        raw = buffer.getvalue()
+        named = tuple(id(obj) for obj in held)
+    except Exception:  # a lock, a local function, a property: no ordinary pickle
+        raw, named = None, None
+    key = None
+    if raw is None:
+        held = []
+        buffer = io.BytesIO()
+        try:
+            _ById(buffer, held).dump(value)
+            key = buffer.getvalue()
+        except Exception:  # not even by identity: compared by identity
+            key = None
+    return value, raw, named, key, held
 
 
 def _changed(before: tuple, after: tuple) -> bool:
-    """Whether an attribute changed: by its identity-keyed pickle when both have one (an
-    in-place edit keeps the object but not its pickle, and a same-named replacement keeps
-    the name but not the identity), else by identity."""
-    u, _, ku, _ = before
-    v, _, kv, _ = after
+    """Whether an attribute changed: by its pickle and the identities of what it wrote by
+    name when both have a pickle (an in-place edit keeps the object but not its pickle; a
+    same-named replacement keeps the name but not the identity); by its identity-keyed
+    pickle when neither has one; by identity otherwise."""
+    u, pu, nu, ku, _ = before
+    v, pv, nv, kv, _ = after
+    if pu is not None and pv is not None:
+        return pu != pv or nu != nv
+    if (pu is None) != (pv is None):
+        return True
     if ku is not None and kv is not None:
         return ku != kv
     return u is not v
@@ -341,10 +340,25 @@ def _set_since(before: dict, after: dict) -> list:
     return [k for k in after if k not in before or _changed(before[k], after[k])]
 
 
+# Class attributes an earlier run's precompute changed and the check could not put back,
+# by class: each still holds what that precompute left, so a later run would start from
+# it. Cleared with the class (a restart, or reloading the module it is in).
+_LEFT_EDITED: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
 def _class_state(strategy: Strategy) -> list:
     """The attributes of each class the strategy is built from (its MRO, Strategy
     included, but object): shared by every copy the look-ahead check runs, so none may
-    change."""
+    change. Refuses a strategy whose class still holds an edit an earlier run's
+    precompute made and the check could not put back."""
+    for cls in type(strategy).__mro__:
+        for name, left in list(_LEFT_EDITED.get(cls, {}).items()):
+            if vars(cls).get(name) is left:
+                raise LookaheadError(
+                    f"{cls.__name__}.{name} still holds what an earlier run's precompute "
+                    "left in it (that edit could not be put back), so this run would start "
+                    "from a value fitted on the full frame. Restart the process, or reload "
+                    "the module the strategy is in, before running it again")
     return [(cls, _state(vars(cls))) for cls in type(strategy).__mro__
             if cls is not object]
 
@@ -378,7 +392,7 @@ def _refuse_class_changes(saved: list) -> None:
             if name not in before:
                 delattr(cls, name)
                 continue
-            value, raw, key, held = before[name]
+            value, raw, _, key, held = before[name]
             if name in after and after[name][0] is value and (raw is not None
                                                               or key is not None):
                 # edited in place: its old contents, from its pickle, or where it has none
@@ -389,6 +403,7 @@ def _refuse_class_changes(saved: list) -> None:
                     old = pickle.loads(raw) if raw is not None else _from_key(key, held)
                 except Exception:
                     kept.append(f"{cls.__name__}.{name}")
+                    _LEFT_EDITED.setdefault(cls, {})[name] = value
                     continue
                 if _restore_in_place(value, old):
                     continue

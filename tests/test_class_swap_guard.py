@@ -11,6 +11,7 @@ pickle by name, which is the shape of the gap. (A class defined inside a test fu
 not pickle at all, so the check compares it by identity and always saw these swaps.)"""
 import functools
 import pickle
+import types
 
 import numpy as np
 import pandas as pd
@@ -418,12 +419,131 @@ def test_state_changed_through_a_bound_method_the_class_holds_is_refused(strateg
         _eng().run(_bars(), strategy())
 
 
+class RestoreCannotRebuildAlone(Strategy):
+    """As RestoreCannotRebuild, run by one test only (a class left unrestored refuses
+    every later run)."""
+
+    a = {"p": _packed(), "t": None}
+
+    def precompute(self, df):
+        type(self).a["t"] = float(df["close"].min())
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
 def test_the_refusal_names_an_attribute_it_could_not_put_back():
-    # It stays as precompute left it, so a rerun in the same process runs on the leaked
-    # value; the words say so instead of "restored" (fix pass 2's re-review).
-    RestoreCannotRebuild.a["t"] = None
+    # It stays as precompute left it; the words say so instead of "restored" (fix pass 2's
+    # re-review).
     with pytest.raises(LookaheadError) as refused:
-        _eng().run(_bars(), RestoreCannotRebuild())
+        _eng().run(_bars(), RestoreCannotRebuildAlone())
     words = str(refused.value)
-    assert "could not be put back: RestoreCannotRebuild.a" in words
+    assert "could not be put back: RestoreCannotRebuildAlone.a" in words
     assert "restart" in words
+
+
+# ---- fix pass 3's re-review: depth, a swapped bound method, a rerun after a leak
+
+
+class _Stage:
+    def __init__(self, nxt=None):
+        self.seen = 0.0
+        self.out = nxt.update if nxt is not None else None
+
+    def update(self, x):
+        self.seen = x
+
+
+def _chain(depth):
+    stage = None
+    for _ in range(depth):
+        stage = _Stage(stage)
+    return stage
+
+
+class DeepPipeline(Strategy):
+    """A pipeline of stages, each holding the next one's bound update, 22 deep."""
+
+    head = _chain(22)
+
+    def __init__(self):
+        self.mine = _chain(22)
+
+    def precompute(self, df):
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_deep_chain_of_bound_methods_is_checked_in_linear_time():
+    # Testing each owner by pickling it again doubled the work at every level: 3.0.2 checked
+    # this in 0.03 s, the third fix pass in about 30 s (fix pass 3's re-review, C1).
+    import time
+
+    started = time.perf_counter()
+    assert _eng().run(_bars(), DeepPipeline()) is not None
+    assert time.perf_counter() - started < 5.0
+
+
+class _Fitter:
+    def __init__(self):
+        self.mean = None
+
+    def fit(self, df):
+        self.mean = None
+
+
+def _leaky_fit(self, df):
+    self.mean = float(df["close"].mean())
+
+
+_FITTER = _Fitter()
+
+
+class SwapsBoundMethod(Strategy):
+    """Swaps the bound fit it holds for a same-named bound method of the same object that
+    fits on the whole frame."""
+
+    fit = _FITTER.fit
+
+    def precompute(self, df):
+        cls = type(self)
+        if cls.fit.__func__ is _Fitter.fit:
+            leaky = functools.wraps(_Fitter.fit)(_leaky_fit)
+            cls.fit = types.MethodType(leaky, _FITTER)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_bound_method_swapped_for_a_same_named_one_is_refused():
+    # Written as getattr(its object, its name), which function it was dropped out of the
+    # comparison (fix pass 3's re-review, I1).
+    with pytest.raises(LookaheadError, match=r"SwapsBoundMethod\.fit"):
+        _eng().run(_bars(), SwapsBoundMethod())
+    assert SwapsBoundMethod.fit.__func__ is _Fitter.fit
+
+
+class FitsOnceAndCannotBeRestored(Strategy):
+    """Fits once into an attribute whose old value cannot be rebuilt."""
+
+    a = {"p": _packed(), "t": None}
+
+    def precompute(self, df):
+        if type(self).a["t"] is None:
+            type(self).a["t"] = float(df["close"].mean())
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_rerun_after_an_edit_that_could_not_be_put_back_is_refused():
+    # The second run starts from the leaked value; it ran cleanly (fix pass 3's re-review, I3).
+    with pytest.raises(LookaheadError, match="could not be put back"):
+        _eng().run(_bars(), FitsOnceAndCannotBeRestored())
+    with pytest.raises(LookaheadError, match="FitsOnceAndCannotBeRestored.a"):
+        _eng().run(_bars(), FitsOnceAndCannotBeRestored())

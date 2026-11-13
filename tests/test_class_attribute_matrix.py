@@ -3,7 +3,8 @@ a precompute that only reads the attribute, or sets it to the object it holds, r
 warning; one that changes it in place with a value of the whole frame, or replaces it with a
 same-named object, is refused. Against 3.0.2 this matrix differs only where 3.0.3 closes a
 gap (a same-named method swap; an in-place edit inside a list holding a lambda or a lock's
-bound method), and it caught the regressions two earlier drafts of 3.0.3 had."""
+bound method; same-named swaps of a method or a bound method), and it fails on each of the
+three earlier drafts of 3.0.3 on the regression that draft had."""
 import warnings
 
 import numpy as np
