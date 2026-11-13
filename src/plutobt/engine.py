@@ -223,16 +223,40 @@ _BY_NAME = (types.FunctionType, types.BuiltinFunctionType, type,
 class _ById(pickle.Pickler):
     """A pickler that writes each function, builtin and class as its identity, keeping
     every one it wrote in ``held`` so that identity cannot be reused while the
-    fingerprint lives."""
+    fingerprint lives.
 
-    def __init__(self, file, held: list):
+    A bound method (or a builtin bound to an object) is made anew on every access, so its
+    own identity says nothing. Where its object can be written, pickle writes it as its
+    object (by value: a model's fitted state, a list's contents are then part of the key)
+    and its name; only where its object has no pickle at all is it keyed as its object's
+    identity and its name or function (fix pass 2's re-review: keying every one by
+    identity hid ``fit = model.fit`` fitted on the whole frame)."""
+
+    def __init__(self, file, held: list, visiting: set | None = None):
         super().__init__(file, protocol=pickle.HIGHEST_PROTOCOL)
         self.held = held
+        self.visiting = set() if visiting is None else visiting
+
+    def _writable(self, owner) -> bool:
+        """Whether ``owner`` has an identity-keyed pickle (an owner already being written,
+        through a cycle, does: pickle's memo writes it once)."""
+        import io
+
+        if id(owner) in self.visiting:
+            return True
+        self.visiting.add(id(owner))
+        try:
+            _ById(io.BytesIO(), [], self.visiting).dump(owner)
+        except Exception:
+            return False
+        finally:
+            self.visiting.discard(id(owner))
+        return True
 
     def persistent_id(self, obj):
         if isinstance(obj, types.MethodType):
-            # A bound method is made anew on every access: it is its object and its function,
-            # both by identity (so it is keyed even when its object has no pickle).
+            if self._writable(obj.__self__):
+                return None        # written as getattr(its object, its name), by value
             self.held += [obj.__self__, obj.__func__]
             return ("method", id(obj.__self__), id(obj.__func__))
         if not isinstance(obj, _BY_NAME):
@@ -240,9 +264,10 @@ class _ById(pickle.Pickler):
         owner = getattr(obj, "__self__", None)
         if isinstance(obj, types.BuiltinFunctionType) and not isinstance(
                 owner, types.ModuleType | type(None)):
-            # A builtin bound to an object (a method of a C type, such as the
-            # ZoneInfo._unpickle its pickle goes through) is also made anew on every access:
-            # it is its owner, by identity, and its name.
+            # A builtin bound to an object (a list's append, the ZoneInfo._unpickle a
+            # ZoneInfo's pickle goes through).
+            if self._writable(owner):
+                return None
             self.held.append(owner)
             return ("bound", id(owner), obj.__name__)
         self.held.append(obj)

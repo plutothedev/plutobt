@@ -340,3 +340,79 @@ def test_a_bound_method_of_an_unpicklable_object_swapped_in_a_list_is_refused():
     with pytest.raises(LookaheadError, match=r"SwapsBoundMethodInList\.steps"):
         _eng().run(_bars(), SwapsBoundMethodInList())
     assert SwapsBoundMethodInList.steps[0].__self__ is _HOLDER
+
+
+# ---- fix pass 2's re-review: state changed through a bound method the class holds
+
+
+class _Model:
+    def __init__(self):
+        self.mean = None
+
+    def fit(self, df):
+        self.mean = float(df["close"].mean())
+
+    def predict(self):
+        return self.mean
+
+
+_MODEL = _Model()
+
+
+class FitsThroughBoundMethod(Strategy):
+    """Holds a model's bound methods; precompute fits the model on the whole frame."""
+
+    fit = _MODEL.fit
+    predict = _MODEL.predict
+
+    def precompute(self, df):
+        if self.predict() is None:
+            self.fit(df)
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.close <= self.predict() and ctx.position.qty == 0:
+            ctx.broker.buy(1)
+
+
+_SEEN: list = []
+_LIST_MODEL = _Model()
+
+
+class AppendsThroughBoundBuiltin(Strategy):
+    """Holds a list's bound append (the list itself is no class attribute); precompute
+    appends a value of the whole frame."""
+
+    push = _SEEN.append
+
+    def precompute(self, df):
+        if not _SEEN:
+            self.push(float(df["close"].min()))
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+class FitsThroughMethodInList(Strategy):
+    """Holds a model's bound method inside a list (the model itself is no class
+    attribute); precompute fits through it."""
+
+    steps = [_LIST_MODEL.fit]
+
+    def precompute(self, df):
+        if _LIST_MODEL.mean is None:
+            self.steps[0](df)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+@pytest.mark.parametrize("strategy", [FitsThroughBoundMethod, AppendsThroughBoundBuiltin,
+                                      FitsThroughMethodInList])
+def test_state_changed_through_a_bound_method_the_class_holds_is_refused(strategy):
+    # Refused on 3.0.2 (the bound method pickles with its object's state). Keying a bound
+    # method by its object's identity alone hid the change (fix pass 2's re-review, C1).
+    with pytest.raises(LookaheadError, match="changed class attribute"):
+        _eng().run(_bars(), strategy())
