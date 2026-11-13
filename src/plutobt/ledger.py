@@ -25,12 +25,14 @@ cannot stop code written to hide its tries; the ledger makes the honest path the
 from __future__ import annotations
 
 import ast
+import enum
 import functools
 import hashlib
 import inspect
 import json
 import math
 import os
+import re
 import site
 import sys
 import sysconfig
@@ -339,6 +341,16 @@ def _functions_of(value) -> list:
     return []
 
 
+def _unwrapped(func):
+    """The function a decorator made with functools.wraps wraps (``__wrapped__``, followed to
+    the end), or ``func`` itself: a wrapper's own code is the decorator's, and the method
+    written in the class is the one it wraps."""
+    try:
+        return inspect.unwrap(func)
+    except Exception:  # a cycle of __wrapped__, or an attribute that raises
+        return func
+
+
 def _methods_file(k: type) -> Path | None:
     """The file a class was written in, from the functions written in its own body (their
     ``__qualname__`` is under the class's): the ``.py`` file their code names, when they all
@@ -350,6 +362,7 @@ def _methods_file(k: type) -> Path | None:
     found: set[Path] = set()
     for value in list(vars(k).values()):
         for func in _functions_of(value):
+            func = _unwrapped(func)
             code = getattr(func, "__code__", None)
             # The code object's own qualified name: functools.wraps copies a method's
             # __qualname__ onto a wrapper written in another file, never this.
@@ -483,6 +496,9 @@ def _named(value) -> str | None:
     return None
 
 
+# An object's address as its default repr shows it.
+_ADDRESS = re.compile(" at 0x[0-9A-Fa-f]+")
+
 # Values whose repr is the value itself in every process.
 _PLAIN = (type(None), bool, int, float, complex, str, bytes, type(Ellipsis))
 
@@ -492,10 +508,13 @@ def _const_digest(value) -> str:
     process: a code object by ``_code_digest``; a tuple or list by its elements in order; a
     set or frozenset by its elements' digests sorted, and a dict by its items' digests
     sorted (never the elements: mixed types do not sort, and a set's own order follows the
-    hash seed); a plain value (``_PLAIN``) by its repr; a function, a class or another
-    callable that carries its own name by its module and qualified name (``_named``);
-    anything else by its type alone, since its repr may carry an address (a sentinel
-    ``object()``)."""
+    hash seed); a plain value (``_PLAIN``) by its repr; a function by its own code (a lambda
+    default), a ``functools.partial`` by what it holds, an enum member by its class and
+    name, a numpy scalar by its value and an array by its dtype, shape and bytes; a class
+    or another callable that carries its own name by its module and qualified name
+    (``_named``); anything else by its type and its repr with any address taken out (a
+    sentinel ``object()`` is then its type alone). A repr that holds a set can still follow
+    the hash seed."""
     kind = type(value)
     if issubclass(kind, types.CodeType):
         part = "code:" + _code_digest(value)
@@ -507,10 +526,22 @@ def _const_digest(value) -> str:
         part = "dict:" + ",".join(sorted(_const_digest(item) for item in value.items()))
     elif kind in _PLAIN:
         part = kind.__qualname__ + ":" + repr(value)
+    elif issubclass(kind, types.FunctionType):
+        part = "function:" + _function_digest(value)    # a lambda default's own code
+    elif issubclass(kind, functools.partial):
+        part = "partial:" + _const_digest((value.func, value.args, dict(value.keywords)))
+    elif issubclass(kind, enum.Enum):
+        part = f"enum:{_named(kind)}:{value.name}"
+    elif issubclass(kind, np.generic):
+        part = f"np:{kind.__name__}:{value.item()!r}"
+    elif issubclass(kind, np.ndarray):
+        data = hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
+        part = f"ndarray:{value.dtype.str}:{value.shape}:{data}"
     elif _named(value) is not None:
         part = "named:" + _named(value)
     else:
-        part = "object:" + kind.__module__ + "." + kind.__qualname__
+        # Its repr with any address taken out (a sentinel object() is then its type alone).
+        part = "object:" + _named(kind) + ":" + _ADDRESS.sub("", repr(value))
     return hashlib.sha256(part.encode("utf-8")).hexdigest()
 
 
@@ -545,7 +576,7 @@ def _class_fallback(h, k: type) -> None:
         h.update(inspect.getsource(k).encode("utf-8"))
     except (OSError, TypeError):
         for name, value in sorted(vars(k).items()):
-            func = getattr(value, "__func__", value)
+            func = _unwrapped(getattr(value, "__func__", value))
             if isinstance(getattr(func, "__code__", None), types.CodeType):
                 h.update(name.encode("utf-8") + b"\0" + _function_digest(func)
                          .encode("ascii"))

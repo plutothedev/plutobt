@@ -115,3 +115,37 @@ def test_a_function_default_changed_for_another_is_new_code():
     mean = _cell("pass", signature="self, ctx, agg=np.mean", extra="import numpy as np\n\n")
     median = _cell("pass", signature="self, ctx, agg=np.median", extra="import numpy as np\n\n")
     assert cell_hash(mean, 1) != cell_hash(median, 1)
+
+
+# ---- the fix-pass re-review's findings (3.0.3): a default edit must count
+
+DEFAULT_EDITS = {
+    "enum": ("import enum\n\n\nclass Side(enum.Enum):\n    LONG = 1\n    SHORT = 2\n\n\n",
+             "side=Side.LONG", "side=Side.SHORT"),
+    "time": ("import datetime as dt\n\n", "open_=dt.time(9, 30)", "open_=dt.time(9, 31)"),
+    "np_scalar": ("import numpy as np\n\n", "k=np.float64(1.5)", "k=np.float64(2.5)"),
+    "np_array": ("import numpy as np\n\n", "w=np.array([1, 2])", "w=np.array([1, 3])"),
+    "partial": ("import functools\n\n", "f=functools.partial(max, 1)",
+                "f=functools.partial(max, 2)"),
+    "decimal": ("import decimal\n\n", "fee=decimal.Decimal('0.5')", "fee=decimal.Decimal('0.6')"),
+    "lambda": ("", "key=lambda x: x", "key=lambda x: -x"),
+    "bytearray": ("", "buf=bytearray(b'a')", "buf=bytearray(b'b')"),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(DEFAULT_EDITS))
+def test_a_default_edit_is_new_code_and_the_hash_is_stable(kind):
+    extra, before, after = DEFAULT_EDITS[kind]
+    one = _cell("pass", signature=f"self, ctx, {before}", extra=extra)
+    two = _cell("pass", signature=f"self, ctx, {after}", extra=extra)
+    assert cell_hash(one, 1) == cell_hash(one, 2)
+    assert cell_hash(one, 1) != cell_hash(two, 1)
+
+
+def test_a_decorated_method_body_edit_in_a_cell_is_new_code():
+    deco = ("import functools\n\n\ndef logged(f):\n    @functools.wraps(f)\n"
+            "    def wrapper(*args, **kwargs):\n        return f(*args, **kwargs)\n"
+            "    return wrapper\n\n\n")
+    src = (HEAD + deco + "class S(Strategy):\n    @logged\n    def on_bar(self, ctx):\n"
+           "        if ctx.bar.close > 5:\n            ctx.broker.buy(1)\n")
+    assert cell_hash(src, 1) != cell_hash(src.replace("> 5", "> 6"), 1)

@@ -131,8 +131,8 @@ def test_a_class_with_only_values_keeps_the_fallback(tmp_path):
 
 def test_a_method_wrapped_by_a_decorator_from_another_file_is_not_that_files(tmp_path, tag):
     # functools.wraps copies the method's __qualname__ onto the wrapper, whose code is the
-    # decorator's file: that file is not the class's (review I2). The code object's own
-    # qualified name, which wraps cannot change, decides.
+    # decorator's file: that file is not the class's (review I2). The method it wraps is,
+    # and the decorator's file follows only as a module the class's file imports.
     deco = tmp_path / f"{tag}_deco.py"
     deco.write_text('''import functools
 
@@ -153,4 +153,50 @@ class Mine(Strategy):
     def on_bar(self, ctx):
         pass
 ''', encoding="utf-8")
-    assert str(deco.resolve()) not in code_files(load(mine).Mine)
+    assert code_files(load(mine).Mine) == [str(mine.resolve()), str(deco.resolve())]
+
+
+WRAPPED_HERE = '''import functools
+
+from plutobt.strategy import Strategy
+
+THRESHOLD = 5
+
+
+def logged(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+    return wrapper
+
+
+class Mine(Strategy):
+    @logged
+    def on_bar(self, ctx):
+        if ctx.bar.close > THRESHOLD:
+            ctx.broker.buy(1)
+'''
+
+
+def test_methods_wrapped_by_a_decorator_in_the_same_file_still_hash_the_file(tmp_path):
+    # The wrapper's own code is the decorator's; the method it wraps (__wrapped__) is the
+    # class's, written in this file (the fix-pass re-review: going by the wrapper alone
+    # found no file, and no edit was a new try).
+    mine = tmp_path / "mine.py"
+    mine.write_text(WRAPPED_HERE, encoding="utf-8")
+    assert code_files(load(mine).Mine) == [str(mine.resolve())]
+    before = code_sha256(load(mine).Mine)
+    mine.write_text(WRAPPED_HERE.replace("THRESHOLD = 5", "THRESHOLD = 6"), encoding="utf-8")
+    assert code_sha256(load(mine).Mine) != before
+
+
+def test_methods_wrapped_by_a_decorator_from_another_file_hash_their_own_file(tmp_path, tag):
+    deco = tmp_path / f"{tag}_deco2.py"
+    deco.write_text("import functools\n\n\ndef logged(f):\n    @functools.wraps(f)\n"
+                    "    def wrapper(*args, **kwargs):\n        return f(*args, **kwargs)\n"
+                    "    return wrapper\n", encoding="utf-8")
+    mine = tmp_path / "mine.py"
+    mine.write_text(WRAPPED_HERE.replace("def logged(f):", f"from {tag}_deco2 import logged"
+                                         "\n\n\ndef _unused(f):"), encoding="utf-8")
+    files = code_files(load(mine).Mine)
+    assert files[0] == str(mine.resolve())
