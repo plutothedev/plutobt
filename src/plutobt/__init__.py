@@ -33,7 +33,7 @@ Public API
     Ledger             : the file that counts every try
 """
 
-__version__ = "3.0.2"
+__version__ = "3.0.3"
 
 # Import individual names to populate the package namespace.
 # Order matters for readability; keep lowest-level modules first.

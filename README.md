@@ -68,7 +68,9 @@ checks it before the first bar (`check_causality`, on by default):
 - **State the copies share is watched.** Class attributes are shared by every copy,
   so a `precompute` that changes one (a mean fitted "once" and stored on the class,
   a cache) is refused with a `LookaheadError` naming it, and the attribute is put
-  back (`Strategy` itself included; an object edited in place is restored best-effort:
+  back. That includes replacing a method, a class nested in the strategy or a helper in
+  a list it holds with a new one under the same name (`Strategy` itself included; an
+  object edited in place is restored best-effort:
   a list, dict or set in place, anything else by a rebuilt copy). An attribute `precompute` sets on `self` (a full-sample quantile kept for
   `on_bar`) draws a `LookaheadWarning` naming it at your `Engine.run` line: the check
   compares columns, so if `on_bar` reads that value and it came from the bars, it is
@@ -426,7 +428,11 @@ a new try, even one that does not touch the strategy, and near-identical setting
 separately: both overstate N, so the verdict errs strict. Two limits. A class written in
 a notebook cell has no file, so what is hashed there is the class itself plus every one
 of your own modules the session has loaded; a helper written in another cell is not
-seen. And a module that has not been imported yet (an import inside a function that has
+seen; that hash is the same in every run, but depends on the Python version, so moving
+from 3.11 to 3.12 counts those tries again. A strategy loaded without registering its
+module (`importlib.util.spec_from_file_location` with no `sys.modules` entry, or
+`runpy.run_path`) is hashed from the file its methods were written in, like any other
+file. And a module that has not been imported yet (an import inside a function that has
 not run) is found by Python's ordinary file rules: one that only an import hook can
 find, as some editable installs use, is seen once it has been imported.
 
