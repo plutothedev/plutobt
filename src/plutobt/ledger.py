@@ -25,6 +25,7 @@ cannot stop code written to hide its tries; the ledger makes the honest path the
 from __future__ import annotations
 
 import ast
+import functools
 import hashlib
 import inspect
 import json
@@ -322,6 +323,51 @@ def _with_parents(name: str) -> list[str]:
     return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
+def _functions_of(value) -> list:
+    """The functions a value in a class body is made of: itself, or the function a
+    staticmethod, classmethod, property or cached_property wraps. Read from its type and the
+    wrapper's own slots only, so no user code runs."""
+    kind = type(value)
+    if issubclass(kind, types.FunctionType):
+        return [value]
+    if issubclass(kind, staticmethod | classmethod):
+        return [value.__func__]
+    if issubclass(kind, property):
+        return [f for f in (value.fget, value.fset, value.fdel) if f is not None]
+    if issubclass(kind, functools.cached_property):
+        return [value.func]
+    return []
+
+
+def _methods_file(k: type) -> Path | None:
+    """The file a class was written in, from the functions written in its own body (their
+    ``__qualname__`` is under the class's): the ``.py`` file their code names, when they all
+    name the same existing one. None otherwise: no function of its own (a class of values,
+    or of methods taken from elsewhere), code with no file (a notebook cell), or files that
+    disagree. For a class whose module is not in ``sys.modules`` or has no file (a host
+    that loads a strategy without registering it, ``runpy.run_path``)."""
+    prefix = k.__qualname__ + "."
+    found: set[Path] = set()
+    for value in list(vars(k).values()):
+        for func in _functions_of(value):
+            qualname = getattr(func, "__qualname__", None)
+            code = getattr(func, "__code__", None)
+            if not (isinstance(qualname, str) and qualname.startswith(prefix)
+                    and isinstance(code, types.CodeType)):
+                continue
+            name = code.co_filename
+            if not name.endswith(".py"):
+                return None
+            try:
+                path = Path(name).resolve()
+                if not path.is_file():
+                    return None
+            except OSError:
+                return None
+            found.add(path)
+    return found.pop() if len(found) == 1 else None
+
+
 def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     """(each of the strategy's classes with its module, the files that make up its code).
 
@@ -361,10 +407,18 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     for k in _own_classes(cls):
         module = sys.modules.get(k.__module__)
         owners.append((k, module))
-        if module is None or id(module) in done:
-            continue
-        done.add(id(module))
-        path, package = _locate(k.__module__)
+        path, package = _locate(k.__module__) if module is not None else (None, "")
+        if path is None:
+            # No module, or one with no file: the file its methods were written in, with no
+            # package known (its relative imports are not followed).
+            path = _methods_file(k)
+            if path is not None:
+                package = ""
+        # A module is followed once, as before; a class with no module, once per file.
+        key = id(module) if module is not None else path
+        if key is None or key in done:
+            continue                            # nothing to follow: the fallback alone
+        done.add(key)
         if path is not None and path not in seen:
             seen.add(path)
             owner_files.append(path)
@@ -480,6 +534,8 @@ def code_sha256(cls: type) -> str:
     for k, module in owners:
         h.update(k.__qualname__.encode("utf-8") + b"\0")
         path = _source_file(module) if module is not None else None
+        if path is None:
+            path = _methods_file(k)
         if path is None:
             _class_fallback(h, k)
         elif path not in own:
