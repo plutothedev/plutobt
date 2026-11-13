@@ -169,3 +169,19 @@ def test_a_default_whose_repr_raises_does_not_break_the_hash():
     extra = ("class Bad:\n    def __repr__(self):\n        raise RuntimeError('no repr')\n\n\n")
     src = _cell("pass", signature="self, ctx, b=Bad()", extra=extra)
     assert len(cell_hash(src, 1)) == 64
+
+
+@pytest.mark.parametrize("decorator", ["@functools.lru_cache(maxsize=None)", "@functools.cache"])
+def test_a_cached_method_body_edit_in_a_cell_is_new_code(decorator):
+    # The chain stopped at the lru_cache wrapper, which is not a function (fix pass 3's
+    # re-review, I2).
+    src = (HEAD + "import functools\n\n\nclass S(Strategy):\n"
+           f"    {decorator}  # noqa\n    def level(self):\n        return 5\n\n"
+           "    def on_bar(self, ctx):\n        pass\n")
+    assert cell_hash(src, 1) != cell_hash(src.replace("return 5", "return 6"), 1)
+
+
+def test_an_object_array_that_holds_itself_does_not_break_the_hash():
+    extra = ("import numpy as np\n\nLOOP = np.empty(1, dtype=object)\nLOOP[0] = LOOP\n\n\n")
+    src = _cell("pass", signature="self, ctx, w=LOOP", extra=extra)
+    assert len(cell_hash(src, 1)) == 64

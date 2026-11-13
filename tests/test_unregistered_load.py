@@ -226,3 +226,41 @@ def test_a_method_that_takes_wraps_from_its_base_still_hashes_its_file(tmp_path)
     before = code_sha256(load(mine).Mine)
     mine.write_text(WRAPS_BASE.replace("THRESHOLD = 5", "THRESHOLD = 6"), encoding="utf-8")
     assert code_sha256(load(mine).Mine) != before
+
+
+DECO_OVER_CLASSMETHOD = '''import functools
+
+from plutobt.strategy import Strategy
+
+THRESHOLD = 5
+
+
+def logged(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        return f(*args, **kwargs)
+    return wrapper
+
+
+class Mine(Strategy):
+    @logged
+    @classmethod
+    def level(cls):
+        return THRESHOLD
+'''
+
+
+def test_a_decorator_over_a_classmethod_still_hashes_the_file(tmp_path):
+    # The chain stopped at the classmethod object, which is not a function (fix pass 3's
+    # re-review, I2).
+    mine = tmp_path / "mine.py"
+    mine.write_text(DECO_OVER_CLASSMETHOD, encoding="utf-8")
+    assert code_files(load(mine).Mine) == [str(mine.resolve())]
+
+
+def test_a_class_whose_only_method_is_cached_still_hashes_the_file(tmp_path):
+    mine = tmp_path / "mine.py"
+    mine.write_text("import functools\n\nfrom plutobt.strategy import Strategy\n\n\n"
+                    "class Mine(Strategy):\n    @functools.cache  # noqa: B019\n"
+                    "    def level(self):\n        return 5\n", encoding="utf-8")
+    assert code_files(load(mine).Mine) == [str(mine.resolve())]

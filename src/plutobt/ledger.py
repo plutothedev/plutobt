@@ -334,6 +334,8 @@ def _functions_of(value) -> list:
         return [value]
     if issubclass(kind, staticmethod | classmethod):
         return [value.__func__]
+    if issubclass(kind, _LRU):
+        return [value]                  # an lru_cache'd method: _wrap_chain goes through it
     if issubclass(kind, property):
         return [f for f in (value.fget, value.fset, value.fdel) if f is not None]
     if issubclass(kind, functools.cached_property):
@@ -341,18 +343,29 @@ def _functions_of(value) -> list:
     return []
 
 
+# functools.lru_cache's (and functools.cache's) wrapper type.
+_LRU = type(functools.lru_cache(maxsize=None)(len))
+
+
 def _wrap_chain(func) -> list:
     """``func`` and every function it wraps, through ``__wrapped__`` (functools.wraps), in
-    order. The chain stops at anything that is not a function, at a cycle, and after 64
-    links. A wrapper's own code is its decorator's; the method written in the class is one
-    of the functions it wraps, and ``wraps(Base.method)`` can point past it, out of the
-    class (fix pass 2's re-review)."""
+    order, stepping through a staticmethod or classmethod and an lru_cache wrapper. The
+    chain stops at anything else, at a cycle, and after 64 links. A wrapper's own code is
+    its decorator's; the method written in the class is one of the functions it wraps, and
+    ``wraps(Base.method)`` can point past it, out of the class (fix pass 2's re-review)."""
     chain, seen = [], set()
-    while isinstance(func, types.FunctionType) and id(func) not in seen and len(chain) < 64:
-        chain.append(func)
+    while func is not None and id(func) not in seen and len(seen) < 64:
         seen.add(id(func))
+        kind = type(func)
         try:
-            func = types.FunctionType.__getattribute__(func, "__dict__").get("__wrapped__")
+            if issubclass(kind, staticmethod | classmethod):
+                func = func.__func__            # a decorator over a classmethod
+                continue
+            if issubclass(kind, types.FunctionType):
+                chain.append(func)
+            elif not issubclass(kind, _LRU):    # an lru_cache wrapper: through to its function
+                break
+            func = object.__getattribute__(func, "__dict__").get("__wrapped__")
         except Exception:
             break
     return chain
@@ -543,8 +556,11 @@ def _const_digest(value) -> str:
     elif issubclass(kind, np.generic):
         part = f"np:{kind.__name__}:{value.item()!r}"
     elif issubclass(kind, np.ndarray) and value.dtype.hasobject:
-        # its bytes are pointers: its values instead
-        part = f"ndarray-object:{value.shape}:" + _const_digest(value.tolist())
+        # its bytes are pointers: its values instead (one that holds itself: its shape)
+        try:
+            part = f"ndarray-object:{value.shape}:" + _const_digest(value.tolist())
+        except RecursionError:
+            part = f"ndarray-object:{value.shape}"
     elif issubclass(kind, np.ndarray):
         data = hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
         part = f"ndarray:{value.dtype.str}:{value.shape}:{data}"
