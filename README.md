@@ -68,10 +68,9 @@ checks it before the first bar (`check_causality`, on by default):
 - **State the copies share is watched.** Class attributes are shared by every copy,
   so a `precompute` that changes one (a mean fitted "once" and stored on the class,
   a cache) is refused with a `LookaheadError` naming it, and the attribute is put
-  back where its old value can be rebuilt (the refusal names any it could not, and says
-  to restart before running again) (`Strategy` itself included; an object edited in place
-  is restored best-effort:
-  a list, dict or set in place, anything else by a rebuilt copy). That includes replacing
+  back (`Strategy` itself included; an object edited in place is restored best-effort:
+  a list, dict or set in place, anything else by a rebuilt copy; one whose old value
+  cannot be rebuilt is named in the refusal, which says to restart before running again). That includes replacing
   a method (an `lru_cache`d one too), a class nested in the strategy or a helper in a
   list it holds with a new one under the same name. An attribute of a nested class edited
   in place is not seen. An attribute `precompute` sets on `self` (a full-sample quantile kept for
