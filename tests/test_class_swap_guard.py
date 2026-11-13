@@ -265,3 +265,78 @@ def test_an_lru_cached_method_replaced_under_its_own_name_is_refused():
     # replaced method is refused).
     with pytest.raises(LookaheadError, match=r"SwapsCachedMethod\.level"):
         _eng().run(_bars(), SwapsCachedMethod())
+
+
+# ---- the fix-pass re-review's findings (3.0.3)
+
+
+def _packed():
+    class Packed:                # no ordinary pickle (local), and a state that cannot be set
+        def __init__(self):
+            self.v = 1
+
+        def __getstate__(self):
+            return [self.v]
+    return Packed()
+
+
+class RestoreCannotRebuild(Strategy):
+    """Edits in place an attribute whose old value cannot be rebuilt, and another that can."""
+
+    a = {"p": _packed(), "t": None}
+    b = []
+
+    def precompute(self, df):
+        type(self).a["t"] = float(df["close"].min())
+        type(self).b.append(1.0)
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_an_attribute_that_cannot_be_rebuilt_is_still_a_refusal_and_the_rest_are_put_back():
+    # Rebuilding its old value raised, which turned the refusal into a crash and left the
+    # attributes after it edited (the fix-pass re-review).
+    with pytest.raises(LookaheadError, match=r"RestoreCannotRebuild\.a"):
+        _eng().run(_bars(), RestoreCannotRebuild())
+    assert RestoreCannotRebuild.b == []
+
+
+class _Unpicklable:
+    """An object with no pickle at all, whose bound method a strategy keeps."""
+
+    def __reduce__(self):
+        raise TypeError("no pickle")
+
+    def first(self, x):
+        return x
+
+    def second(self, x):
+        return x
+
+
+_HOLDER = _Unpicklable()
+_OTHER = _Unpicklable()
+
+
+class SwapsBoundMethodInList(Strategy):
+    """Swaps, in place, a bound method of an unpicklable object in the list it holds for
+    the same-named method of another such object."""
+
+    steps = [_HOLDER.first, 0.0]
+
+    def precompute(self, df):
+        cls = type(self)
+        if cls.steps[0].__self__ is _HOLDER:
+            cls.steps[0] = _OTHER.first
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_bound_method_of_an_unpicklable_object_swapped_in_a_list_is_refused():
+    with pytest.raises(LookaheadError, match=r"SwapsBoundMethodInList\.steps"):
+        _eng().run(_bars(), SwapsBoundMethodInList())
+    assert SwapsBoundMethodInList.steps[0].__self__ is _HOLDER

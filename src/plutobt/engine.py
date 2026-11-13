@@ -230,15 +230,21 @@ class _ById(pickle.Pickler):
         self.held = held
 
     def persistent_id(self, obj):
+        if isinstance(obj, types.MethodType):
+            # A bound method is made anew on every access: it is its object and its function,
+            # both by identity (so it is keyed even when its object has no pickle).
+            self.held += [obj.__self__, obj.__func__]
+            return ("method", id(obj.__self__), id(obj.__func__))
         if not isinstance(obj, _BY_NAME):
             return None
+        owner = getattr(obj, "__self__", None)
         if isinstance(obj, types.BuiltinFunctionType) and not isinstance(
-                getattr(obj, "__self__", None), types.ModuleType | type(None)):
+                owner, types.ModuleType | type(None)):
             # A builtin bound to an object (a method of a C type, such as the
-            # ZoneInfo._unpickle its pickle goes through) is made anew on every access, so
-            # its identity says nothing: pickle writes it as its owner and its name, and the
-            # owner is keyed by identity in turn.
-            return None
+            # ZoneInfo._unpickle its pickle goes through) is also made anew on every access:
+            # it is its owner, by identity, and its name.
+            self.held.append(owner)
+            return ("bound", id(owner), obj.__name__)
         self.held.append(obj)
         return ("id", id(obj))
 
@@ -252,6 +258,10 @@ def _from_key(key: bytes, held: list):
 
     class _Back(pickle.Unpickler):
         def persistent_load(self, pid):
+            if pid[0] == "method":
+                return types.MethodType(by_id[pid[2]], by_id[pid[1]])
+            if pid[0] == "bound":
+                return getattr(by_id[pid[1]], pid[2])
             return by_id[pid[1]]
 
     return _Back(io.BytesIO(key)).load()
@@ -347,8 +357,13 @@ def _refuse_class_changes(saved: list) -> None:
             if name in after and after[name][0] is value and (raw is not None
                                                               or key is not None):
                 # edited in place: its old contents, from its pickle, or where it has none
-                # (it holds a lambda) from the identity-keyed one
-                old = pickle.loads(raw) if raw is not None else _from_key(key, held)
+                # (it holds a lambda) from the identity-keyed one. Where they cannot be
+                # rebuilt, this attribute stays as the precompute left it; the run is
+                # refused all the same and the others are still put back.
+                try:
+                    old = pickle.loads(raw) if raw is not None else _from_key(key, held)
+                except Exception:
+                    continue
                 if _restore_in_place(value, old):
                     continue
                 value = old
