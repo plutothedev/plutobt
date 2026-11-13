@@ -212,11 +212,12 @@ def _snapshot(strategy: Strategy) -> Strategy:
         ) from e
 
 
-# What pickle writes as a name and nothing else: a function, a builtin, a class. Two
-# different objects under one name pickle the same, so the comparison key writes these by
-# identity instead (3.0.3: a precompute that replaced on_bar with a same-named wrapper
-# looked unchanged).
-_BY_NAME = (types.FunctionType, types.BuiltinFunctionType, type)
+# What pickle writes as a name and nothing else: a function, a builtin, a class, an
+# lru_cache wrapper. Two different objects under one name pickle the same, so the
+# comparison key writes these by identity instead (3.0.3: a precompute that replaced
+# on_bar with a same-named wrapper looked unchanged).
+_BY_NAME = (types.FunctionType, types.BuiltinFunctionType, type,
+            type(functools.lru_cache(maxsize=None)(len)))
 
 
 class _ById(pickle.Pickler):
@@ -229,10 +230,31 @@ class _ById(pickle.Pickler):
         self.held = held
 
     def persistent_id(self, obj):
-        if isinstance(obj, _BY_NAME):
-            self.held.append(obj)
-            return ("id", id(obj))
-        return None
+        if not isinstance(obj, _BY_NAME):
+            return None
+        if isinstance(obj, types.BuiltinFunctionType) and not isinstance(
+                getattr(obj, "__self__", None), types.ModuleType | type(None)):
+            # A builtin bound to an object (a method of a C type, such as the
+            # ZoneInfo._unpickle its pickle goes through) is made anew on every access, so
+            # its identity says nothing: pickle writes it as its owner and its name, and the
+            # owner is keyed by identity in turn.
+            return None
+        self.held.append(obj)
+        return ("id", id(obj))
+
+
+def _from_key(key: bytes, held: list):
+    """The value an identity-keyed pickle was made from, rebuilt: each object written by
+    identity is the one ``held`` kept."""
+    import io
+
+    by_id = {id(obj): obj for obj in held}
+
+    class _Back(pickle.Unpickler):
+        def persistent_load(self, pid):
+            return by_id[pid[1]]
+
+    return _Back(io.BytesIO(key)).load()
 
 
 def _keyed(value) -> tuple[bytes | None, list]:
@@ -321,9 +343,12 @@ def _refuse_class_changes(saved: list) -> None:
             if name not in before:
                 delattr(cls, name)
                 continue
-            value, raw = before[name][:2]
-            if name in after and after[name][0] is value and raw is not None:
-                old = pickle.loads(raw)        # edited in place: its old contents
+            value, raw, key, held = before[name]
+            if name in after and after[name][0] is value and (raw is not None
+                                                              or key is not None):
+                # edited in place: its old contents, from its pickle, or where it has none
+                # (it holds a lambda) from the identity-keyed one
+                old = pickle.loads(raw) if raw is not None else _from_key(key, held)
                 if _restore_in_place(value, old):
                     continue
                 value = old

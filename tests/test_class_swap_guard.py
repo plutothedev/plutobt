@@ -160,3 +160,108 @@ def test_a_numpy_array_edited_in_place_is_still_refused_and_restored():
     with pytest.raises(LookaheadError, match=r"EditsArray\.table"):
         _eng().run(_bars(), EditsArray())
     assert EditsArray.table.tolist() == [0.0, 0.0, 0.0]
+
+
+# ---- the whole-branch review's findings (3.0.3)
+
+
+class HoldsZoneInfo(Strategy):
+    """A session time zone on the class, read by precompute: ran on 3.0.2."""
+
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    tz = _ZoneInfo("America/New_York")
+    opened = pd.Timestamp("2024-01-02 09:30", tz=_ZoneInfo("America/New_York"))
+
+    def precompute(self, df):
+        assert str(self.tz) == "America/New_York" and self.opened.hour == 9
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_zoneinfo_class_attribute_still_runs():
+    # ZoneInfo reduces through a bound builtin method made anew on every access, so an id
+    # for it differed between two picklings of the same untouched object (review C1).
+    assert _eng().run(_bars(), HoldsZoneInfo()) is not None
+
+
+class CachedSessionOpen(Strategy):
+    """A cached_property made from the parameters only: never warned."""
+
+    tzname = "America/New_York"
+
+    @functools.cached_property
+    def session_open(self):
+        from zoneinfo import ZoneInfo
+        return pd.Timestamp("2024-01-02 09:30", tz=ZoneInfo(self.tzname))
+
+    def precompute(self, df):
+        assert self.session_open.hour == 9
+        return df
+
+    def on_bar(self, ctx):
+        pass
+
+
+def test_a_parameter_only_cached_property_holding_a_zoneinfo_is_not_warned():
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _eng().run(_bars(), CachedSessionOpen()) is not None
+
+
+class EditsUnpicklable(Strategy):
+    """A dict holding a lambda (no ordinary pickle) edited in place with a value of the
+    whole frame."""
+
+    memo = {"pick": lambda x: x, "top": None}
+
+    def precompute(self, df):
+        if type(self).memo["top"] is None:
+            type(self).memo["top"] = float(df["close"].min())
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.close <= (self.memo["top"] or -1.0) and ctx.position.qty == 0:
+            ctx.broker.buy(1)
+
+
+def test_an_unpicklable_attribute_edited_in_place_is_refused_and_restored():
+    # The check sees it now (review I3); the words say it was put back, so it must be.
+    pick = EditsUnpicklable.memo["pick"]
+    with pytest.raises(LookaheadError, match=r"EditsUnpicklable\.memo"):
+        _eng().run(_bars(), EditsUnpicklable())
+    assert EditsUnpicklable.memo == {"pick": pick, "top": None}
+
+
+class SwapsCachedMethod(Strategy):
+    """Replaces an lru_cache-wrapped method with a new one under the same name, carrying
+    the whole frame's lowest close."""
+
+    @functools.cache  # noqa: B019 - the swap of a cached method is what is tested
+    def level(self):
+        return -1.0
+
+    def precompute(self, df):
+        cls = type(self)
+        if cls.level(self) == -1.0:
+            top = float(df["close"].min())
+
+            def level(self):
+                return top
+            level.__qualname__ = "SwapsCachedMethod.level"
+            cls.level = functools.lru_cache(maxsize=None)(level)
+        return df
+
+    def on_bar(self, ctx):
+        if ctx.bar.close <= self.level() and ctx.position.qty == 0:
+            ctx.broker.buy(1)
+
+
+def test_an_lru_cached_method_replaced_under_its_own_name_is_refused():
+    # An lru_cache wrapper pickles as its name too (review M1, re-graded: the README says a
+    # replaced method is refused).
+    with pytest.raises(LookaheadError, match=r"SwapsCachedMethod\.level"):
+        _eng().run(_bars(), SwapsCachedMethod())
