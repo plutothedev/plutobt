@@ -68,10 +68,11 @@ checks it before the first bar (`check_causality`, on by default):
 - **State the copies share is watched.** Class attributes are shared by every copy,
   so a `precompute` that changes one (a mean fitted "once" and stored on the class,
   a cache) is refused with a `LookaheadError` naming it, and the attribute is put
-  back. That includes replacing a method, a class nested in the strategy or a helper in
-  a list it holds with a new one under the same name (`Strategy` itself included; an
-  object edited in place is restored best-effort:
-  a list, dict or set in place, anything else by a rebuilt copy). An attribute `precompute` sets on `self` (a full-sample quantile kept for
+  back (`Strategy` itself included; an object edited in place is restored best-effort:
+  a list, dict or set in place, anything else by a rebuilt copy). That includes replacing
+  a method (an `lru_cache`d one too), a class nested in the strategy or a helper in a
+  list it holds with a new one under the same name. An attribute of a nested class edited
+  in place is not seen. An attribute `precompute` sets on `self` (a full-sample quantile kept for
   `on_bar`) draws a `LookaheadWarning` naming it at your `Engine.run` line: the check
   compares columns, so if `on_bar` reads that value and it came from the bars, it is
   look-ahead nobody checked. A `cached_property` a fresh copy computes to the same
@@ -431,8 +432,9 @@ of your own modules the session has loaded; a helper written in another cell is 
 seen; that hash is the same in every run, but depends on the Python version, so moving
 from 3.11 to 3.12 counts those tries again. A strategy loaded without registering its
 module (`importlib.util.spec_from_file_location` with no `sys.modules` entry, or
-`runpy.run_path`) is hashed from the file its methods were written in, like any other
-file. And a module that has not been imported yet (an import inside a function that has
+`runpy.run_path`) is hashed from the file its methods were written in, with the user
+modules that file imports by name (its relative imports are not followed, and a class whose
+methods all come from elsewhere keeps the method-only hash). And a module that has not been imported yet (an import inside a function that has
 not run) is found by Python's ordinary file rules: one that only an import hook can
 find, as some editable installs use, is seen once it has been imported.
 
