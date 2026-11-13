@@ -433,8 +433,9 @@ seen; that hash is the same in every run, but depends on the Python version, so 
 from 3.11 to 3.12 counts those tries again. A strategy loaded without registering its
 module (`importlib.util.spec_from_file_location` with no `sys.modules` entry, or
 `runpy.run_path`) is hashed from the file its methods were written in, with the user
-modules that file imports by name (its relative imports are not followed, and a class whose
-methods all come from elsewhere keeps the method-only hash). And a module that has not been imported yet (an import inside a function that has
+modules that file imports by name (its relative imports are not followed; a method behind a
+decorator counts as written where the method it wraps was; a class whose methods were all
+written elsewhere keeps the method-only hash). And a module that has not been imported yet (an import inside a function that has
 not run) is found by Python's ordinary file rules: one that only an import hook can
 find, as some editable installs use, is seen once it has been imported.
 
