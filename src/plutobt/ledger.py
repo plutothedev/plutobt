@@ -413,18 +413,57 @@ def _normalized(path: Path) -> str:
         return text.replace("\r\n", "\n")
 
 
+def _const_digest(value) -> str:
+    """A digest of one constant of a code object, the same in every process: a code object
+    by ``_code_digest``, a tuple by its elements in order, a set or frozenset by its
+    elements' digests sorted (never the elements: mixed types do not sort, and a set's own
+    order follows the hash seed), anything else by its type and repr."""
+    if isinstance(value, types.CodeType):
+        part = "code:" + _code_digest(value)
+    elif isinstance(value, tuple):
+        part = "tuple:" + ",".join(_const_digest(v) for v in value)
+    elif isinstance(value, set | frozenset):
+        part = "set:" + ",".join(sorted(_const_digest(v) for v in value))
+    else:
+        part = type(value).__qualname__ + ":" + repr(value)
+    return hashlib.sha256(part.encode("utf-8")).hexdigest()
+
+
+def _code_digest(code: types.CodeType) -> str:
+    """A digest of a code object, the same in every process: its bytecode, the global and
+    attribute names it uses (``helper_a()`` and ``helper_b()`` differ only there), and its
+    constants, nested code objects included, by ``_const_digest``. The repr of a nested
+    code object carries a memory address, which is why it is not used. The bytecode is the
+    Python version's own, so the digest is too."""
+    h = hashlib.sha256(code.co_code)
+    h.update(("names:" + ",".join(code.co_names)).encode("utf-8"))
+    for const in code.co_consts:
+        h.update(_const_digest(const).encode("ascii"))
+    return h.hexdigest()
+
+
+def _function_digest(func) -> str:
+    """A digest of a function: its code (``_code_digest``) and its default values, positional
+    and keyword-only (``n=5`` and ``n=6`` share the code)."""
+    h = hashlib.sha256(_code_digest(func.__code__).encode("ascii"))
+    h.update(_const_digest(tuple(getattr(func, "__defaults__", None) or ())).encode("ascii"))
+    kwdefaults = getattr(func, "__kwdefaults__", None) or {}
+    h.update(_const_digest(tuple(sorted(kwdefaults.items()))).encode("ascii"))
+    return h.hexdigest()
+
+
 def _class_fallback(h, k: type) -> None:
     # A class with no file (a notebook cell, ``exec``): its own source if Python kept it,
-    # else its methods' bytecode and constants.
+    # else a digest of each of its methods (``_function_digest``), the same in every
+    # process.
     try:
         h.update(inspect.getsource(k).encode("utf-8"))
     except (OSError, TypeError):
         for name, value in sorted(vars(k).items()):
             func = getattr(value, "__func__", value)
-            code = getattr(func, "__code__", None)
-            if code is not None:
-                h.update(name.encode("utf-8") + code.co_code + repr(code.co_consts)
-                         .encode("utf-8"))
+            if isinstance(getattr(func, "__code__", None), types.CodeType):
+                h.update(name.encode("utf-8") + b"\0" + _function_digest(func)
+                         .encode("ascii"))
 
 
 def code_sha256(cls: type) -> str:
