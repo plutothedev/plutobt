@@ -149,3 +149,23 @@ def test_a_decorated_method_body_edit_in_a_cell_is_new_code():
     src = (HEAD + deco + "class S(Strategy):\n    @logged\n    def on_bar(self, ctx):\n"
            "        if ctx.bar.close > 5:\n            ctx.broker.buy(1)\n")
     assert cell_hash(src, 1) != cell_hash(src.replace("> 5", "> 6"), 1)
+
+
+def test_a_method_that_takes_wraps_from_its_base_has_its_body_in_the_fallback():
+    src = (HEAD + "import functools\n\n\nclass S(Strategy):\n"
+           "    @functools.wraps(Strategy.on_bar)\n    def on_bar(self, ctx):\n"
+           "        if ctx.bar.close > 5:\n            ctx.broker.buy(1)\n")
+    assert cell_hash(src, 1) != cell_hash(src.replace("> 5", "> 6"), 1)
+
+
+def test_an_object_array_default_hashes_the_same_in_every_process():
+    # An array of Python objects: its bytes are pointers (fix pass 2's re-review).
+    src = _cell("pass", signature="self, ctx, w=np.array(['a', 1.5, None], dtype=object)",
+                extra="import numpy as np\n\n")
+    assert cell_hash(src, 1) == cell_hash(src, 2) == cell_hash(src, 1)
+
+
+def test_a_default_whose_repr_raises_does_not_break_the_hash():
+    extra = ("class Bad:\n    def __repr__(self):\n        raise RuntimeError('no repr')\n\n\n")
+    src = _cell("pass", signature="self, ctx, b=Bad()", extra=extra)
+    assert len(cell_hash(src, 1)) == 64

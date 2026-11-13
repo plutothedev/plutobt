@@ -200,3 +200,29 @@ def test_methods_wrapped_by_a_decorator_from_another_file_hash_their_own_file(tm
                                          "\n\n\ndef _unused(f):"), encoding="utf-8")
     files = code_files(load(mine).Mine)
     assert files[0] == str(mine.resolve())
+
+
+WRAPS_BASE = '''import functools
+
+from plutobt.strategy import Strategy
+
+THRESHOLD = 5
+
+
+class Mine(Strategy):
+    @functools.wraps(Strategy.on_bar)
+    def on_bar(self, ctx):
+        if ctx.bar.close > THRESHOLD:
+            ctx.broker.buy(1)
+'''
+
+
+def test_a_method_that_takes_wraps_from_its_base_still_hashes_its_file(tmp_path):
+    # wraps(Strategy.on_bar) sets __wrapped__ to the base's method, outside the class: the
+    # method written in the class is still this one (fix pass 2's re-review).
+    mine = tmp_path / "mine.py"
+    mine.write_text(WRAPS_BASE, encoding="utf-8")
+    assert code_files(load(mine).Mine) == [str(mine.resolve())]
+    before = code_sha256(load(mine).Mine)
+    mine.write_text(WRAPS_BASE.replace("THRESHOLD = 5", "THRESHOLD = 6"), encoding="utf-8")
+    assert code_sha256(load(mine).Mine) != before

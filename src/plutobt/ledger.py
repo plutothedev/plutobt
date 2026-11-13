@@ -341,14 +341,21 @@ def _functions_of(value) -> list:
     return []
 
 
-def _unwrapped(func):
-    """The function a decorator made with functools.wraps wraps (``__wrapped__``, followed to
-    the end), or ``func`` itself: a wrapper's own code is the decorator's, and the method
-    written in the class is the one it wraps."""
-    try:
-        return inspect.unwrap(func)
-    except Exception:  # a cycle of __wrapped__, or an attribute that raises
-        return func
+def _wrap_chain(func) -> list:
+    """``func`` and every function it wraps, through ``__wrapped__`` (functools.wraps), in
+    order. The chain stops at anything that is not a function, at a cycle, and after 64
+    links. A wrapper's own code is its decorator's; the method written in the class is one
+    of the functions it wraps, and ``wraps(Base.method)`` can point past it, out of the
+    class (fix pass 2's re-review)."""
+    chain, seen = [], set()
+    while isinstance(func, types.FunctionType) and id(func) not in seen and len(chain) < 64:
+        chain.append(func)
+        seen.add(id(func))
+        try:
+            func = types.FunctionType.__getattribute__(func, "__dict__").get("__wrapped__")
+        except Exception:
+            break
+    return chain
 
 
 def _methods_file(k: type) -> Path | None:
@@ -362,14 +369,15 @@ def _methods_file(k: type) -> Path | None:
     found: set[Path] = set()
     for value in list(vars(k).values()):
         for func in _functions_of(value):
-            func = _unwrapped(func)
-            code = getattr(func, "__code__", None)
-            # The code object's own qualified name: functools.wraps copies a method's
-            # __qualname__ onto a wrapper written in another file, never this.
-            qualname = getattr(code, "co_qualname", None)
-            if not (isinstance(code, types.CodeType) and isinstance(qualname, str)
-                    and qualname.startswith(prefix)):
+            # The first function in the decorator chain whose code object's own qualified
+            # name is under the class's: functools.wraps copies a method's __qualname__
+            # onto a wrapper written elsewhere, never this.
+            mine = [f for f in _wrap_chain(func)
+                    if isinstance(getattr(f.__code__, "co_qualname", None), str)
+                    and f.__code__.co_qualname.startswith(prefix)]
+            if not mine:
                 continue
+            code = mine[0].__code__
             name = code.co_filename
             if not name.endswith(".py"):
                 return None
@@ -534,6 +542,9 @@ def _const_digest(value) -> str:
         part = f"enum:{_named(kind)}:{value.name}"
     elif issubclass(kind, np.generic):
         part = f"np:{kind.__name__}:{value.item()!r}"
+    elif issubclass(kind, np.ndarray) and value.dtype.hasobject:
+        # its bytes are pointers: its values instead
+        part = f"ndarray-object:{value.shape}:" + _const_digest(value.tolist())
     elif issubclass(kind, np.ndarray):
         data = hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
         part = f"ndarray:{value.dtype.str}:{value.shape}:{data}"
@@ -541,7 +552,12 @@ def _const_digest(value) -> str:
         part = "named:" + _named(value)
     else:
         # Its repr with any address taken out (a sentinel object() is then its type alone).
-        part = "object:" + _named(kind) + ":" + _ADDRESS.sub("", repr(value))
+        # A repr that raises leaves the type alone.
+        try:
+            shown = _ADDRESS.sub("", repr(value))
+        except Exception:
+            shown = ""
+        part = "object:" + _named(kind) + ":" + shown
     return hashlib.sha256(part.encode("utf-8")).hexdigest()
 
 
@@ -576,8 +592,8 @@ def _class_fallback(h, k: type) -> None:
         h.update(inspect.getsource(k).encode("utf-8"))
     except (OSError, TypeError):
         for name, value in sorted(vars(k).items()):
-            func = _unwrapped(getattr(value, "__func__", value))
-            if isinstance(getattr(func, "__code__", None), types.CodeType):
+            # Every function in a decorator chain: the wrapper and what it wraps.
+            for func in _wrap_chain(getattr(value, "__func__", value)):
                 h.update(name.encode("utf-8") + b"\0" + _function_digest(func)
                          .encode("ascii"))
 
