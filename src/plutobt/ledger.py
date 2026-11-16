@@ -25,11 +25,14 @@ cannot stop code written to hide its tries; the ledger makes the honest path the
 from __future__ import annotations
 
 import ast
+import enum
+import functools
 import hashlib
 import inspect
 import json
 import math
 import os
+import re
 import site
 import sys
 import sysconfig
@@ -322,6 +325,85 @@ def _with_parents(name: str) -> list[str]:
     return [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
 
 
+def _functions_of(value) -> list:
+    """The functions a value in a class body is made of: itself, or the function a
+    staticmethod, classmethod, property or cached_property wraps. Read from its type and the
+    wrapper's own slots only, so no user code runs."""
+    kind = type(value)
+    if issubclass(kind, types.FunctionType):
+        return [value]
+    if issubclass(kind, staticmethod | classmethod):
+        return [value.__func__]
+    if issubclass(kind, _LRU):
+        return [value]                  # an lru_cache'd method: _wrap_chain goes through it
+    if issubclass(kind, property):
+        return [f for f in (value.fget, value.fset, value.fdel) if f is not None]
+    if issubclass(kind, functools.cached_property):
+        return [value.func]
+    return []
+
+
+# functools.lru_cache's (and functools.cache's) wrapper type.
+_LRU = type(functools.lru_cache(maxsize=None)(len))
+
+
+def _wrap_chain(func) -> list:
+    """``func`` and every function it wraps, through ``__wrapped__`` (functools.wraps), in
+    order, stepping through a staticmethod or classmethod and an lru_cache wrapper. The
+    chain stops at anything else, at a cycle, and after 64 links. A wrapper's own code is
+    its decorator's; the method written in the class is one of the functions it wraps, and
+    ``wraps(Base.method)`` can point past it, out of the class (fix pass 2's re-review)."""
+    chain, seen = [], set()
+    while func is not None and id(func) not in seen and len(seen) < 64:
+        seen.add(id(func))
+        kind = type(func)
+        try:
+            if issubclass(kind, staticmethod | classmethod):
+                func = func.__func__            # a decorator over a classmethod
+                continue
+            if issubclass(kind, types.FunctionType):
+                chain.append(func)
+            elif not issubclass(kind, _LRU):    # an lru_cache wrapper: through to its function
+                break
+            func = object.__getattribute__(func, "__dict__").get("__wrapped__")
+        except Exception:
+            break
+    return chain
+
+
+def _methods_file(k: type) -> Path | None:
+    """The file a class was written in, from the functions written in its own body (their
+    ``__qualname__`` is under the class's): the ``.py`` file their code names, when they all
+    name the same existing one. None otherwise: no function of its own (a class of values,
+    or of methods taken from elsewhere), code with no file (a notebook cell), or files that
+    disagree. For a class whose module is not in ``sys.modules`` or has no file (a host
+    that loads a strategy without registering it, ``runpy.run_path``)."""
+    prefix = k.__qualname__ + "."
+    found: set[Path] = set()
+    for value in list(vars(k).values()):
+        for func in _functions_of(value):
+            # The first function in the decorator chain whose code object's own qualified
+            # name is under the class's: functools.wraps copies a method's __qualname__
+            # onto a wrapper written elsewhere, never this.
+            mine = [f for f in _wrap_chain(func)
+                    if isinstance(getattr(f.__code__, "co_qualname", None), str)
+                    and f.__code__.co_qualname.startswith(prefix)]
+            if not mine:
+                continue
+            code = mine[0].__code__
+            name = code.co_filename
+            if not name.endswith(".py"):
+                return None
+            try:
+                path = Path(name).resolve()
+                if not path.is_file():
+                    return None
+            except OSError:
+                return None
+            found.add(path)
+    return found.pop() if len(found) == 1 else None
+
+
 def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     """(each of the strategy's classes with its module, the files that make up its code).
 
@@ -361,10 +443,18 @@ def _code_modules(cls: type) -> tuple[list[tuple[type, object]], list[Path]]:
     for k in _own_classes(cls):
         module = sys.modules.get(k.__module__)
         owners.append((k, module))
-        if module is None or id(module) in done:
-            continue
-        done.add(id(module))
-        path, package = _locate(k.__module__)
+        path, package = _locate(k.__module__) if module is not None else (None, "")
+        if path is None:
+            # No module, or one with no file: the file its methods were written in, with no
+            # package known (its relative imports are not followed).
+            path = _methods_file(k)
+            if path is not None:
+                package = ""
+        # A module is followed once, as before; a class with no module, once per file.
+        key = id(module) if module is not None else path
+        if key is None or key in done:
+            continue                            # nothing to follow: the fallback alone
+        done.add(key)
         if path is not None and path not in seen:
             seen.add(path)
             owner_files.append(path)
@@ -413,18 +503,115 @@ def _normalized(path: Path) -> str:
         return text.replace("\r\n", "\n")
 
 
+def _named(value) -> str | None:
+    """``module:qualname`` of a value that carries its own (a function, a class, or a
+    callable such as numpy's ``np.mean``), or None. An instance of an ordinary class
+    carries neither."""
+    try:
+        module = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", None)
+    except Exception:
+        return None
+    if isinstance(module, str) and isinstance(qualname, str):
+        return f"{module}:{qualname}"
+    return None
+
+
+# An object's address as its default repr shows it.
+_ADDRESS = re.compile(" at 0x[0-9A-Fa-f]+")
+
+# Values whose repr is the value itself in every process.
+_PLAIN = (type(None), bool, int, float, complex, str, bytes, type(Ellipsis))
+
+
+def _const_digest(value) -> str:
+    """A digest of a constant of a code object or a default value, the same in every
+    process: a code object by ``_code_digest``; a tuple or list by its elements in order; a
+    set or frozenset by its elements' digests sorted, and a dict by its items' digests
+    sorted (never the elements: mixed types do not sort, and a set's own order follows the
+    hash seed); a plain value (``_PLAIN``) by its repr; a function by its own code (a lambda
+    default), a ``functools.partial`` by what it holds, an enum member by its class and
+    name, a numpy scalar by its value and an array by its dtype, shape and bytes; a class
+    or another callable that carries its own name by its module and qualified name
+    (``_named``); anything else by its type and its repr with any address taken out (a
+    sentinel ``object()`` is then its type alone). A repr that holds a set can still follow
+    the hash seed."""
+    kind = type(value)
+    if issubclass(kind, types.CodeType):
+        part = "code:" + _code_digest(value)
+    elif kind is tuple or kind is list:
+        part = kind.__name__ + ":" + ",".join(_const_digest(v) for v in value)
+    elif kind is set or kind is frozenset:
+        part = "set:" + ",".join(sorted(_const_digest(v) for v in value))
+    elif kind is dict:
+        part = "dict:" + ",".join(sorted(_const_digest(item) for item in value.items()))
+    elif kind in _PLAIN:
+        part = kind.__qualname__ + ":" + repr(value)
+    elif issubclass(kind, types.FunctionType):
+        part = "function:" + _function_digest(value)    # a lambda default's own code
+    elif issubclass(kind, functools.partial):
+        part = "partial:" + _const_digest((value.func, value.args, dict(value.keywords)))
+    elif issubclass(kind, enum.Enum):
+        part = f"enum:{_named(kind)}:{value.name}"
+    elif issubclass(kind, np.generic):
+        part = f"np:{kind.__name__}:{value.item()!r}"
+    elif issubclass(kind, np.ndarray) and value.dtype.hasobject:
+        # its bytes are pointers: its values instead (one that holds itself: its shape)
+        try:
+            part = f"ndarray-object:{value.shape}:" + _const_digest(value.tolist())
+        except RecursionError:
+            part = f"ndarray-object:{value.shape}"
+    elif issubclass(kind, np.ndarray):
+        data = hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
+        part = f"ndarray:{value.dtype.str}:{value.shape}:{data}"
+    elif _named(value) is not None:
+        part = "named:" + _named(value)
+    else:
+        # Its repr with any address taken out (a sentinel object() is then its type alone).
+        # A repr that raises leaves the type alone.
+        try:
+            shown = _ADDRESS.sub("", repr(value))
+        except Exception:
+            shown = ""
+        part = "object:" + _named(kind) + ":" + shown
+    return hashlib.sha256(part.encode("utf-8")).hexdigest()
+
+
+def _code_digest(code: types.CodeType) -> str:
+    """A digest of a code object, the same in every process: its bytecode, the global and
+    attribute names it uses (``helper_a()`` and ``helper_b()`` differ only there), and its
+    constants, nested code objects included, by ``_const_digest``. The repr of a nested
+    code object carries a memory address, which is why it is not used. The bytecode is the
+    Python version's own, so the digest is too."""
+    h = hashlib.sha256(code.co_code)
+    h.update(("names:" + ",".join(code.co_names)).encode("utf-8"))
+    for const in code.co_consts:
+        h.update(_const_digest(const).encode("ascii"))
+    return h.hexdigest()
+
+
+def _function_digest(func) -> str:
+    """A digest of a function: its code (``_code_digest``) and its default values, positional
+    and keyword-only (``n=5`` and ``n=6`` share the code)."""
+    h = hashlib.sha256(_code_digest(func.__code__).encode("ascii"))
+    h.update(_const_digest(tuple(getattr(func, "__defaults__", None) or ())).encode("ascii"))
+    kwdefaults = getattr(func, "__kwdefaults__", None) or {}
+    h.update(_const_digest(tuple(sorted(kwdefaults.items()))).encode("ascii"))
+    return h.hexdigest()
+
+
 def _class_fallback(h, k: type) -> None:
     # A class with no file (a notebook cell, ``exec``): its own source if Python kept it,
-    # else its methods' bytecode and constants.
+    # else a digest of each of its methods (``_function_digest``), the same in every
+    # process.
     try:
         h.update(inspect.getsource(k).encode("utf-8"))
     except (OSError, TypeError):
         for name, value in sorted(vars(k).items()):
-            func = getattr(value, "__func__", value)
-            code = getattr(func, "__code__", None)
-            if code is not None:
-                h.update(name.encode("utf-8") + code.co_code + repr(code.co_consts)
-                         .encode("utf-8"))
+            # Every function in a decorator chain: the wrapper and what it wraps.
+            for func in _wrap_chain(getattr(value, "__func__", value)):
+                h.update(name.encode("utf-8") + b"\0" + _function_digest(func)
+                         .encode("ascii"))
 
 
 def code_sha256(cls: type) -> str:
@@ -441,6 +628,8 @@ def code_sha256(cls: type) -> str:
     for k, module in owners:
         h.update(k.__qualname__.encode("utf-8") + b"\0")
         path = _source_file(module) if module is not None else None
+        if path is None:
+            path = _methods_file(k)
         if path is None:
             _class_fallback(h, k)
         elif path not in own:

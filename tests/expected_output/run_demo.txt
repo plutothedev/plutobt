@@ -18,7 +18,7 @@ Max DD duration = 511 bars   (longest time below a prior peak)   (not recovered 
 Trades        = 73   (closed)
 Open at end   = 1 (marked to last close, excluded from trade stats)
 data_sha256   = 123af852f8fb1364e02b5761d048a397adb5b87a53301567c85410b139fc8ca7   (of the loaded bars as CSV, not the file)
-engine version = 3.0.2
+engine version = 3.0.3
 
 === PlutoBT report: ES ===
 IN-SAMPLE, single pre-specified strategy; not predictive of live results.
@@ -40,7 +40,7 @@ Max DD duration = 993 bars   (longest time below a prior peak)
 Trades        = 28   (closed)
 Open at end   = 1 (marked to last close, excluded from trade stats)
 data_sha256   = 24f31941d385678f0a4f8acd12e16b602b777263ea726222f1a948a6b8716daf   (of the loaded bars as CSV, not the file)
-engine version = 3.0.2
+engine version = 3.0.3
 WARNING: insufficient sample: n_trades=28 < 30; profit factor, expectancy, win rate and Avg R unreliable
 
 === PlutoBT report: CL ===
@@ -63,5 +63,5 @@ Max DD duration = 1168 bars   (longest time below a prior peak)   (not recovered
 Trades        = 39   (closed)
 Open at end   = 0
 data_sha256   = fb019e9fd374e5c12e0ff173627fa21a2fb83831a8ecd05eec7e8cdce9e887c7   (of the loaded bars as CSV, not the file)
-engine version = 3.0.2
+engine version = 3.0.3
 

@@ -69,7 +69,16 @@ checks it before the first bar (`check_causality`, on by default):
   so a `precompute` that changes one (a mean fitted "once" and stored on the class,
   a cache) is refused with a `LookaheadError` naming it, and the attribute is put
   back (`Strategy` itself included; an object edited in place is restored best-effort:
-  a list, dict or set in place, anything else by a rebuilt copy). An attribute `precompute` sets on `self` (a full-sample quantile kept for
+  a list, dict or set in place, anything else by a rebuilt copy, whose functions and
+  classes are looked up by name, so one the precompute also rebound elsewhere stays
+  rebound; one whose old value cannot be rebuilt at all is named in the refusal, which
+  says to restart, and later runs of the class and its subclasses are refused until
+  then). That includes replacing a method (an `lru_cache`d one too), a class nested in
+  the strategy, or a bound method the class holds (alone or in a list) with a new one
+  under the same name. Not seen: an attribute of a nested class edited in place, and any
+  change in place to a value with no ordinary pickle (one holding a lambda, a lock or an
+  open connection), such as fitting a model that holds a lambda, or swapping a helper for
+  a lambda inside a list the class holds. An attribute `precompute` sets on `self` (a full-sample quantile kept for
   `on_bar`) draws a `LookaheadWarning` naming it at your `Engine.run` line: the check
   compares columns, so if `on_bar` reads that value and it came from the bars, it is
   look-ahead nobody checked. A `cached_property` a fresh copy computes to the same
@@ -426,7 +435,15 @@ a new try, even one that does not touch the strategy, and near-identical setting
 separately: both overstate N, so the verdict errs strict. Two limits. A class written in
 a notebook cell has no file, so what is hashed there is the class itself plus every one
 of your own modules the session has loaded; a helper written in another cell is not
-seen. And a module that has not been imported yet (an import inside a function that has
+seen; that hash is the same in every run (bar a default value whose printed form holds a
+set), but depends on the Python version, so moving from 3.11 to 3.12 counts those tries
+again, and an edit to a default whose printed form is cut short (a middle row of a big
+frame) is not seen. A strategy loaded without registering its
+module (`importlib.util.spec_from_file_location` with no `sys.modules` entry, or
+`runpy.run_path`) is hashed from the file its methods were written in, with the user
+modules that file imports by name (its relative imports are not followed; a method behind a
+decorator counts as written where the method it wraps was; a class whose methods were all
+written elsewhere keeps the method-only hash). And a module that has not been imported yet (an import inside a function that has
 not run) is found by Python's ordinary file rules: one that only an import hook can
 find, as some editable installs use, is seen once it has been imported.
 
