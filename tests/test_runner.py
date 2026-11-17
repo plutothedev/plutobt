@@ -141,7 +141,68 @@ def test_daily_bars_not_filtered(here):
     assert len(out.result.equity_curve) == n
 
 
-def test_as_built_with_roll_meta_hours_line(df, here):
+def test_as_built_session_hours_line(df, here):
     out = _run(df, here, session="as_built", ledger=False)
     assert "Hours: continuous file run as built" in out.text
     assert len(out.result.equity_curve) == len(df)
+
+
+def _eth_only():
+    # 72 five-minute bars at 02:00 CT on a weekday (ETH)
+    base = 1772461800 - 1772461800 % 86400 + 8 * 3600
+    n = 72
+    close = 18000 + np.arange(n) * 0.5
+    return pd.DataFrame({"ts": base + 300 * np.arange(n, dtype="int64"), "open": close,
+                         "high": close + 1, "low": close - 1, "close": close,
+                         "volume": np.full(n, 10, dtype="int64")})
+
+
+@pytest.mark.parametrize("with_config", [False, True])
+def test_eth_only_input_is_refused_clearly(here, with_config):
+    cfg = (BacktestConfig(commission_per_side=1.0, slippage_ticks=1.0,
+                          periods_per_year=20412.0) if with_config else None)
+    with pytest.raises(ValueError, match="no regular-trading-hours bars in this data; "
+                                         "use --session all to keep the full day"):
+        _run(_eth_only(), here, config=cfg)
+    assert not (here / "trials.jsonl").exists()
+    assert not (here / "runs").exists()
+
+
+def test_unknown_session_is_refused(df, here):
+    with pytest.raises(ValueError, match="session must be one of"):
+        _run(df, here, session="RTH")
+
+
+def test_chart_leaves_pyplot_alone(df, here):
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure()
+    backend = plt.get_backend()
+    try:
+        _run(df, here, ledger=False)
+        assert plt.fignum_exists(fig.number)
+        assert plt.get_backend() == backend
+    finally:
+        plt.close(fig)
+
+
+def test_two_quick_runs_make_two_charts(df, here):
+    a = _run(df, here, ledger=False)
+    b = _run(df, here, ledger=False)
+    assert a.chart != b.chart
+    assert len(list((here / "runs").glob("*.png"))) == 2
+
+
+def test_roll_meta_frame_is_never_filtered(here, monkeypatch):
+    from tests.test_engine_roll import series
+
+    def boom(*a, **k):
+        raise AssertionError("a roll_meta frame must not be session-tagged")
+
+    monkeypatch.setattr("plutobt.runner.tag_sessions", boom)
+
+    frame, meta = series()
+    out = run_backtest(frame, "NQ", EMACross, {"fast_span": 3, "slow_span": 6},
+                       roll_meta=meta, session="rth", data_note="x", ledger=False,
+                       chart_dir=here / "runs")
+    assert len(out.result.equity_curve) == len(frame)

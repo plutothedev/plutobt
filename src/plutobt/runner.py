@@ -35,6 +35,7 @@ from plutobt.strategy_loader import make_strategy
 
 # A bar interval of about a day or more. One hour is allowed off for a DST change.
 _DAILY_SECONDS = 86400 - 3600
+_SESSIONS = frozenset({"rth", "all", "as_built"})
 
 
 @dataclass
@@ -55,19 +56,31 @@ def _is_daily(df: pd.DataFrame) -> bool:
 
 
 def _save_chart(result: BacktestResult, path: Path, title: str) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    # Figure + FigureCanvasAgg directly: no pyplot registry, no global backend switch,
+    # so the caller's own figures and backend are left alone and nothing holds this one.
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
 
     from plutobt.plotting import plot_equity
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+    fig = Figure(figsize=(11, 6))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot()
     plot_equity(result, ax=ax)
     ax.set_title(title)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=130, bbox_inches="tight")
-    plt.close(fig)
+
+
+def _chart_path(chart_dir: Path, symbol: str, name: str) -> Path:
+    """A path no earlier run has used: microsecond stamp, then a counter if it exists."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    path = Path(chart_dir) / f"{symbol}_{name}_{stamp}.png"
+    n = 1
+    while path.exists():
+        n += 1
+        path = Path(chart_dir) / f"{symbol}_{name}_{stamp}-{n}.png"
+    return path
 
 
 def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], params: dict,
@@ -76,6 +89,9 @@ def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], pa
                  roll_meta: RollMeta | None = None, data_note: str,
                  ledger: str | bool = DEFAULT_PATH,
                  chart_dir: Path = Path("plutobt_runs")) -> RunOutcome:
+    if session not in _SESSIONS:
+        raise ValueError(f"session must be one of {', '.join(sorted(_SESSIONS))}, "
+                         f"not {session!r}")
     instrument = get_instrument(symbol)
     daily = _is_daily(df)
 
@@ -86,6 +102,9 @@ def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], pa
         df = tagged[tagged["session"] == "RTH"].reset_index(drop=True)
         if not had_session:
             df = df.drop(columns="session")
+        if len(df) == 0:
+            raise ValueError("no regular-trading-hours bars in this data; use "
+                             "--session all to keep the full day")
 
     if session == "as_built":
         hours = "Hours: continuous file run as built"
@@ -118,8 +137,7 @@ def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], pa
         tries = len(led.tries(sid, bars, also=(frame_sha256(df),)))
 
     name = strategy_cls.__name__
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    chart = Path(chart_dir) / f"{symbol}_{name}_{stamp}.png"
+    chart = _chart_path(chart_dir, symbol, name)
     _save_chart(result, chart, f"{symbol} {name} (in-sample)")
 
     basis = ("from your config" if from_config else
