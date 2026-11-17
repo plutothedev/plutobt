@@ -28,7 +28,7 @@ def _frame(ts, close, spread=0.5):
 
 def _orb_day(day, breakout="up"):
     """Range 08:30-08:55 (high 100.5, low 99.5); the break starts at the 09:00 bar."""
-    ts = _day_ts(day, end="15:15")  # the 15:15 bar is the first after the close
+    ts = _day_ts(day)  # RTH: the last bar opens 15:10, as `plutobt run` leaves it
     close = np.full(len(ts), 100.0)
     if breakout == "up":
         close[6:] = 103.0
@@ -43,10 +43,9 @@ def _run(df, strat, **cfg):
 
 
 def test_orb_buys_break_above_range_with_stop_at_low():
-    day = "2024-03-05"
-    df = _orb_day(day)
+    df = _orb_day("2024-03-05")
     close = df["close"].to_numpy().copy()
-    close[10:] = 99.0  # falls through the range low (99.5): the stop must be that low
+    close[10:] = 99.75  # opens above the range low, trades through it: stop fills at 99.5
     df = _frame(df["ts"].to_numpy(), close)
     res = _run(df, OpeningRange(), allow_short=False)
     ts = df["ts"].to_numpy()
@@ -54,8 +53,28 @@ def test_orb_buys_break_above_range_with_stop_at_low():
     t = res.trades[0]
     assert t.side == "long" and t.contracts == 1
     assert t.entry_ts == int(ts[7])      # signal on the 09:00 bar, fill at the next open
-    assert t.exit_ts == int(ts[10])      # stopped on the first bar that trades through 99.5
-    assert t.exit_price == pytest.approx(99.5, abs=1.0)  # at the range low, less slippage
+    assert t.exit_ts == int(ts[10])
+    assert abs(t.exit_price - 99.5) <= 0.5   # the range low, not the bar low (99.25)
+    assert t.exit_price > 99.25 - 1e-9 and t.r_multiple < 0
+
+
+def test_orb_short_stop_at_range_high():
+    df = _orb_day("2024-03-05", breakout="down")
+    close = df["close"].to_numpy().copy()
+    close[10:] = 100.25  # opens below the range high (100.5), trades through it
+    df = _frame(df["ts"].to_numpy(), close)
+    res = _run(df, OpeningRange(), allow_short=True)
+    t = res.trades[0]
+    assert t.side == "short"
+    assert abs(t.exit_price - 100.5) <= 0.5 and t.exit_price < 100.75 + 1e-9
+
+
+def test_orb_range_includes_the_first_bar_of_the_frame():
+    df = _orb_day("2024-03-05")
+    high = df["high"].to_numpy().copy()
+    high[0] = 105.5  # the 08:30 bar sets the range high above the 103 break
+    df["high"] = high
+    assert len(_run(df, OpeningRange()).trades) == 0
 
 
 def test_orb_one_entry_per_day():
@@ -74,21 +93,42 @@ def test_orb_enters_again_on_the_next_day():
     assert len(_run(df, OpeningRange()).trades) == 2
 
 
-def test_orb_flat_by_session_close():
-    days = ["2024-03-05", "2024-03-06"]
-    df = pd.concat([_orb_day(d) for d in days], ignore_index=True)
+def _flat_by_close(df, n_per_day, days):
     res = _run(df, OpeningRange())
     ts = df["ts"].to_numpy()
-    n = len(ts) // 2
-    assert len(res.trades) == 2
+    assert len(res.trades) == days
     for k, trade in enumerate(res.trades):
         assert not trade.open_at_end
-        # the 15:10 bar (open + 5 min = the 15:15 close) decides; it fills at the 15:15 open
-        assert trade.exit_ts == int(ts[k * n + n - 1])
-    # held between the entry and the close decision, flat from the 15:15 bar on
+        last_rth = int(_day_ts(["2024-03-05", "2024-03-06"][k])[-1])  # the 15:10 bar
+        assert trade.exit_ts == last_rth
+        assert res.position.iloc[int(np.searchsorted(ts, last_rth))] == 0
+    return res
+
+
+def test_orb_flat_by_session_close():
+    # RTH frame, as `plutobt run` builds it: the last bar of each day opens 15:10
+    days = ["2024-03-05", "2024-03-06"]
+    df = pd.concat([_orb_day(d) for d in days], ignore_index=True)
+    res = _flat_by_close(df, len(df) // 2, 2)
+    n = len(df) // 2
     assert res.position.iloc[n - 2] == 1
-    assert res.position.iloc[n - 1] == 0
-    assert res.position.iloc[2 * n - 1] == 0
+
+
+def test_orb_flat_by_session_close_on_a_full_day_frame():
+    days = ["2024-03-05", "2024-03-06"]
+    parts = []
+    for d in days:
+        ts = _day_ts(d, end="16:00")
+        close = np.full(len(ts), 100.0)
+        close[6:] = 103.0
+        parts.append(_frame(ts, close))
+    _flat_by_close(pd.concat(parts, ignore_index=True), 0, 2)
+
+
+def test_orb_prefix_starting_with_a_lone_late_bar_does_not_refuse():
+    first = _frame(_day_ts("2024-03-04", start="15:10", end="15:10"), [100.0])
+    df = pd.concat([first, _orb_day("2024-03-05")], ignore_index=True)
+    assert len(_run(df, OpeningRange()).trades) == 1  # default guard runs every prefix
 
 
 def test_orb_no_short_when_shorts_off():
@@ -96,6 +136,14 @@ def test_orb_no_short_when_shorts_off():
     assert len(_run(df, OpeningRange(), allow_short=False).trades) == 0
     shorted = _run(df, OpeningRange(), allow_short=True).trades
     assert len(shorted) == 1 and shorted[0].side == "short"
+
+
+def test_orb_refuses_hourly_bars_with_one_stray_short_gap():
+    ts = list(_day_ts("2024-03-05", step=60, end="14:30"))
+    ts.insert(3, ts[2] + 300)
+    df = _frame(np.array(ts, dtype="int64"), np.full(len(ts), 100.0))
+    with pytest.raises(ValueError, match="60-minute bars"):
+        _run(df, OpeningRange())
 
 
 def test_orb_refuses_bars_longer_than_range():
@@ -115,6 +163,15 @@ def test_donchian_enters_on_prior_20_high_and_exits_on_prior_10_low():
     t = res.trades[0]
     assert t.entry_ts == int(ts[26])
     assert t.exit_ts == int(ts[41])
+
+
+def test_donchian_exit_and_opposite_breakout_on_one_bar_only_exits():
+    ts = _day_ts("2024-03-05")
+    close = np.full(len(ts), 100.0)
+    close[25:] = 110.0
+    close[40:] = 80.0       # below the 10-bar exit low and the 20-bar entry low at once
+    res = _run(_frame(ts, close), Donchian(), allow_short=True)
+    assert [t.side for t in res.trades] == ["long"]
 
 
 def test_donchian_no_short_when_shorts_off():

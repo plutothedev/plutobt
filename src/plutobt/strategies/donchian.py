@@ -14,10 +14,13 @@ class Donchian(Strategy):
     bars. The short side mirrors it and is used only when the run allows shorts
     (``allow_short``). No stop.
 
-    Defaults: 20 bars to enter and 10 to exit, the Turtle System 1 of Curtis Faith,
-    "Way of the Turtle" (2007). They are published defaults, not numbers tuned on any
-    data. The citation is taken from the PlutoBT 3.1 plan and was not re-checked against
-    the book.
+    There is no stop-and-reverse: an exit and an opposite breakout on the same bar only
+    exits; a new entry needs a later bar.
+
+    Source: Curtis Faith, "Way of the Turtle" (2007), System 1: a 20-day breakout
+    entry and a 10-day opposite-breakout exit (``entry_bars = 20``, ``exit_bars = 10``),
+    applied here to bars. The original rule that skips an entry after a winning
+    System 1 trade is left out. The defaults are not numbers tuned on any data.
 
     Causality: every channel is shifted one bar, so bar t compares its close with the
     channel of bars before t.

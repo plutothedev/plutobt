@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from plutobt.data import CT
-from plutobt.roll import _days
+from plutobt.roll import _DAY_SHIFT
 from plutobt.strategy import Context, Strategy
 
 
@@ -23,39 +23,56 @@ class OpeningRange(Strategy):
     the day that closes above the range high buys 1 contract with a stop at the range
     low; the first that closes below the range low sells 1 with a stop at the range
     high, only when the run allows shorts (``allow_short``). At most one entry per
-    trading day. The position is closed on the first bar whose open plus the bar
-    interval reaches the session close, so it is flat by the close.
+    trading day. The position is closed so that it is flat by the session close: the
+    exit is decided on the bar before the last in-session bar and fills at that last
+    bar's open. No entry is taken from that bar on, so every entry has a bar left to
+    exit on.
 
-    Default: ``range_minutes = 30``, the opening range of Toby Crabel, "Day Trading
-    with Short Term Price Patterns and Opening Range Breakout" (1990). It is a
-    published default, not a number tuned on any data. The citation is taken from the
-    PlutoBT 3.1 plan and was not re-checked against the book.
+    Source: the concept is from Toby Crabel, "Day Trading with Short Term Price
+    Patterns and Opening Range Breakout" (1990). The 30-minute window
+    (``range_minutes = 30``) is a common convention, not Crabel's rule; opening-range
+    lengths of 5, 15, 30 and 60 minutes are compared in Zarattini, Barbon and Aziz,
+    "A Profitable Day Trading Strategy For The U.S. Equity Market" (2024, SSRN
+    4729284). It is a default taken from the literature, not a number tuned on any
+    data.
 
-    Causality: precompute adds only per-bar facts taken from each bar's own timestamp
-    (``ct_min`` minutes of day in Chicago, ``tday`` the CME trading day as an integer,
-    ``bar_secs`` the smallest positive gap between consecutive bars seen so far). The
-    range itself is built bar by bar in ``ctx.state``.
+    Bars must be ``range_minutes`` long or shorter: the bar size is the most common
+    gap between consecutive bars of the same trading day, and a longer one is refused.
+
+    Causality: precompute adds only per-bar facts taken from the bars up to and
+    including that bar (``ct_min`` minutes of day in Chicago, ``tday`` the CME trading
+    day as an integer, ``bar_secs`` the most common same-day gap seen so far, 0 until
+    one is seen). The range itself is built bar by bar in ``ctx.state``.
     """
 
     range_minutes: int = 30
 
     def precompute(self, df: pd.DataFrame) -> pd.DataFrame:
         ts = df["ts"].to_numpy(dtype="int64")
-        if len(ts) > 1:
-            gaps = np.diff(ts)
-            gaps = gaps[gaps > 0]
-            if gaps.size and gaps.min() > self.range_minutes * 60:
-                minutes = int(round(gaps.min() / 60))
-                raise ValueError(
-                    f"opening_range needs bars of {self.range_minutes} minutes or less; "
-                    f"these are {minutes}-minute bars"
-                )
         local = pd.DatetimeIndex(pd.to_datetime(ts, unit="s", utc=True)).tz_convert(CT)
         df["ct_min"] = (local.hour * 60 + local.minute).to_numpy(dtype="int64")
-        df["tday"] = np.array([d.toordinal() for d in _days(ts)], dtype="int64")
-        gap = pd.Series(np.diff(ts, prepend=ts[:1]).astype("float64"))
-        gap[gap <= 0] = np.nan
-        df["bar_secs"] = gap.cummin().to_numpy()
+        wall = (local + _DAY_SHIFT).tz_localize(None).normalize()
+        day = np.asarray((wall - pd.Timestamp(0)).days, dtype="int64")
+        df["tday"] = day
+        # Gap to the previous bar, only when both bars are in the same trading day.
+        gap = np.zeros(len(ts), dtype="int64")
+        if len(ts) > 1:
+            same = day[1:] == day[:-1]
+            step = np.diff(ts)
+            gap[1:] = np.where(same & (step > 0), step, 0)
+        # Expanding mode of the same-day gaps (ties go to the smaller gap).
+        sizes = np.unique(gap[gap > 0])
+        bar_secs = np.zeros(len(ts), dtype="float64")
+        if sizes.size:
+            counts = np.stack([np.cumsum(gap == v) for v in sizes])
+            best = counts.argmax(axis=0)
+            bar_secs = np.where(counts.max(axis=0) > 0, sizes[best], 0).astype("float64")
+        df["bar_secs"] = bar_secs
+        if bar_secs[-1] > self.range_minutes * 60:
+            raise ValueError(
+                f"opening_range needs bars of {self.range_minutes} minutes or less; "
+                f"these are {int(round(bar_secs[-1] / 60))}-minute bars"
+            )
         return df
 
     def on_bar(self, ctx: Context) -> None:
@@ -66,23 +83,25 @@ class OpeningRange(Strategy):
         open_m = _minutes(ctx.instrument.session_open_ct)
         close_m = _minutes(ctx.instrument.session_close_ct)
         minute = int(bar.ct_min)
-        if bar.bar_secs != bar.bar_secs:  # first bar: no interval seen yet
-            return
-        ends = minute + bar.bar_secs / 60.0
 
         if open_m <= minute < open_m + self.range_minutes:
             state["hi"] = bar.high if state["hi"] is None else max(state["hi"], bar.high)
             state["lo"] = bar.low if state["lo"] is None else min(state["lo"], bar.low)
             return
+        if bar.bar_secs <= 0:  # no same-day gap seen yet: the interval is unknown
+            return
+        # The bar after this one opens at minute + interval, and an order decided now
+        # fills there; "last" below means the last bar opening before the session close.
+        next_is_last = minute + 2 * bar.bar_secs / 60.0 >= close_m
 
         if ctx.position.qty != 0:
-            if ends >= close_m:
+            if next_is_last:
                 ctx.broker.close()
             return
 
         if state["entered"] or state["hi"] is None:
             return
-        if minute < open_m + self.range_minutes or ends >= close_m:
+        if minute < open_m + self.range_minutes or next_is_last:
             return
         if bar.close > state["hi"]:
             ctx.broker.buy(contracts=1, stop=state["lo"])
