@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import math
+import re
 import sys
 import warnings
 from datetime import date
@@ -25,12 +26,14 @@ from pathlib import Path
 
 from plutobt import buy as _buy
 from plutobt.config import load_config
-from plutobt.importers import PRESETS, load_csv
+from plutobt.contracts import parse_contract
+from plutobt.importers import PRESETS, _load_csv
 from plutobt.instruments import get_instrument
 from plutobt.ledger import DEFAULT_PATH
-from plutobt.roll import load_continuous
+from plutobt.roll import load_continuous, save_continuous
 from plutobt.runner import run_backtest
-from plutobt.store import Store, data_dir
+from plutobt.store import COLUMNS, Store, data_dir
+from plutobt.strategies.opening_range import OpeningRange
 from plutobt.strategy_loader import BUILTINS, load_strategy, parse_settings, settings
 
 PROG = "plutobt"
@@ -47,6 +50,18 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message):
         raise _Refused(f"{message} (see: {self.prog} --help)")
 
+    def _print_message(self, message, file=None):
+        # Help text can hold a path the console cannot show (the store folder): escape
+        # it, never crash on --help.
+        if message:
+            stream = file or sys.stderr
+            try:
+                stream.write(message)
+            except UnicodeEncodeError:
+                stream.write(message.encode("ascii", "backslashreplace").decode("ascii"))
+            except (AttributeError, OSError):
+                pass
+
 
 # ---------------------------------------------------------------------------
 # Output
@@ -61,15 +76,38 @@ def _out(text: str = "", *, err: bool = False) -> None:
         print(text.encode("ascii", "backslashreplace").decode("ascii"), file=stream)
 
 
-def _fail(message: str) -> int:
+def _plain(message: str) -> str:
+    """One line, the key redacted, plain ASCII."""
     text = " ".join(_buy._redact(message, _buy._keys(None)).split())
-    _out(f"{PROG}: {text.encode('ascii', 'backslashreplace').decode('ascii')}", err=True)
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _fail(message: str) -> int:
+    _out(f"{PROG}: {_plain(message)}", err=True)
     return 2
+
+
+# The engine's sampled look-ahead warning names Python settings (BacktestConfig,
+# assert_causal) a trader at the command line never sees; the command says it plainly.
+_SAMPLED = re.compile(r"causality check sampled: checked (\d+) of the (\d+) prefixes of "
+                      r"(\d+) bars \(every prefix is checked up to (\d+) bars\)")
+
+
+def _for_a_trader(text: str) -> str:
+    m = _SAMPLED.match(text)
+    if m is None:
+        return text
+    k, p, n, full = m.groups()
+    return (f"look-ahead check sampled: the engine's standard look-ahead check, run on "
+            f"every backtest, compared the strategy's signals at {k} of the {p} cut-off "
+            f"points of these {n} bars instead of at every one (every one is checked on "
+            f"data of up to {full} bars). A leak that shows only between the sampled "
+            "points can be missed.")
 
 
 def _note(message, category, filename, lineno, file=None, line=None) -> None:
     """A warning as one plain line, without the source file and code line."""
-    _out(f"{PROG}: note: {' '.join(str(message).split())}", err=True)
+    _out(f"{PROG}: note: {_plain(_for_a_trader(' '.join(str(message).split())))}", err=True)
 
 
 def _message(exc: BaseException) -> str:
@@ -137,6 +175,9 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("root", help=f"futures root: {roots}")
     _buy_args(f, required=True)
     _money_args(f)
+    f.add_argument("--session", choices=("rth", "all"), default="rth",
+                   help="hours kept in the series saved for offline runs: rth (regular "
+                        "trading hours, the default) or all (the full day)")
     f.set_defaults(func=_cmd_fetch)
 
     r = sub.add_parser("run", help="backtest a strategy on one data source",
@@ -184,13 +225,21 @@ def _parser() -> argparse.ArgumentParser:
 # Quote and buy (the money path)
 # ---------------------------------------------------------------------------
 
+def _held_codes(q: _buy.Quote) -> str:
+    return ", ".join(sorted({p.contract for p in q.held}, key=parse_contract))
+
+
 def _print_quote(q: _buy.Quote) -> None:
-    _out(f"Databento price: ${q.price_usd:.2f} for {q.root} {q.bars} bars, {q.start} to "
-         f"{q.end} (Databento's own estimate).")
+    if not q.pieces:
+        held = f" ({_held_codes(q)})" if q.held else ""
+        _out(f"{q.root} {q.bars} bars, {q.start} to {q.end}: already on this computer, no "
+             f"new charge{held}.")
+    else:
+        _out(f"Databento price: ${q.price_usd:.2f} for {q.root} {q.bars} bars, {q.start} "
+             f"to {q.end} (Databento's own estimate).")
     _out("Nothing was charged.")
-    if q.held:
-        n = len({p.contract for p in q.held})
-        _out(f"Already on this computer: {n} contract month(s), no charge.")
+    if q.held and q.pieces:
+        _out(f"Already on this computer, no charge: {_held_codes(q)}.")
     if q.data_ends is not None:
         _out(f"Databento has data up to {q.data_ends}; the range ends there.")
 
@@ -248,8 +297,49 @@ def _cmd_quote(a) -> int:
 
 
 def _cmd_fetch(a) -> int:
-    status, _, _ = _fetch(a.root, a.bars, a.start, a.end, yes=a.yes, max_cost=a.max_cost)
-    return status
+    status, store, q = _fetch(a.root, a.bars, a.start, a.end, yes=a.yes,
+                              max_cost=a.max_cost)
+    if status != 0:
+        return status
+    problem = None
+    try:
+        df, meta = _buy.assemble(store, q, session=a.session)
+    except _buy.BuyError as exc:
+        problem = str(exc)
+    if problem is not None:
+        _out(f"The bars are on this computer, but they could not be joined into one series "
+             f"for offline runs: {problem}")
+        return 0
+    _save_series(q, df, meta, a.session, "ema_cross", example=True)
+    return 0
+
+
+def _quoted(path: Path) -> str:
+    return f'"{path}"'
+
+
+def _save_series(q: _buy.Quote, df, meta, session: str, strategy: str, *,
+                 example: bool = False) -> Path:
+    """Save the assembled bars where ``plutobt run`` reads them without Databento or the
+    key, and print the command that does. Two or more contracts: a continuous series
+    and its .roll.json (``--continuous``). One contract: a plain CSV of bar opens in unix
+    seconds (``--data ... --preset generic --ts-is open``)."""
+    hours = "all" if q.bars == "1d" else session
+    folder = data_dir() / "series"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{q.root}_{q.bars}_{q.start}_{q.end}_{hours}.csv"
+    if meta is not None:
+        save_continuous(df, meta, str(path))
+        source = f"--continuous {_quoted(path)} --symbol {q.root}"
+    else:
+        df[COLUMNS].to_csv(path, index=False, lineterminator=chr(10))
+        source = (f"--data {_quoted(path)} --symbol {q.root} --preset generic --ts-is open"
+                  + (" --session all" if hours == "all" and q.bars != "1d" else ""))
+    _out(f"Series saved for offline runs: {path}")
+    _out("Run a strategy on it again with no purchase and no key"
+         + (" (any strategy; ema_cross shown):" if example else ":"))
+    _out(f"  plutobt run {source} --strategy {strategy}")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +377,55 @@ def _check_run(a) -> None:
                                               ("--ts-is", a.ts_is)) if value is not None]
         if data_only:
             raise _Refused(f"{', '.join(data_only)} go with --data, not {source}")
+    else:
+        _check_preset_flags(a.preset or "generic", a.tz, a.ts_is)
     if source == "--continuous" and a.session is not None:
         raise _Refused("--continuous runs the file as built; drop --session")
     if a.allow_short and a.config is not None:
         raise _Refused("--allow-short has no effect with --config; set allow_short in the "
                        "config file")
+
+
+def _check_preset_flags(preset: str, tz: str | None, ts_is: str | None) -> None:
+    """Refuse a --tz or --ts-is the preset never reads, and a generic file without
+    --ts-is, before anything is loaded."""
+    if preset == "generic" and ts_is is None:
+        raise _Refused("--preset generic (the default for --data) needs --ts-is open or "
+                       "--ts-is close: whether each timestamp is the bar's open or its "
+                       "close. Reading a close as an open is look-ahead.")
+    unused: list[str] = []
+    why = ""
+    if preset == "databento":
+        why = "Databento times are UTC bar opens"
+        unused = [flag for flag, value in (("--tz", tz), ("--ts-is", ts_is))
+                  if value is not None]
+    elif preset == "ninjatrader":
+        why = "NinjaTrader exports are in UTC"
+        unused = ["--tz"] if tz is not None else []
+    if unused:
+        flags = " and ".join(unused)
+        raise _Refused(f"--preset {preset} never uses {flags} ({why}); drop {flags}")
+
+
+def _zone_text(info: dict, tz: str | None) -> str:
+    zone = info["zone"]
+    if zone == "unix":
+        return "zone: none needed (unix time)"
+    if zone == "zoned":
+        return "zone: from the file"
+    if zone == "naive":
+        return f"zone: {tz} (given with --tz)"
+    return "zone: UTC (the preset's own rule)"
+
+
+def _check_bar_size(cls, params: dict, bars: str) -> None:
+    """Refuse a bar size a built-in strategy cannot use, before any Databento call."""
+    if isinstance(cls, type) and issubclass(cls, OpeningRange):
+        minutes = {"1m": 1, "1h": 60, "1d": 1440}[bars]
+        window = int(params.get("range_minutes", cls.range_minutes))
+        if minutes > window:
+            raise _Refused(f"opening_range needs bars of {window} minutes or less; "
+                           f"--bars {bars} is too long (use --bars 1m)")
 
 
 def _cmd_run(a) -> int:
@@ -305,17 +439,23 @@ def _cmd_run(a) -> int:
     get_instrument(symbol)
     session = a.session or "rth"
     meta = None
+    if a.buy is not None:
+        _check_bar_size(cls, params, a.bars)
 
     if a.data is not None:
         preset = a.preset or "generic"
         # One file is run as one series: the contract tag the importer reads from the
         # file name would make the engine ask for a continuous build's RollMeta.
-        df = load_csv(a.data, preset, tz=a.tz, ts_is=a.ts_is)
+        df, info = _load_csv(a.data, preset, tz=a.tz, ts_is=a.ts_is)
+        if "contract" in df.columns and len(df):
+            code = str(df["contract"].iloc[0])
+            root = parse_contract(code).root
+            if root != symbol:
+                raise _Refused(f"This file holds {root} contract {code} but --symbol is "
+                               f"{symbol}; use --symbol {root}.")
         df = df.drop(columns="contract", errors="ignore")
-        note = f"{a.data} (preset {preset}"
-        if a.ts_is is not None:
-            note += f", timestamps read as the bar {a.ts_is}"
-        note += f", zone {a.tz})" if a.tz is not None else ")"
+        note = (f"{a.data} (preset {preset}, timestamps read as the bar {info['ts_is']}, "
+                f"{_zone_text(info, a.tz)})")
     elif a.continuous is not None:
         df, meta = load_continuous(a.continuous)
         if meta.root != symbol:
@@ -328,9 +468,15 @@ def _cmd_run(a) -> int:
         if status != 0:
             return status
         df, meta = _buy.assemble(store, q, session=session)
-        note = (f"bought from Databento, {q.root} {q.bars} {q.start} to {q.end}, "
-                f"Databento's estimate at purchase: ${q.price_usd:.2f} (exact charge: your "
-                "Databento billing page)")
+        _save_series(q, df, meta, session, a.strategy)
+        what = f"{q.root} {q.bars} {q.start} to {q.end}"
+        if not q.pieces:
+            note = (f"bought from Databento earlier, {what}: already on this computer, no "
+                    "new charge")
+        else:
+            part = " for the part bought now" if q.held else ""
+            note = (f"bought from Databento, {what}, Databento's estimate at purchase: "
+                    f"${q.price_usd:.2f}{part} (exact charge: your Databento billing page)")
 
     outcome = run_backtest(df, symbol, cls, params, config=config, cost_note=cost_note,
                            session=session, allow_short=a.allow_short, roll_meta=meta,

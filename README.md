@@ -291,12 +291,18 @@ offline: it never contacts Databento or anything else.
 `plutobt run` takes exactly one data source:
 
 - `--data FILE` is one contract's bars from a CSV (the presets are in "Your own data":
-  `--preset databento|tradingview|ninjatrader|generic`; `generic` also needs `--ts-is open`
-  or `--ts-is close`, and a file with no time zone needs `--tz`).
-- `--continuous FILE` is a series built by `python -m plutobt.continuous`.
+  `--preset databento|tradingview|ninjatrader|generic`; `generic`, the default, also needs
+  `--ts-is open` or `--ts-is close`, and a file whose times carry no zone needs `--tz`).
+  A flag the preset never reads is refused: `--tz` and `--ts-is` with `databento`, `--tz`
+  with `ninjatrader`. The report says which zone was actually used (`none needed (unix
+  time)`, `from the file`, or the `--tz` you gave).
+- `--continuous FILE` is a series built by `python -m plutobt.continuous`, or one saved by
+  `plutobt fetch` or `plutobt run --buy` (next section).
 - `--buy ROOT` buys Databento bars on your own account (next section).
 
 `--data` and `--continuous` also need `--symbol` (NQ, MNQ, ES, MES, YM, RTY, CL, GC or ZN).
+A file named after a contract (`NQZ2025.csv`) is refused with a different `--symbol`: the
+point value would be the wrong instrument's.
 Costs, hours, strategy settings and the rest:
 
 ```
@@ -313,21 +319,29 @@ folder you name with `--chart-dir`), and one line in the ledger (`--no-ledger` s
 **Costs.** A run never uses $0 commission. Without `--config` it uses default costs per
 instrument: for example NQ and ES $2.50 a side and 1 tick of slippage, MNQ and MES $0.75
 and 1 tick, CL $3.50 and 3 ticks, GC $3.50 and 2 ticks. They are labelled in the report
-"representative public retail costs, not a live account". They sit between the per-side
-figures published on the TopstepX commissions and fees page (retrieved 2026-11-16, page
-dated 2026-09-30,
+"representative public retail costs, not a live account". Each is at or above the lower
+of the per-side figures published on the TopstepX commissions and fees page (retrieved
+2026-11-16, page dated 2026-09-30,
 https://intercom.help/topstep-llc/en/articles/8284213-topstepx-commissions-and-fees) and
 the Tradeify trading commission fees page (retrieved 2026-11-16, page dated 2026-10-17,
 round turn halved,
-https://intercom.help/tradeify/en/articles/10468315-trading-commission-fees). The full
+https://intercom.help/tradeify/en/articles/10468315-trading-commission-fees): between the
+two pages for NQ, MNQ, ES, MES, YM and RTY, above both for CL and GC, and for ZN, which
+only TopstepX lists, above that one figure. The full
 table, with each published range, is in `src/plutobt/run_defaults.py`. To use your own,
 pass `--config my_costs.toml`; `configs/nq.toml` shows the format. `--allow-short` has no
-effect with `--config`: set `allow_short` in the file.
+effect with `--config`: set `allow_short` in the file. A config's `periods_per_year`
+replaces the figure measured from your bars, and the one in `configs/nq.toml` is for
+5-minute regular-hours bars: when you copy a config for other bars, delete that line or
+set it to match them. The report prints a WARNING line when the two differ by more than
+20%.
 
-**Hours.** Regular trading hours only by default. `--session all` keeps the full day.
-Daily bars are never filtered. The bars-per-year figure the report needs for its
-annualised numbers is measured from your bars (252 times the median bars per trading
-day), never assumed.
+**Hours.** Regular trading hours only by default: the instrument's own session in
+America/Chicago, by bar open time (08:30-15:15 for the index futures), and the report
+names the window. `--session all` keeps the full day. Daily bars are never filtered. The
+bars-per-year figure the report needs for its annualised numbers is measured from your
+bars (252 times the median bars per trading day; for daily or longer bars, 252 divided by
+the median gap between bars in weekdays, so weekly bars give 50.4), never assumed.
 
 **The three built-in strategies.** `plutobt strategies` lists them with their settings;
 change one with `--set NAME=VALUE`. Each default comes from a published source and was
@@ -344,8 +358,14 @@ day after Thanksgiving, for example), or when the bar before the close is missin
 hold past that day's close.
 
 Every result is in-sample and not predictive. Each run is one try in the ledger (see
-"The ledger" under "Did you overfit?"), so the more settings and strategies you run on the
-same bars, the more the report discounts the best one.
+"The ledger" under "Did you overfit?"). The report shows how many tries of this strategy
+on these bars the ledger holds; it does not discount the Sharpe for them, and it counts
+each strategy on its own. A strategy file counts as the same strategy whether
+`plutobt run` loads it or a script imports it. With more than one try the report adds a
+line with the command that discounts this run's Sharpe for them, filled in:
+`python -m plutobt.deflate --sharpe SHARPE --periods-per-year PERIODS_PER_YEAR --returns
+RETURNS --trials TRIALS`. To cover every strategy you tried on the same bars, pass the
+total count as `--trials`.
 
 ## Buying data from Databento
 
@@ -390,8 +410,24 @@ plutobt run --strategy donchian --buy NQ --from 2024-01-02 --to 2024-02-01 --bar
 - `--max-cost 5` refuses any price above $5, even with `--yes`.
 - Data already on your computer is never bought again; a quote prices only what is missing.
 - The report states Databento's estimate at purchase. The exact charge is on your
-  Databento billing page.
-- A buy is never retried automatically.
+  Databento billing page. When everything was already on your computer it says so: no
+  new charge.
+- A buy is never retried automatically. A buy that stops with an error says Databento may
+  have billed the piece it was buying; check your Databento billing page.
+
+**Offline runs.** After a fetch or a `run --buy`, the joined bars are also saved as a
+series in the `series` folder of the data folder
+(`~/.plutobt/data/series/<ROOT>_<bars>_<from>_<to>_<session>.csv`), and the command to
+run on them again is printed. That run needs no Databento add-on, no key and no network:
+
+```
+plutobt run --continuous ~/.plutobt/data/series/NQ_1h_2024-01-02_2024-02-01_rth.csv --symbol NQ --strategy donchian
+```
+
+Two or more contracts are saved as a continuous series with its `.roll.json` (use
+`--continuous`). A range that falls inside one contract is saved as a plain CSV of bar
+opens, and the printed command reads it with `--data FILE --preset generic --ts-is open`.
+`plutobt fetch --session all` saves the full day instead of regular trading hours.
 
 Bought bars are stitched into a continuous series across contract months by the rules in
 "Contract roll", and the regular-hours and cost defaults above apply.

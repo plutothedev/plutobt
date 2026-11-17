@@ -91,8 +91,8 @@ def test_cli_quote_names_what_is_held(market, answer, capsys):
     capsys.readouterr()
     assert cli.main(["quote", *QUOTE_ARGS]) == 0
     out = capsys.readouterr().out
-    assert "Databento price: $0.00 for NQ 1h bars" in out
-    assert "Already on this computer: 2 contract month(s), no charge." in out
+    assert ("NQ 1h bars, 2024-02-01 to 2024-04-01: already on this computer, no new charge "
+            "(NQH2024, NQM2024).") in out
     assert "Nothing was charged." in out
 
 
@@ -298,7 +298,7 @@ def test_cli_run_no_ledger_and_chart_dir(market, tmp_path, capsys):
 def test_cli_run_generic_needs_ts_is(market, capsys):
     args = ["run", "--data", str(SAMPLE), "--symbol", "NQ", "--strategy", "ema_cross"]
     assert cli.main(args) == 2
-    assert "ts_is" in one_line(capsys.readouterr().err)
+    assert "--ts-is" in one_line(capsys.readouterr().err)
 
 
 STRATEGY_FILE = """
@@ -421,7 +421,8 @@ def test_cli_run_buy_second_time_is_free(market, answer, capsys):
     capsys.readouterr()
     assert cli.main(["run", "--strategy", "ema_cross", *BUY_ARGS]) == 0
     out = capsys.readouterr().out
-    assert "Databento's estimate at purchase: $0.00" in out
+    assert ("bought from Databento earlier, NQ 1h 2024-02-01 to 2024-04-01: already on this "
+            "computer, no new charge") in out
     assert "Nothing to buy: all of it is already on this computer." in out
     assert len(prompts) == 1 and market.count("get_range") == 2
 
@@ -532,3 +533,202 @@ def test_cli_quote_and_fetch_output_is_ascii_cp1252(market, answer, monkeypatch)
         out.getvalue().decode("ascii")
         err.getvalue().decode("ascii")
         assert out.getvalue() or err.getvalue()
+
+
+# -- whole-branch review fixes (3.1) -----------------------------------------------
+
+def test_cli_run_refuses_a_file_of_another_root(market, capsys):
+    args = ["run", "--data", str(SAMPLE), "--preset", "generic", "--ts-is", "open",
+            "--symbol", "ES", "--strategy", "ema_cross"]
+    assert cli.main(args) == 2
+    assert one_line(capsys.readouterr().err).endswith(
+        "This file holds NQ contract NQH2026 but --symbol is ES; use --symbol NQ.")
+
+
+@pytest.mark.parametrize("preset, flags, named", [
+    ("databento", ["--tz", "America/Chicago"], "--tz"),
+    ("databento", ["--ts-is", "close"], "--ts-is"),
+    ("ninjatrader", ["--tz", "America/Chicago"], "--tz"),
+])
+def test_cli_run_refuses_a_flag_the_preset_never_uses(market, tmp_path, capsys, preset,
+                                                      flags, named):
+    args = ["run", "--data", str(tmp_path / "missing.csv"), "--preset", preset,
+            "--symbol", "NQ", "--strategy", "ema_cross", *flags]
+    assert cli.main(args) == 2
+    err = one_line(capsys.readouterr().err)
+    assert named in err and f"--preset {preset}" in err and "missing.csv" not in err
+
+
+def _tv_unix(tmp_path):
+    import pandas as pd
+    df = pd.read_csv(SAMPLE)
+    path = tmp_path / "tv_export.csv"
+    df.rename(columns={"ts": "time", "volume": "Volume"}).to_csv(path, index=False)
+    return path
+
+
+def _generic_text(tmp_path, zoned: bool):
+    import pandas as pd
+    df = pd.read_csv(SAMPLE)
+    when = pd.to_datetime(df["ts"], unit="s", utc=True)
+    if zoned:
+        df["ts"] = when.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        df["ts"] = when.dt.tz_convert("America/Chicago").dt.strftime("%Y-%m-%d %H:%M:%S")
+    path = tmp_path / ("zoned.csv" if zoned else "naive.csv")
+    df.to_csv(path, index=False)
+    return path
+
+
+def _data_line(out: str) -> str:
+    lines = [ln for ln in out.splitlines() if ln.startswith("Data: ")]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def test_cli_run_data_note_says_the_zone_actually_used(market, tmp_path, capsys):
+    tv = _tv_unix(tmp_path)
+    assert cli.main(["run", "--data", str(tv), "--preset", "tradingview", "--symbol", "NQ",
+                     "--strategy", "ema_cross", "--tz", "America/Chicago"]) == 0
+    line = _data_line(capsys.readouterr().out)
+    assert "America/Chicago" not in line and "zone: none needed (unix time)" in line
+    assert "timestamps read as the bar open" in line
+
+    zoned = _generic_text(tmp_path, zoned=True)
+    assert cli.main(["run", "--data", str(zoned), "--preset", "generic", "--ts-is", "open",
+                     "--symbol", "NQ", "--strategy", "ema_cross",
+                     "--tz", "America/Chicago"]) == 0
+    line = _data_line(capsys.readouterr().out)
+    assert "America/Chicago" not in line and "zone: from the file" in line
+
+    naive = _generic_text(tmp_path, zoned=False)
+    assert cli.main(["run", "--data", str(naive), "--preset", "generic", "--ts-is", "open",
+                     "--symbol", "NQ", "--strategy", "ema_cross",
+                     "--tz", "America/Chicago"]) == 0
+    assert "zone: America/Chicago (given with --tz)" in _data_line(capsys.readouterr().out)
+
+
+def test_cli_generic_without_ts_is_refused_before_loading(market, tmp_path, capsys):
+    args = ["run", "--data", str(tmp_path / "missing.csv"), "--symbol", "NQ",
+            "--strategy", "no_such_strategy"]
+    assert cli.main(args) == 2
+    err = one_line(capsys.readouterr().err)
+    assert "--ts-is" in err and "missing.csv" not in err and "no_such" not in err
+
+
+def _offline_command(out: str):
+    lines = [ln for ln in out.splitlines() if ln.startswith("Series saved for offline runs: ")]
+    assert len(lines) == 1, out
+    path = Path(lines[0][len("Series saved for offline runs: "):])
+    cmds = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("plutobt run ")]
+    assert len(cmds) == 1, out
+    import shlex
+    argv = [t.strip('"') for t in shlex.split(cmds[0], posix=False)][1:]
+    return path, argv
+
+
+def _no_databento(monkeypatch):
+    def refuse():
+        raise AssertionError("an offline run must not make a Databento client")
+    monkeypatch.setattr(B, "make_client", refuse)
+    monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+
+
+def test_cli_fetch_saves_a_series_that_runs_offline(market, answer, tmp_path, capsys,
+                                                    monkeypatch):
+    answer("y")
+    assert cli.main(["fetch", *QUOTE_ARGS]) == 0
+    path, argv = _offline_command(capsys.readouterr().out)
+    assert path.is_file() and path.with_suffix(".roll.json").is_file()
+    assert path.parent == tmp_path / "store" / "series"
+    assert path.name == "NQ_1h_2024-02-01_2024-04-01_rth.csv"
+    assert argv[:2] == ["run", "--continuous"]
+    calls = len(market.calls)
+    _no_databento(monkeypatch)
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "IN-SAMPLE" in out and str(path) in out
+    assert len(market.calls) == calls
+
+
+def test_cli_fetch_one_contract_saves_a_plain_csv_that_runs_offline(market, answer, tmp_path,
+                                                                    capsys, monkeypatch):
+    answer("y")
+    assert cli.main(["fetch", "NQ", "--from", "2024-02-01", "--to", "2024-03-01",
+                     "--bars", "1h", "--session", "all"]) == 0
+    path, argv = _offline_command(capsys.readouterr().out)
+    assert path.name == "NQ_1h_2024-02-01_2024-03-01_all.csv" and path.is_file()
+    assert "--data" in argv and "--session" in argv
+    _no_databento(monkeypatch)
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "IN-SAMPLE" in out and "Hours: full day (--session all)" in out
+
+
+def test_cli_run_buy_saves_the_series_it_ran(market, answer, tmp_path, capsys, monkeypatch):
+    answer("y")
+    assert cli.main(["run", "--strategy", "donchian", *BUY_ARGS]) == 0
+    out = capsys.readouterr().out
+    path, argv = _offline_command(out)
+    assert "--strategy" in argv and argv[argv.index("--strategy") + 1] == "donchian"
+    _no_databento(monkeypatch)
+    assert cli.main(argv) == 0
+    assert "IN-SAMPLE" in capsys.readouterr().out
+
+
+def test_cli_note_is_redacted_and_ascii(market, capsys):
+    cli._note(UserWarning(f"careful {KEY} \u56fe"), UserWarning, "x.py", 1)
+    err = one_line(capsys.readouterr().err)
+    assert KEY not in err and "***" in err and "\\u56fe" in err
+    err.encode("ascii")
+
+
+def test_cli_sampled_causality_note_is_for_a_trader(market, capsys):
+    text = ("causality check sampled: checked 400 of the 9999 prefixes of 10000 bars (every "
+            "prefix is checked up to 2000 bars), so a leak on rows between them can be "
+            "missed. To check every prefix, set causality_sample = None in BacktestConfig "
+            "(or pass sample=None to assert_causal); the cost grows with the square of the "
+            "bar count")
+    cli._note(UserWarning(text), UserWarning, "x.py", 1)
+    err = one_line(capsys.readouterr().err)
+    assert "BacktestConfig" not in err and "assert_causal" not in err
+    assert "400" in err and "10000" in err and "standard" in err and "missed" in err
+
+
+@pytest.mark.parametrize("bars", ["1h", "1d"])
+def test_cli_opening_range_refuses_long_bars_before_any_call(market, capsys, bars):
+    args = ["run", "--strategy", "opening_range", "--buy", "NQ", "--from", "2024-02-01",
+            "--to", "2024-04-01", "--bars", bars, "--yes"]
+    assert cli.main(args) == 2
+    assert "opening_range needs bars of 30 minutes or less" in one_line(
+        capsys.readouterr().err)
+    assert market.calls == []
+
+
+def test_cli_quote_all_held_says_no_new_charge_and_names_contracts(market, answer, capsys):
+    answer("y")
+    assert cli.main(["fetch", *QUOTE_ARGS]) == 0
+    capsys.readouterr()
+    assert cli.main(["quote", *QUOTE_ARGS]) == 0
+    out = capsys.readouterr().out
+    assert "$0.00" not in out
+    assert "already on this computer, no new charge" in out
+    assert "NQH2024" in out and "NQM2024" in out
+
+
+def test_cli_run_buy_all_held_says_no_new_charge(market, answer, capsys):
+    answer("y")
+    assert cli.main(["run", "--strategy", "ema_cross", *BUY_ARGS]) == 0
+    capsys.readouterr()
+    assert cli.main(["run", "--strategy", "ema_cross", *BUY_ARGS]) == 0
+    line = _data_line(capsys.readouterr().out)
+    assert "$0.00" not in line and "already on this computer, no new charge" in line
+
+
+def test_cli_fetch_help_on_cp1252_with_a_non_cp1252_store(tmp_path):
+    env = _env(tmp_path)
+    env["PLUTOBT_DATA_DIR"] = str(tmp_path / "store_\u56fe")
+    r = subprocess.run([sys.executable, "-m", "plutobt", "fetch", "--help"],
+                       capture_output=True, cwd=tmp_path, env=env)
+    assert r.returncode == 0, r.stderr
+    assert b"store_\\u56fe" in r.stdout and b"usage:" in r.stdout

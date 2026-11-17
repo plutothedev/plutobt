@@ -297,10 +297,30 @@ def _check_preset(preset: str) -> None:
         raise ValueError(f"unknown preset {preset!r}; use one of {', '.join(PRESETS)}")
 
 
+def _ts_kind(col: pd.Series) -> str:
+    """How a timestamp column was read: "unix" (numbers, no zone needed), "zoned" (text
+    carrying its own zone) or "naive" (text read in the zone the caller gave)."""
+    if pd.api.types.is_numeric_dtype(col.dtype):
+        return "unix"
+    text = col.astype(str).str.strip()
+    return "zoned" if text.str.contains(_ZONED).all() else "naive"
+
+
 def load_csv(path: str, preset: str = "generic", *, tz: str | None = None,
              ts_is: str | None = None, columns: dict[str, str] | None = None,
              symbol: str | None = None, ts_format: str | None = None) -> pd.DataFrame:
     """Load one contract's bars from a vendor file (see the module docstring)."""
+    return _load_csv(path, preset, tz=tz, ts_is=ts_is, columns=columns, symbol=symbol,
+                     ts_format=ts_format)[0]
+
+
+def _load_csv(path: str, preset: str = "generic", *, tz: str | None = None,
+              ts_is: str | None = None, columns: dict[str, str] | None = None,
+              symbol: str | None = None, ts_format: str | None = None
+              ) -> tuple[pd.DataFrame, dict]:
+    """``load_csv`` plus what was actually used to read the times: ``{"ts_is": "open" |
+    "close", "zone": "unix" | "zoned" | "naive" | "utc"}`` (``"utc"``: the preset's own
+    rule: Databento and NinjaTrader stamps are UTC)."""
     _check_preset(preset)
     path = str(path)
     if preset == "databento":
@@ -315,14 +335,17 @@ def load_csv(path: str, preset: str = "generic", *, tz: str | None = None,
             df = df.drop(columns="contract", errors="ignore")
             ts = df["ts"].to_numpy()
             df["contract"] = parse_contract(symbol, near=_near(ts)).code
-        return df
+        return df, {"ts_is": "open", "zone": "utc"}
     if preset == "tradingview":
         ts, data = _read_tradingview(path, ts_is, tz, ts_format)
+        info = {"ts_is": ts_is or "open", "zone": _ts_kind(data["time"])}
     elif preset == "ninjatrader":
         ts, data = _read_ninjatrader(path, ts_is)
+        info = {"ts_is": ts_is or "close", "zone": "utc"}
     else:
         ts, data = _read_generic(path, columns, ts_is, tz, ts_format)
-    return _finish(ts, data, Path(path).name, _contract(symbol, path, ts))
+        info = {"ts_is": ts_is, "zone": _ts_kind(data["ts"])}
+    return _finish(ts, data, Path(path).name, _contract(symbol, path, ts)), info
 
 
 def load_csv_contracts(path: str, preset: str = "databento", **kw) -> dict[str, pd.DataFrame]:
