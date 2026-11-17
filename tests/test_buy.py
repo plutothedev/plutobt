@@ -563,9 +563,8 @@ def test_assemble_refuses_data_not_held(tmp_path):
 def test_plutobt_imports_without_databento():
     import importlib.util
 
-    mods = ["plutobt", "plutobt.buy"]
-    if importlib.util.find_spec("plutobt.cli") is not None:   # Task 7 adds the CLI
-        mods.append("plutobt.cli")
+    mods = ["plutobt", "plutobt.buy", "plutobt.cli"]
+    assert importlib.util.find_spec("plutobt.cli") is not None
     code = ("import sys; sys.modules['databento'] = None; "
             f"import {', '.join(mods)}; "
             "assert sys.modules['databento'] is None")

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "plutobt"
-version = "3.0.3"
+version = "3.1.0"
 description = "Hybrid futures backtesting engine"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -16,7 +16,11 @@ dependencies = [
     "matplotlib==3.8.4",
 ]
 
+[project.scripts]
+plutobt = "plutobt.cli:main"
+
 [project.optional-dependencies]
+databento = ["databento==0.84.0"]
 dev = [
     "pytest==8.2.0",
     "ruff==0.4.4",
