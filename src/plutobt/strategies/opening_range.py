@@ -63,15 +63,17 @@ class OpeningRange(Strategy):
         # Expanding mode of the same-day gaps (ties go to the smaller gap).
         sizes = np.unique(gap[gap > 0])
         bar_secs = np.zeros(len(ts), dtype="float64")
-        if sizes.size:
-            counts = np.stack([np.cumsum(gap == v) for v in sizes])
-            best = counts.argmax(axis=0)
-            bar_secs = np.where(counts.max(axis=0) > 0, sizes[best], 0).astype("float64")
+        best_count = np.zeros(len(ts), dtype="int64")
+        for v in sizes:  # ascending, strict > : a tie keeps the smaller gap
+            count = np.cumsum(gap == v)
+            better = count > best_count
+            bar_secs = np.where(better, float(v), bar_secs)
+            best_count = np.where(better, count, best_count)
         df["bar_secs"] = bar_secs
-        if bar_secs[-1] > self.range_minutes * 60:
+        if bar_secs.max() > self.range_minutes * 60:
             raise ValueError(
                 f"opening_range needs bars of {self.range_minutes} minutes or less; "
-                f"these are {int(round(bar_secs[-1] / 60))}-minute bars"
+                f"these are {int(round(bar_secs.max() / 60))}-minute bars"
             )
         return df
 

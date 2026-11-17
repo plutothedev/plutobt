@@ -54,8 +54,12 @@ def test_orb_buys_break_above_range_with_stop_at_low():
     assert t.side == "long" and t.contracts == 1
     assert t.entry_ts == int(ts[7])      # signal on the 09:00 bar, fill at the next open
     assert t.exit_ts == int(ts[10])
-    assert abs(t.exit_price - 99.5) <= 0.5   # the range low, not the bar low (99.25)
-    assert t.exit_price > 99.25 - 1e-9 and t.r_multiple < 0
+    # bar 10 opens at 99.75, above the stop at the range low (99.5), so the stop is not
+    # gapped through: it fills at 99.5 less one tick of slippage. A stop at the range
+    # high (100.5) would gap-fill at the open (99.75) less a tick instead.
+    assert t.exit_price == pytest.approx(99.25)
+    assert t.r_multiple == pytest.approx(
+        (t.exit_price - t.entry_price) / (t.entry_price - 99.5))
 
 
 def test_orb_short_stop_at_range_high():
@@ -66,7 +70,9 @@ def test_orb_short_stop_at_range_high():
     res = _run(df, OpeningRange(), allow_short=True)
     t = res.trades[0]
     assert t.side == "short"
-    assert abs(t.exit_price - 100.5) <= 0.5 and t.exit_price < 100.75 + 1e-9
+    assert t.exit_price == pytest.approx(100.75)  # the range high plus one tick
+    assert t.r_multiple == pytest.approx(
+        (t.entry_price - t.exit_price) / (100.5 - t.entry_price))
 
 
 def test_orb_range_includes_the_first_bar_of_the_frame():
@@ -144,6 +150,17 @@ def test_orb_refuses_hourly_bars_with_one_stray_short_gap():
     df = _frame(np.array(ts, dtype="int64"), np.full(len(ts), 100.0))
     with pytest.raises(ValueError, match="60-minute bars"):
         _run(df, OpeningRange())
+
+
+def test_orb_refuses_an_hourly_first_day_then_5m_days_with_the_plain_message():
+    hts = _day_ts("2024-03-04", step=60, end="14:30")
+    hourly = _frame(hts, np.full(len(hts), 100.0))
+    df = pd.concat([hourly, _orb_day("2024-03-05"), _orb_day("2024-03-06")],
+                   ignore_index=True)
+    with pytest.raises(ValueError) as exc:
+        _run(df, OpeningRange())
+    assert "prefix" not in str(exc.value)
+    assert "30 minutes or less; these are 60-minute bars" in str(exc.value)
 
 
 def test_orb_refuses_bars_longer_than_range():
