@@ -108,6 +108,90 @@ def test_missing_index_with_no_data_is_empty(tmp_path):
     assert Store(tmp_path / "nope").held(S, C) == []
 
 
+def test_csv_without_index_is_held_nothing_and_add_merges(tmp_path):
+    st = Store(tmp_path)
+    st.add(S, C, date(2026, 1, 1), date(2026, 1, 3), _bars(date(2026, 1, 1), date(2026, 1, 3)))
+    (tmp_path / "index.json").unlink()
+    st = Store(tmp_path)
+    assert st.held(S, C) == []
+    got = st.missing(S, C, date(2026, 1, 1), date(2026, 1, 3))
+    assert got == [(date(2026, 1, 1), date(2026, 1, 3))]
+    st.add(S, C, date(2026, 1, 2), date(2026, 1, 4), _bars(date(2026, 1, 2), date(2026, 1, 4)))
+    assert st.held(S, C) == [(date(2026, 1, 2), date(2026, 1, 4))]
+    assert len(st.frame(S, C, date(2026, 1, 2), date(2026, 1, 4))) == 48
+
+
+def test_index_exists_before_csv_is_written(tmp_path, monkeypatch):
+    import plutobt.store as m
+    seen = []
+    orig = m._atomic_write
+
+    def spy(path, writer):
+        seen.append((path.name, (tmp_path / "index.json").exists()))
+        return orig(path, writer)
+    monkeypatch.setattr(m, "_atomic_write", spy)
+    f = _bars(date(2026, 1, 1), date(2026, 1, 2))
+    Store(tmp_path).add(S, C, date(2026, 1, 1), date(2026, 1, 2), f)
+    assert seen[0] == ("index.json", False)
+    assert seen[1] == (f"{C}.csv", True)
+
+
+def test_add_refuses_bad_range_and_out_of_range_bars(tmp_path):
+    st = Store(tmp_path)
+    f = _bars(date(2026, 1, 1), date(2026, 1, 3))
+    with pytest.raises(ValueError):
+        st.add(S, C, date(2026, 1, 3), date(2026, 1, 3), f)
+    with pytest.raises(ValueError):
+        st.add(S, C, date(2026, 1, 1), date(2026, 1, 2), f)
+    with pytest.raises(ValueError):
+        st.add(S, C, date(2026, 1, 2), date(2026, 1, 4), f)
+    assert st.held(S, C) == []
+
+
+def test_add_refuses_milliseconds(tmp_path):
+    f = _bars(date(2026, 1, 1), date(2026, 1, 2))
+    f["ts"] = f["ts"] * 1000
+    with pytest.raises(ValueError, match="unix seconds"):
+        Store(tmp_path).add(S, C, date(2026, 1, 1), date(2026, 1, 2), f)
+
+
+def test_empty_frame_accepted_and_marks_coverage(tmp_path):
+    st = Store(tmp_path)
+    st.add(S, C, date(2026, 1, 1), date(2026, 1, 2), _bars(date(2026, 1, 1), date(2026, 1, 1)))
+    assert st.held(S, C) == [(date(2026, 1, 1), date(2026, 1, 2))]
+    assert len(st.frame(S, C, date(2026, 1, 1), date(2026, 1, 2))) == 0
+
+
+def test_frame_refuses_uncovered_range(tmp_path):
+    st = Store(tmp_path)
+    st.add(S, C, date(2026, 1, 1), date(2026, 1, 3), _bars(date(2026, 1, 1), date(2026, 1, 3)))
+    with pytest.raises(ValueError, match="NQH2026"):
+        st.frame(S, C, date(2026, 1, 1), date(2026, 1, 5))
+
+
+def test_frame_refuses_when_csv_gone(tmp_path):
+    st = Store(tmp_path)
+    st.add(S, C, date(2026, 1, 1), date(2026, 1, 3), _bars(date(2026, 1, 1), date(2026, 1, 3)))
+    (tmp_path / "GLBX.MDP3" / S / f"{C}.csv").unlink()
+    with pytest.raises(ValueError, match="file is missing"):
+        st.frame(S, C, date(2026, 1, 1), date(2026, 1, 3))
+
+
+def test_contract_case_is_one_entry(tmp_path):
+    st = Store(tmp_path)
+    f = _bars(date(2026, 1, 1), date(2026, 1, 2))
+    st.add(S, "nqh2026", date(2026, 1, 1), date(2026, 1, 2), f)
+    assert st.held(S, C) == [(date(2026, 1, 1), date(2026, 1, 2))]
+    assert (tmp_path / "GLBX.MDP3" / S / "NQH2026.csv").exists()
+
+
+def test_name_whitelist_and_reserved(tmp_path):
+    st = Store(tmp_path)
+    for bad in (".hidden", "CON", "nul", "com1", "LPT9", "a b", "a:b", "NQ*", "con.txt"):
+        with pytest.raises(ValueError):
+            st.held(S, bad)
+
+
 def test_path_separators_refused(tmp_path):
     st = Store(tmp_path)
     for bad in ("../x", "a/b", "a" + chr(92) + "b", ".."):
