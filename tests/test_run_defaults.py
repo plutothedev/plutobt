@@ -42,3 +42,13 @@ def test_bars_per_year_daily():
     ts = pd.date_range("2026-01-05 21:00", periods=10, freq="B", tz="UTC")
     df = pd.DataFrame({"ts": (ts.astype("int64") // 10**9).astype("int64")})
     assert bars_per_year(df) == 252.0
+
+
+def test_bars_per_year_empty_frame_refused():
+    with pytest.raises(ValueError, match="at least one bar"):
+        bars_per_year(pd.DataFrame({"ts": pd.Series([], dtype="int64")}))
+
+
+def test_cost_label_text():
+    from plutobt.run_defaults import COST_LABEL
+    assert COST_LABEL == "representative public retail costs, not a live account"
