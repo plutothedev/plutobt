@@ -570,3 +570,30 @@ def test_plutobt_imports_without_databento():
             "assert sys.modules['databento'] is None")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_failure_inside_get_range_still_warns_of_a_possible_bill(tmp_path):
+    m, c, st, q = nq_quote(tmp_path)
+    m.fail_get_range = {1: RuntimeError("connection reset")}
+    with pytest.raises(B.BuyError) as ei:
+        B.buy(c, q, q.price_usd, st)
+    assert "Databento may have billed NQH2024" in str(ei.value)
+    assert "billing page" in str(ei.value)
+
+
+@pytest.mark.parametrize("where", ["partial", "not_found"])
+def test_quote_refuses_a_partly_mapped_root_before_pricing(tmp_path, where):
+    m = fake.nq_market()
+    c = client(m)
+    real = c.symbology.resolve
+
+    def resolve(**kw):
+        answer = real(**kw)
+        answer[where] = ["NQ.v.0"]
+        return answer
+
+    c.symbology.resolve = resolve
+    with pytest.raises(B.BuyError, match="Databento could not map NQ for part of that range; "
+                                         "nothing was priced or bought."):
+        B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert m.count("get_cost") == 0

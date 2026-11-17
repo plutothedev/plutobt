@@ -281,6 +281,16 @@ def _front_spans(answer, root: str, keys: list[str]) -> list[list]:
     return sorted(spans.values(), key=lambda span: span[0])
 
 
+def _unmapped(answer, symbol: str) -> bool:
+    """True when symbology.resolve lists ``symbol`` as not found, or found for only part
+    of the range (``partial``)."""
+    try:
+        listed = [*(answer.get("not_found") or []), *(answer.get("partial") or [])]
+    except Exception:
+        return False
+    return symbol in [str(x) for x in listed]
+
+
 def quote(client, root: str, bars: str, start: date, end: date, store: Store) -> Quote:
     """Price ``root`` ``bars`` bars over [start, end) without buying anything."""
     root = _check_request(root, bars, start, end)
@@ -303,6 +313,9 @@ def quote(client, root: str, bars: str, start: date, end: date, store: Store) ->
                    stype_in="continuous", stype_out="raw_symbol",
                    start_date=start.isoformat(), end_date=end.isoformat())
     spans = _front_spans(answer, root, keys)
+    if spans and _unmapped(answer, f"{root}.v.0"):
+        raise BuyError(f"Databento could not map {root} for part of that range; nothing "
+                       "was priced or bought.")
     if not spans:
         raise BuyError(f"Databento lists no {root} front contract between {start} and {end} "
                        "(end not included); nothing was charged.")
@@ -414,12 +427,14 @@ def buy(client, q: Quote, approved_usd: float, store: Store, *,
     saved: list[Piece] = []
     for p in q.pieces:
         message = None
-        paid = False
+        # Set before the call: a call that raised (a timeout, a dropped connection) may
+        # still have been billed, so the caveat goes with every failure from here on.
+        called = False
         try:
+            called = True
             data = client.timeseries.get_range(
                 dataset=DATASET, symbols=[p.raw_symbol], schema=schema,
                 start=p.start.isoformat(), end=p.end.isoformat(), stype_in="raw_symbol")
-            paid = True
             frame = _engine_frame(data.to_df(price_type="float"), p)
             store.add(schema, p.contract, p.start, p.end, frame)
         except Exception as exc:
@@ -429,7 +444,7 @@ def buy(client, q: Quote, approved_usd: float, store: Store, *,
                       if saved else "Before the failure nothing was saved.")
             billed = (f" Databento may have billed {_label(p)} although its bars were not "
                       "saved; your Databento billing page shows the exact charge."
-                      if paid else "")
+                      if called else "")
             raise BuyError(_redact(
                 f"Buying {_label(p)} failed: {message}. {before}{billed} Nothing was "
                 "retried. Run the command again: it quotes only what is still missing.",
