@@ -42,11 +42,13 @@ def test_readme_cli_examples_parse():
 
 def test_readme_has_the_required_sentences():
     text = README.read_text(encoding="utf-8")
-    for s in ("pip install plutobt[databento]",
+    for s in ("pip install -e \".[databento]\"",
               "Data you buy is yours under your Databento terms; do not share it.",
               "Bought data is kept in ~/.plutobt/data on your computer. Never commit or "
               "share that folder.",
               "representative public retail costs, not a live account"):
         assert s in text, s
+    assert not [ln for ln in text.splitlines() if "pip install plutobt" in ln]
+    assert "not published on PyPI" in text
     for title in SECTIONS:
         assert chr(0x2014) not in _section(text, title)

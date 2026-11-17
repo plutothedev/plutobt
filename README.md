@@ -130,9 +130,10 @@ What it does not do, stated plainly:
 pip install -e ".[dev]"
 ```
 
-From a clone, `pip install -e .` also gives you the `plutobt` command (or use
-`python -m plutobt`). Buying data from Databento needs one extra, and only for that:
-`pip install plutobt[databento]`. The plain install stays offline. See "Run without
+PlutoBT installs from a clone of this repo; it is not published on PyPI. `pip install -e .`
+gives you the `plutobt` command (or use `python -m plutobt`). Buying data from Databento
+needs one extra, and only for that: `pip install -e ".[databento]"`. The plain install
+stays offline. See "Run without
 code" and "Buying data from Databento".
 
 Requires Python 3.11 or 3.12: the pinned numpy, pandas and matplotlib have no builds for
@@ -269,12 +270,16 @@ with its first lines.
 
 ## Run without code
 
-No Python needed. Install once, then type one command and get a report, a chart and a
+No Python code needed. Install once, then type one command and get a report, a chart and a
 line in your ledger. Every number it prints is in-sample: it describes the past you ran
 it on and predicts nothing.
 
+PlutoBT is not published on PyPI. Install it from a clone of this repo (the steps are in
+"Install" above):
+
 ```
-pip install plutobt
+pip install -r requirements.lock
+pip install -e . --no-deps
 plutobt strategies
 plutobt run --strategy donchian --data NQZ2025.csv --symbol NQ --preset tradingview
 ```
@@ -297,7 +302,7 @@ Costs, hours, strategy settings and the rest:
 ```
 plutobt run --strategy donchian --set entry_bars=30 --data NQZ2025.csv --symbol NQ --preset tradingview
 plutobt run --strategy opening_range --data NQZ2025.csv --symbol NQ --preset tradingview --session all
-plutobt run --strategy ema_cross --data bars.csv --symbol ES --preset generic --ts-is open --tz America/Chicago --allow-short
+plutobt run --strategy donchian --data bars.csv --symbol ES --preset generic --ts-is open --tz America/Chicago --allow-short
 plutobt run --strategy donchian --data NQZ2025.csv --symbol NQ --preset tradingview --config my_costs.toml --no-ledger
 plutobt run --strategy my_strategy.py:MyStrategy --data NQZ2025.csv --symbol NQ --preset tradingview
 ```
@@ -307,7 +312,8 @@ folder you name with `--chart-dir`), and one line in the ledger (`--no-ledger` s
 
 **Costs.** A run never uses $0 commission. Without `--config` it uses default costs per
 instrument: for example NQ and ES $2.50 a side and 1 tick of slippage, MNQ and MES $0.75
-and 1 tick, CL $3.50 and 3 ticks, GC $3.50 and 2 ticks. They are labelled in the report "representative public retail costs, not a live account". They sit between the per-side
+and 1 tick, CL $3.50 and 3 ticks, GC $3.50 and 2 ticks. They are labelled in the report
+"representative public retail costs, not a live account". They sit between the per-side
 figures published on the TopstepX commissions and fees page (retrieved 2026-11-16, page
 dated 2026-09-30,
 https://intercom.help/topstep-llc/en/articles/8284213-topstepx-commissions-and-fees) and
@@ -346,7 +352,7 @@ same bars, the more the report discounts the best one.
 Buying is optional. Install the extra only if you want it:
 
 ```
-pip install plutobt[databento]
+pip install -e ".[databento]"
 ```
 
 Data you buy is yours under your Databento terms; do not share it.
