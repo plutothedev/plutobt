@@ -21,6 +21,9 @@ Everything is **futures-accurate, not stock-approximate**:
   ```
   The golden run (`configs/golden_expected.json`) pins that hash, and `pytest` checks it.
 
+## Run it without code
+If you do not write Python, install the package and use the `plutobt` command: `plutobt strategies` lists three built-in strategies, and `plutobt run --strategy donchian --data NQZ2025.csv --symbol NQ --preset tradingview` backtests one on your own CSV, with default costs that are never zero, a report, a chart and a ledger line. `plutobt run --buy NQ ...` can also buy Databento bars on your own account, but only after it shows the price and you say yes. Start with the README sections "Run without code" and "Buying data from Databento". Every result is in-sample.
+
 ## 4. Repo map
 ```
 plutobt/

@@ -130,6 +130,11 @@ What it does not do, stated plainly:
 pip install -e ".[dev]"
 ```
 
+From a clone, `pip install -e .` also gives you the `plutobt` command (or use
+`python -m plutobt`). Buying data from Databento needs one extra, and only for that:
+`pip install plutobt[databento]`. The plain install stays offline. See "Run without
+code" and "Buying data from Databento".
+
 Requires Python 3.11 or 3.12: the pinned numpy, pandas and matplotlib have no builds for
 3.13, so pip refuses to install there. The dev extra adds pytest and ruff.
 
@@ -261,6 +266,129 @@ all parse.
 The Databento column order and the TradingView header are read by name because the
 vendors do not document them exactly; if a real export does not load, open an issue
 with its first lines.
+
+## Run without code
+
+No Python needed. Install once, then type one command and get a report, a chart and a
+line in your ledger. Every number it prints is in-sample: it describes the past you ran
+it on and predicts nothing.
+
+```
+pip install plutobt
+plutobt strategies
+plutobt run --strategy donchian --data NQZ2025.csv --symbol NQ --preset tradingview
+```
+
+From a clone of this repo, `pip install -e .` gives you the same `plutobt` command, and
+`python -m plutobt` works wherever the package is importable. The plain install is
+offline: it never contacts Databento or anything else.
+
+`plutobt run` takes exactly one data source:
+
+- `--data FILE` is one contract's bars from a CSV (the presets are in "Your own data":
+  `--preset databento|tradingview|ninjatrader|generic`; `generic` also needs `--ts-is open`
+  or `--ts-is close`, and a file with no time zone needs `--tz`).
+- `--continuous FILE` is a series built by `python -m plutobt.continuous`.
+- `--buy ROOT` buys Databento bars on your own account (next section).
+
+`--data` and `--continuous` also need `--symbol` (NQ, MNQ, ES, MES, YM, RTY, CL, GC or ZN).
+Costs, hours, strategy settings and the rest:
+
+```
+plutobt run --strategy donchian --set entry_bars=30 --data NQZ2025.csv --symbol NQ --preset tradingview
+plutobt run --strategy opening_range --data NQZ2025.csv --symbol NQ --preset tradingview --session all
+plutobt run --strategy ema_cross --data bars.csv --symbol ES --preset generic --ts-is open --tz America/Chicago --allow-short
+plutobt run --strategy donchian --data NQZ2025.csv --symbol NQ --preset tradingview --config my_costs.toml --no-ledger
+plutobt run --strategy my_strategy.py:MyStrategy --data NQZ2025.csv --symbol NQ --preset tradingview
+```
+
+What you get: the report on screen, an equity chart (a PNG in `plutobt_runs`, or the
+folder you name with `--chart-dir`), and one line in the ledger (`--no-ledger` skips it).
+
+**Costs.** A run never uses $0 commission. Without `--config` it uses default costs per
+instrument: for example NQ and ES $2.50 a side and 1 tick of slippage, MNQ and MES $0.75
+and 1 tick, CL $3.50 and 3 ticks, GC $3.50 and 2 ticks. They are labelled in the report "representative public retail costs, not a live account". They sit between the per-side
+figures published on the TopstepX commissions and fees page (retrieved 2026-11-16, page
+dated 2026-09-30,
+https://intercom.help/topstep-llc/en/articles/8284213-topstepx-commissions-and-fees) and
+the Tradeify trading commission fees page (retrieved 2026-11-16, page dated 2026-10-17,
+round turn halved,
+https://intercom.help/tradeify/en/articles/10468315-trading-commission-fees). The full
+table, with each published range, is in `src/plutobt/run_defaults.py`. To use your own,
+pass `--config my_costs.toml`; `configs/nq.toml` shows the format. `--allow-short` has no
+effect with `--config`: set `allow_short` in the file.
+
+**Hours.** Regular trading hours only by default. `--session all` keeps the full day.
+Daily bars are never filtered. The bars-per-year figure the report needs for its
+annualised numbers is measured from your bars (252 times the median bars per trading
+day), never assumed.
+
+**The three built-in strategies.** `plutobt strategies` lists them with their settings;
+change one with `--set NAME=VALUE`. Each default comes from a published source and was
+not tuned on any data.
+
+| Name | Settings | Source |
+|------|----------|--------|
+| `ema_cross` | `fast_span = 20`, `slow_span = 50`, `stop_ticks = 20.0` | Fast/slow EMA crossover (long only), the example strategy in this repo. |
+| `opening_range` | `range_minutes = 30` | The concept is from Toby Crabel, "Day Trading with Short Term Price Patterns and Opening Range Breakout" (1990). The 30-minute window is a common convention, not Crabel's rule; lengths of 5, 15, 30 and 60 minutes are compared in Zarattini, Barbon and Aziz, "A Profitable Day Trading Strategy For The U.S. Equity Market" (2024, SSRN 4729284). |
+| `donchian` | `entry_bars = 20`, `exit_bars = 10` | Curtis Faith, "Way of the Turtle" (2007), System 1: a 20-day breakout entry and a 10-day opposite-breakout exit, applied here to bars. The original rule that skips an entry after a winning System 1 trade is left out. |
+
+Opening range closes each day by the regular-session close. On a CME early-close day (the
+day after Thanksgiving, for example), or when the bar before the close is missing, it can
+hold past that day's close.
+
+Every result is in-sample and not predictive. Each run is one try in the ledger (see
+"The ledger" under "Did you overfit?"), so the more settings and strategies you run on the
+same bars, the more the report discounts the best one.
+
+## Buying data from Databento
+
+Buying is optional. Install the extra only if you want it:
+
+```
+pip install plutobt[databento]
+```
+
+Data you buy is yours under your Databento terms; do not share it.
+
+Bought data is kept in ~/.plutobt/data on your computer. Never commit or share that folder.
+
+**The key.** Set `DATABENTO_API_KEY` in your own environment. PlutoBT reads it from there
+only and never saves it, prints it or writes it to a report or a ledger line. In Windows
+PowerShell, for the current window:
+
+```
+$env:DATABENTO_API_KEY = "your-key-here"
+```
+
+On macOS or Linux: `export DATABENTO_API_KEY="your-key-here"`. Use your own key, from
+your Databento account.
+
+**What you can buy.** CME futures on the `GLBX.MDP3` dataset: NQ, MNQ, ES, MES, YM, RTY,
+CL, GC and ZN, as 1m, 1h or 1d bars. Dates are calendar days (UTC); the `--from` day is
+included and the `--to` day is not.
+
+```
+plutobt quote NQ --from 2024-01-02 --to 2024-02-01 --bars 1h
+plutobt fetch NQ --from 2024-01-02 --to 2024-02-01 --bars 1h --max-cost 5
+plutobt run --strategy donchian --buy NQ --from 2024-01-02 --to 2024-02-01 --bars 1h --max-cost 5
+```
+
+**How the money works.**
+
+- `plutobt quote` is free and charges nothing. It shows Databento's own price estimate.
+- `plutobt fetch` and `plutobt run --buy` show the price, then ask yes or no. They buy on
+  your own Databento account only on a yes. `--yes` answers for you in scripts.
+- The price is checked again right before buying. If it is different from the one you
+  said yes to, nothing is bought and you are told the new price.
+- `--max-cost 5` refuses any price above $5, even with `--yes`.
+- Data already on your computer is never bought again; a quote prices only what is missing.
+- The report states Databento's estimate at purchase. The exact charge is on your
+  Databento billing page.
+- A buy is never retried automatically.
+
+Bought bars are stitched into a continuous series across contract months by the rules in
+"Contract roll", and the regular-hours and cost defaults above apply.
 
 ## Contract roll
 
