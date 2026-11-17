@@ -14,7 +14,7 @@ import pytest
 
 from plutobt import buy as B
 from plutobt import cli
-from plutobt.store import Store
+from plutobt.store import COLUMNS, Store
 from tests import fake_databento as fake
 
 KEY = "db-test-not-a-key"
@@ -732,3 +732,99 @@ def test_cli_fetch_help_on_cp1252_with_a_non_cp1252_store(tmp_path):
                        capture_output=True, cwd=tmp_path, env=env)
     assert r.returncode == 0, r.stderr
     assert b"store_\\u56fe" in r.stdout and b"usage:" in r.stdout
+
+
+# -- offline series save: guarded, atomic, reproducing ------------------------------
+
+def _save_fails(monkeypatch):
+    def boom(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(cli, "_write_series_files", boom)
+
+
+def test_cli_fetch_survives_a_failed_series_save(market, answer, capsys, monkeypatch):
+    answer("y")
+    _save_fails(monkeypatch)
+    assert cli.main(["fetch", *QUOTE_ARGS]) == 0
+    cap = capsys.readouterr()
+    assert "Could not save the series for offline runs (" in cap.err
+    assert "run the same command again (no new charge)" in cap.err
+    assert "Series saved for offline runs" not in cap.out
+    assert "plutobt run " not in cap.out
+    cap.err.encode("ascii")
+
+
+def test_cli_run_buy_survives_a_failed_series_save(market, answer, capsys, monkeypatch):
+    answer("y")
+    _save_fails(monkeypatch)
+    assert cli.main(["run", "--strategy", "ema_cross", *BUY_ARGS]) == 0
+    cap = capsys.readouterr()
+    assert "Could not save the series for offline runs (" in cap.err
+    assert "IN-SAMPLE" in cap.out and "Chart: " in cap.out
+    assert "Series saved for offline runs" not in cap.out
+    assert "plutobt run " not in cap.out
+
+
+def test_cli_series_write_is_atomic(tmp_path, monkeypatch):
+    import pandas as pd
+    path = tmp_path / "s.csv"
+    df = pd.DataFrame({"ts": [1, 2], "x": [1.0, 2.0]})
+
+    class Meta:
+        def to_json(self):
+            return "{}"
+
+    real = os.replace
+    calls = []
+
+    def flaky(src, dst):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise OSError("disk went away")
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(OSError):
+        cli._write_series_files(df, Meta(), path)
+    assert not path.exists()
+    assert not path.with_name("s.roll.json").exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_series_write_failure_midway_leaves_nothing(tmp_path, monkeypatch):
+    import pandas as pd
+    path = tmp_path / "s.csv"
+    df = pd.DataFrame({c: [1] for c in COLUMNS})
+    monkeypatch.setattr(pd.DataFrame, "to_csv",
+                        lambda self, p, **kw: (Path(p).write_text("ts"), 1 / 0)[1])
+    with pytest.raises(ZeroDivisionError):
+        cli._write_series_files(df, None, path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_run_buy_offline_command_keeps_every_backtest_flag(market, answer, tmp_path,
+                                                               capsys):
+    answer("y")
+    cfg = tmp_path / "my configs" / "nq.toml"
+    cfg.parent.mkdir()
+    cfg.write_text(NQ_TOML.read_text(encoding="utf-8"), encoding="utf-8")
+    assert cli.main(["run", "--strategy", "ema_cross", *BUY_ARGS, "--set", "fast_span=5",
+                     "--config", str(cfg)]) == 0
+    out = capsys.readouterr().out
+    cmd = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("plutobt run ")]
+    assert len(cmd) == 1, out
+    assert "--set fast_span=5" in cmd[0]
+    assert f'--config "{cfg}"' in cmd[0]
+
+
+def test_cli_run_buy_offline_command_keeps_allow_short(market, answer, capsys):
+    answer("y")
+    assert cli.main(["run", "--strategy", "ema_cross", *BUY_ARGS, "--allow-short"]) == 0
+    out = capsys.readouterr().out
+    cmd = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("plutobt run ")]
+    assert len(cmd) == 1 and "--allow-short" in cmd[0], out
+
+
+def test_cli_run_buy_offline_command_quotes_a_set_value_with_spaces():
+    assert cli._run_flags(["a=b c", "d=1"], None, False) == ' --set "a=b c" --set d=1'
+    assert cli._run_flags([], Path("x y.toml"), True) == ' --config "x y.toml" --allow-short'

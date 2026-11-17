@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import math
+import os
 import re
 import sys
 import warnings
@@ -30,7 +31,7 @@ from plutobt.contracts import parse_contract
 from plutobt.importers import PRESETS, _load_csv
 from plutobt.instruments import get_instrument
 from plutobt.ledger import DEFAULT_PATH
-from plutobt.roll import load_continuous, save_continuous
+from plutobt.roll import _meta_path, load_continuous
 from plutobt.runner import run_backtest
 from plutobt.store import COLUMNS, Store, data_dir
 from plutobt.strategies.opening_range import OpeningRange
@@ -318,27 +319,73 @@ def _quoted(path: Path) -> str:
     return f'"{path}"'
 
 
+def _run_flags(sets, config, allow_short: bool) -> str:
+    """The flags of a run that shape its backtest, as text for the printed offline command."""
+    text = ""
+    for item in sets or []:
+        text += f' --set "{item}"' if any(c.isspace() for c in item) else f" --set {item}"
+    if config is not None:
+        text += f" --config {_quoted(Path(config))}"
+    if allow_short:
+        text += " --allow-short"
+    return text
+
+
+def _write_series_files(df, meta, path: Path) -> None:
+    """Write the CSV (and the .roll.json for a continuous series) through temp files in the
+    same folder, then move them into place, so an interrupted save never leaves a short
+    series behind that a later run would read without an error."""
+    tmp_csv = path.with_name(path.name + ".tmp")
+    tmp_json = None
+    try:
+        (df if meta is not None else df[COLUMNS]).to_csv(tmp_csv, index=False,
+                                                         lineterminator=chr(10))
+        if meta is not None:
+            final_json = Path(_meta_path(str(path)))
+            tmp_json = final_json.with_name(final_json.name + ".tmp")
+            tmp_json.write_text(meta.to_json(), encoding="utf-8")
+        os.replace(tmp_csv, path)
+        if tmp_json is not None:
+            try:
+                os.replace(tmp_json, final_json)
+            except BaseException:
+                path.unlink(missing_ok=True)  # a new CSV without its metadata is unusable
+                raise
+    except BaseException:
+        for tmp in (tmp_csv, tmp_json):
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+        raise
+
+
 def _save_series(q: _buy.Quote, df, meta, session: str, strategy: str, *,
-                 example: bool = False) -> Path:
+                 example: bool = False, run_flags: str = "") -> Path | None:
     """Save the assembled bars where ``plutobt run`` reads them without Databento or the
     key, and print the command that does. Two or more contracts: a continuous series
     and its .roll.json (``--continuous``). One contract: a plain CSV of bar opens in unix
-    seconds (``--data ... --preset generic --ts-is open``)."""
+    seconds (``--data ... --preset generic --ts-is open``). A failed save (a file open in
+    another program, a full disk) is a note, not an error: the bars are already bought."""
     hours = "all" if q.bars == "1d" else session
     folder = data_dir() / "series"
-    folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{q.root}_{q.bars}_{q.start}_{q.end}_{hours}.csv"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        _write_series_files(df, meta, path)
+    except OSError as exc:
+        _out(f"{PROG}: note: " + _plain(
+            f"Could not save the series for offline runs ({_message(exc)}). The bought bars "
+            "are still on this computer; close any program that has the file open and run "
+            "the same command again (no new charge)."), err=True)
+        return None
     if meta is not None:
-        save_continuous(df, meta, str(path))
         source = f"--continuous {_quoted(path)} --symbol {q.root}"
     else:
-        df[COLUMNS].to_csv(path, index=False, lineterminator=chr(10))
         source = (f"--data {_quoted(path)} --symbol {q.root} --preset generic --ts-is open"
                   + (" --session all" if hours == "all" and q.bars != "1d" else ""))
     _out(f"Series saved for offline runs: {path}")
     _out("Run a strategy on it again with no purchase and no key"
          + (" (any strategy; ema_cross shown):" if example else ":"))
-    _out(f"  plutobt run {source} --strategy {strategy}")
+    _out(f"  plutobt run {source} --strategy {strategy}{run_flags}")
     return path
 
 
@@ -468,7 +515,8 @@ def _cmd_run(a) -> int:
         if status != 0:
             return status
         df, meta = _buy.assemble(store, q, session=session)
-        _save_series(q, df, meta, session, a.strategy)
+        _save_series(q, df, meta, session, a.strategy,
+                     run_flags=_run_flags(a.set, a.config, a.allow_short))
         what = f"{q.root} {q.bars} {q.start} to {q.end}"
         if not q.pieces:
             note = (f"bought from Databento earlier, {what}: already on this computer, no "

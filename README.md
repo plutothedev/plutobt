@@ -421,7 +421,7 @@ series in the `series` folder of the data folder
 run on them again is printed. That run needs no Databento add-on, no key and no network:
 
 ```
-plutobt run --continuous ~/.plutobt/data/series/NQ_1h_2024-01-02_2024-02-01_rth.csv --symbol NQ --strategy donchian
+plutobt run --continuous ~/.plutobt/data/series/NQ_1h_2024-02-01_2024-04-01_rth.csv --symbol NQ --strategy donchian
 ```
 
 Two or more contracts are saved as a continuous series with its `.roll.json` (use
