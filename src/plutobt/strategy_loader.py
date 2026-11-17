@@ -63,6 +63,25 @@ def _load_module(path: str):
         raise StrategyLoadError(f"{path} could not be loaded as a Python file.")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    # The file's own folder goes first on sys.path while it runs, so a helper module
+    # kept next to it (``from my_helpers import x``) imports the way it does when the
+    # file is run as a script. It is taken out again only if this call put it there.
+    folder = os.path.dirname(abs_path)
+    added = not any(_same_path(p, folder) for p in sys.path if isinstance(p, str) and p)
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        _exec(spec, module, module_name, path)
+    finally:
+        if added:
+            try:
+                sys.path.remove(folder)
+            except ValueError:
+                pass
+    return module
+
+
+def _exec(spec, module, module_name: str, path: str) -> None:
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
@@ -76,7 +95,6 @@ def _load_module(path: str):
     except BaseException:
         sys.modules.pop(module_name, None)
         raise
-    return module
 
 
 def load_strategy(spec: str) -> type[Strategy]:

@@ -186,3 +186,35 @@ def test_float_rejects_nan_and_inf():
     for bad in ("nan", "inf", "-inf"):
         with pytest.raises(StrategyLoadError, match="stop_ticks expects a finite number"):
             parse_settings(EMACross, [f"stop_ticks={bad}"])
+
+
+def test_cli_loaded_and_imported_class_share_a_strategy_id(tmp_path, monkeypatch):
+    import importlib
+    folder = tmp_path / "pool"
+    folder.mkdir()
+    (folder / "pooled_strat.py").write_text(
+        "from plutobt.strategies.ema_cross import EMACross\n\n\n"
+        "class Pooled(EMACross):\n    pass\n", encoding="utf-8")
+    via_cli = load_strategy(str(folder / "pooled_strat.py"))
+    monkeypatch.syspath_prepend(str(folder))
+    imported = importlib.import_module("pooled_strat").Pooled
+    assert via_cli is not imported
+    assert strategy_id(via_cli) == strategy_id(imported) == "pooled_strat:Pooled"
+
+
+def test_a_strategy_file_can_import_a_sibling_helper(tmp_path):
+    folder = tmp_path / "with_helper"
+    folder.mkdir()
+    (folder / "sibling_helper_x.py").write_text("SPAN = 7\n", encoding="utf-8")
+    (folder / "uses_helper_x.py").write_text(
+        "from sibling_helper_x import SPAN\n"
+        "from plutobt.strategies.ema_cross import EMACross\n\n\n"
+        "class UsesHelper(EMACross):\n    fast_span: int = SPAN\n", encoding="utf-8")
+    before = list(sys.path)
+    cls = load_strategy(str(folder / "uses_helper_x.py"))
+    assert cls.fast_span == 7
+    assert sys.path == before
+    from plutobt.ledger import code_sha256
+    first = code_sha256(cls)
+    (folder / "sibling_helper_x.py").write_text("SPAN = 8\n", encoding="utf-8")
+    assert code_sha256(cls) != first   # the helper counts as a user module

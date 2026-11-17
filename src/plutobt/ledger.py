@@ -53,9 +53,19 @@ class LedgerError(ValueError):
     """The ledger cannot be read or written as it stands."""
 
 
+# The module-name prefix ``plutobt run`` gives a strategy file it loads by path
+# (strategy_loader). It is dropped from the identity so the same file's class is one
+# strategy whether the command loaded it or a script imported it by its plain name.
+_USER_PREFIX = "plutobt_user_"
+
+
 def strategy_id(cls: type) -> str:
-    """A strategy's identity in the ledger: ``<module>:<qualname>``."""
-    return f"{cls.__module__}:{cls.__qualname__}"
+    """A strategy's identity in the ledger: ``<module>:<qualname>``, with the
+    ``plutobt_user_`` prefix of a file loaded by ``plutobt run`` removed."""
+    module = cls.__module__
+    if module.startswith(_USER_PREFIX) and len(module) > len(_USER_PREFIX):
+        module = module[len(_USER_PREFIX):]
+    return f"{module}:{cls.__qualname__}"
 
 
 def _plain(name: str, value):
