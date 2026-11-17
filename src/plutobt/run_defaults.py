@@ -47,8 +47,26 @@ def default_config(symbol: str, *, periods_per_year: float,
 
 
 def bars_per_year(df: pd.DataFrame) -> float:
-    """252 times the median bars per CME trading day, measured on ``df``'s ``ts``."""
+    """Bars a year measured on ``df``'s ``ts`` (see ``measure_bars_per_year``)."""
+    return measure_bars_per_year(df)[0]
+
+
+def measure_bars_per_year(df: pd.DataFrame) -> tuple[float, str]:
+    """(bars a year, how it was measured), from ``df``'s ``ts``.
+
+    Intraday bars: 252 times the median bars per CME trading day. Daily or longer bars
+    (a median of one bar per trading day): 252 divided by the median gap between bars
+    counted in weekdays (Monday to Friday), at least one. Daily bars give 252, weekly bars
+    252 / 5 = 50.4, monthly bars about 12."""
     if len(df) == 0:
         raise ValueError("bars_per_year needs at least one bar")
-    per_day = pd.Series(1, index=_days(df["ts"].to_numpy())).groupby(level=0).sum()
-    return 252.0 * float(np.median(per_day.to_numpy()))
+    days = _days(df["ts"].to_numpy())
+    per_day = pd.Series(1, index=days).groupby(level=0).sum()
+    median = float(np.median(per_day.to_numpy()))
+    if median > 1 or len(per_day) < 2:
+        return 252.0 * median, "measured from these bars: median bars per trading day x 252"
+    d = np.asarray(per_day.index, dtype="datetime64[D]")
+    gaps = np.maximum(np.busday_count(d[:-1], d[1:]), 1)
+    gap = float(np.median(gaps))
+    return 252.0 / gap, (f"measured from these bars: 252 trading days a year / a median "
+                         f"gap of {gap:g} weekday(s) between bars")

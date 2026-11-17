@@ -8,6 +8,9 @@ from plutobt.data import CT
 from plutobt.roll import _DAY_SHIFT
 from plutobt.strategy import Context, Strategy
 
+# Trading days, each with a single bar, after which a frame is read as daily bars.
+_ONE_BAR_DAYS = 5
+
 
 def _minutes(hhmm: str) -> int:
     hours, minutes = hhmm.split(":")
@@ -38,6 +41,7 @@ class OpeningRange(Strategy):
 
     Bars must be ``range_minutes`` long or shorter: the bar size is the most common
     gap between consecutive bars of the same trading day, and a longer one is refused.
+    Daily or longer bars (five or more trading days of one bar each) are refused too.
 
     Causality: precompute adds only per-bar facts taken from the bars up to and
     including that bar (``ct_min`` minutes of day in Chicago, ``tday`` the CME trading
@@ -70,6 +74,15 @@ class OpeningRange(Strategy):
             bar_secs = np.where(better, float(v), bar_secs)
             best_count = np.where(better, count, best_count)
         df["bar_secs"] = bar_secs
+        # No two bars share a trading day across several days: daily (or longer) bars,
+        # where no opening range can form. A short frame is let through, because the
+        # look-ahead check runs this on the first rows alone, and a file can open with a
+        # lone bar or two before its intraday bars.
+        if len(ts) and bar_secs.max() == 0 and len(np.unique(day)) >= _ONE_BAR_DAYS:
+            raise ValueError(
+                f"opening_range needs bars of {self.range_minutes} minutes or less; these "
+                "bars are one per trading day (daily or longer)"
+            )
         if bar_secs.max() > self.range_minutes * 60:
             raise ValueError(
                 f"opening_range needs bars of {self.range_minutes} minutes or less; "

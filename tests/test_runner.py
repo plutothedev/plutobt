@@ -206,3 +206,35 @@ def test_roll_meta_frame_is_never_filtered(here, monkeypatch):
                        roll_meta=meta, session="rth", data_note="x", ledger=False,
                        chart_dir=here / "runs")
     assert len(out.result.equity_curve) == len(frame)
+
+
+# -- whole-branch review fixes (3.1) -----------------------------------------------
+
+def test_hours_line_names_the_window_it_filtered_on(df, here):
+    out = _run(df, here, ledger=False)
+    assert ("Hours: regular trading hours only (08:30-15:15 America/Chicago, by bar open "
+            "time)") in out.text
+
+
+def test_one_try_has_no_tries_line_more_name_deflate(df, here):
+    one = _run(df, here)
+    assert "python -m plutobt.deflate" not in one.text
+    out = run_backtest(df, "NQ", EMACross, {"fast_span": 5}, data_note="x",
+                       ledger=str(here / "trials.jsonl"), chart_dir=here / "runs")
+    assert out.tries == 2
+    line = [ln for ln in out.text.splitlines() if ln.startswith("This strategy has ")]
+    assert len(line) == 1
+    assert line[0].startswith("This strategy has 2 tries on these bars; the report above "
+                              "treats this run alone. To account for the tries: python -m "
+                              "plutobt.deflate --sharpe ")
+    assert "--periods-per-year 20412 --returns " in line[0] and line[0].endswith("--trials 2")
+
+
+def test_config_periods_per_year_far_from_the_bars_warns(df, here):
+    cfg = BacktestConfig(commission_per_side=1.0, slippage_ticks=1.0, periods_per_year=6804.0)
+    out = _run(df, here, config=cfg, cost_note="from my.toml", ledger=False)
+    assert ("WARNING: your config says 6804 bars per year; these bars measure 20412. The "
+            "Sharpe uses 6804.") in out.text
+    close = BacktestConfig(commission_per_side=1.0, slippage_ticks=1.0,
+                           periods_per_year=20412.0 * 1.15)
+    assert "WARNING: your config says" not in _run(df, here, config=close, ledger=False).text

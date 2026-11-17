@@ -215,3 +215,10 @@ def test_defaults_are_the_cited_ones():
 def test_loader_finds_both_builtins():
     assert load_strategy("opening_range").__name__ == "OpeningRange"
     assert load_strategy("donchian").__name__ == "Donchian"
+
+
+def test_orb_refuses_one_bar_per_day():
+    ts = pd.date_range("2024-03-04 21:00", periods=10, freq="B", tz="UTC")
+    df = _frame((ts.asi8 // 10**9).astype("int64"), np.full(10, 100.0))
+    with pytest.raises(ValueError, match="30 minutes or less"):
+        _run(df, OpeningRange())

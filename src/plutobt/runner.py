@@ -29,13 +29,15 @@ from plutobt.metrics import compute_metrics
 from plutobt.oos import _bar_sharpe
 from plutobt.report import format_report
 from plutobt.roll import RollMeta
-from plutobt.run_defaults import COST_LABEL, bars_per_year, default_config
+from plutobt.run_defaults import COST_LABEL, default_config, measure_bars_per_year
 from plutobt.strategy import Strategy
 from plutobt.strategy_loader import make_strategy
 
 # A bar interval of about a day or more. One hour is allowed off for a DST change.
 _DAILY_SECONDS = 86400 - 3600
 _SESSIONS = frozenset({"rth", "all", "as_built"})
+# A config's periods_per_year this far from the measured figure gets a warning line.
+_PPY_WARN = 0.20
 
 
 @dataclass
@@ -83,6 +85,17 @@ def _chart_path(chart_dir: Path, symbol: str, name: str) -> Path:
     return path
 
 
+def _tries_line(result: BacktestResult, tries: int, ppy: float) -> str:
+    """The plain line that points a trader with several tries at the deflation tool,
+    filled in with this run's own numbers."""
+    returns = len(result.equity_curve.pct_change().dropna())
+    sharpe = result.metrics.get("sharpe", float("nan"))
+    shown = f"{sharpe:.3f}" if np.isfinite(sharpe) else "<the Sharpe above>"
+    return (f"This strategy has {tries} tries on these bars; the report above treats this "
+            "run alone. To account for the tries: python -m plutobt.deflate --sharpe "
+            f"{shown} --periods-per-year {ppy:g} --returns {returns} --trials {tries}")
+
+
 def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], params: dict,
                  *, config: BacktestConfig | None = None, cost_note: str | None = None,
                  session: str = "rth", allow_short: bool = False,
@@ -111,12 +124,14 @@ def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], pa
     elif daily:
         hours = "Hours: daily bars, no session filter"
     elif session == "rth":
-        hours = "Hours: regular trading hours only"
+        hours = (f"Hours: regular trading hours only ({instrument.session_open_ct}-"
+                 f"{instrument.session_close_ct} America/Chicago, by bar open time)")
     else:
         hours = "Hours: full day (--session all)"
 
+    measured, measured_basis = measure_bars_per_year(df)
     from_config = config is not None and config.periods_per_year is not None
-    ppy = float(config.periods_per_year) if from_config else bars_per_year(df)
+    ppy = float(config.periods_per_year) if from_config else measured
     default_costs = config is None
     if config is None:
         config = default_config(symbol, periods_per_year=ppy, allow_short=allow_short)
@@ -140,8 +155,7 @@ def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], pa
     chart = _chart_path(chart_dir, symbol, name)
     _save_chart(result, chart, f"{symbol} {name} (in-sample)")
 
-    basis = ("from your config" if from_config else
-             "measured from these bars: median bars per trading day x 252")
+    basis = "from your config" if from_config else measured_basis
     if default_costs:
         costs = (f"Costs: default, {COST_LABEL}: ${config.commission_per_side:.2f}/side "
                  f"commission, {config.slippage_ticks:g} tick(s) slippage")
@@ -150,6 +164,12 @@ def run_backtest(df: pd.DataFrame, symbol: str, strategy_cls: type[Strategy], pa
     last = (f"Tries of this strategy on these bars: {tries} (ledger {led.path})"
             if led is not None else "Ledger: off")
     lines = [format_report(result, symbol), f"Data: {data_note}", hours,
-             f"Bars per year: {ppy:g} ({basis})", costs, last]
+             f"Bars per year: {ppy:g} ({basis})"]
+    if from_config and abs(ppy - measured) > _PPY_WARN * measured:
+        lines.append(f"WARNING: your config says {ppy:g} bars per year; these bars measure "
+                     f"{measured:g}. The Sharpe uses {ppy:g}.")
+    lines += [costs, last]
+    if tries is not None and tries > 1:
+        lines.append(_tries_line(result, tries, ppy))
     return RunOutcome(result=result, text="\n".join(lines), chart=chart, tries=tries,
                       periods_per_year=ppy, default_costs=default_costs)
