@@ -117,3 +117,72 @@ def test_parse_settings_bool_and_str():
 def test_make_strategy_sets_params():
     s = make_strategy(EMACross, {"fast_span": 7})
     assert isinstance(s, EMACross) and s.fast_span == 7 and s.slow_span == 50
+
+
+def _write(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+STRAT = "from plutobt.strategy import Strategy\n\n\nclass S(Strategy):\n    a: int = 1\n"
+
+
+def test_same_stem_different_folder_refused(tmp_path):
+    a = _write(tmp_path / "a" / "dupstem.py", STRAT)
+    b = _write(tmp_path / "b" / "dupstem.py", STRAT)
+    first = load_strategy(str(a))
+    with pytest.raises(StrategyLoadError, match="Another strategy file named dupstem.py"):
+        load_strategy(str(b))
+    assert Path(sys.modules[first.__module__].__file__).samefile(a)
+
+
+def test_syntax_error_file(tmp_path):
+    p = _write(tmp_path / "badsyntax_x.py", "def (:\n")
+    with pytest.raises(StrategyLoadError, match="failed while loading"):
+        load_strategy(str(p))
+    assert "plutobt_user_badsyntax_x" not in sys.modules
+
+
+def test_import_error_file_unregisters(tmp_path):
+    p = _write(tmp_path / "raises_x.py", "raise RuntimeError('boom')\n")
+    with pytest.raises(StrategyLoadError, match="boom"):
+        load_strategy(str(p))
+    assert "plutobt_user_raises_x" not in sys.modules
+
+
+def test_system_exit_at_import(tmp_path):
+    p = _write(tmp_path / "exits_x.py", "raise SystemExit(3)\n")
+    with pytest.raises(StrategyLoadError, match="exit"):
+        load_strategy(str(p))
+    assert "plutobt_user_exits_x" not in sys.modules
+
+
+def test_keyboard_interrupt_cleans_up_and_reraises(tmp_path):
+    p = _write(tmp_path / "interrupt_x.py", "raise KeyboardInterrupt\n")
+    with pytest.raises(KeyboardInterrupt):
+        load_strategy(str(p))
+    assert "plutobt_user_interrupt_x" not in sys.modules
+
+
+def test_path_with_spaces(tmp_path):
+    p = _write(tmp_path / "my folder" / "spaced_x.py", STRAT)
+    assert load_strategy(str(p)).__name__ == "S"
+
+
+def test_relative_path(tmp_path, monkeypatch):
+    _write(tmp_path / "rel_x.py", STRAT)
+    monkeypatch.chdir(tmp_path)
+    assert load_strategy("rel_x.py").__name__ == "S"
+    assert load_strategy("./rel_x.py:S").__name__ == "S"
+
+
+def test_uppercase_py_extension_with_class(tmp_path):
+    p = _write(tmp_path / "Upper_x.PY", STRAT)
+    assert load_strategy(f"{p}:S").__name__ == "S"
+
+
+def test_float_rejects_nan_and_inf():
+    for bad in ("nan", "inf", "-inf"):
+        with pytest.raises(StrategyLoadError, match="stop_ticks expects a finite number"):
+            parse_settings(EMACross, [f"stop_ticks={bad}"])

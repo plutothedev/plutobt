@@ -4,8 +4,10 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import math
 import os
 import sys
+from importlib.machinery import SourceFileLoader
 
 from plutobt.strategy import Strategy
 
@@ -47,8 +49,16 @@ def _load_module(path: str):
     if existing is not None:
         existing_file = getattr(existing, "__file__", None)
         if existing_file and _same_path(existing_file, abs_path):
+            # Same path again: the already-loaded class comes back even if the file changed
+            # since. Start a new run to pick up edits.
             return existing
-    spec = importlib.util.spec_from_file_location(module_name, abs_path)
+        raise StrategyLoadError(
+            f"Another strategy file named {stem}.py is already loaded from "
+            f"{existing_file or 'somewhere else'}; rename one of them."
+        )
+    spec = importlib.util.spec_from_file_location(
+        module_name, abs_path, loader=SourceFileLoader(module_name, abs_path)
+    )
     if spec is None or spec.loader is None:
         raise StrategyLoadError(f"{path} could not be loaded as a Python file.")
     module = importlib.util.module_from_spec(spec)
@@ -60,15 +70,21 @@ def _load_module(path: str):
         raise StrategyLoadError(
             f"{path} failed while loading: {type(exc).__name__}: {exc}"
         ) from exc
+    except SystemExit as exc:
+        sys.modules.pop(module_name, None)
+        raise StrategyLoadError(f"{path} tried to exit while loading (code {exc.code}).") from exc
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     return module
 
 
 def load_strategy(spec: str) -> type[Strategy]:
     """``spec`` is a built-in name, ``path.py`` or ``path.py:ClassName``."""
     path, class_name = spec, None
-    if ".py:" in spec:
-        path, class_name = spec.rsplit(".py:", 1)
-        path += ".py"
+    idx = spec.lower().rfind(".py:")
+    if idx != -1:
+        path, class_name = spec[: idx + 3], spec[idx + 4 :]
     if not path.lower().endswith(".py"):
         if spec in BUILTINS:
             return _load_builtin(spec)
@@ -134,9 +150,12 @@ def _convert(name: str, default: object, text: str) -> object:
             raise StrategyLoadError(f"{name} expects a whole number, not {text!r}.") from None
     if isinstance(default, float):
         try:
-            return float(text)
+            value = float(text)
         except ValueError:
             raise StrategyLoadError(f"{name} expects a number, not {text!r}.") from None
+        if not math.isfinite(value):
+            raise StrategyLoadError(f"{name} expects a finite number, not {text!r}.")
+        return value
     return text
 
 
