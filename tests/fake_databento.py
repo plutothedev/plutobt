@@ -45,6 +45,7 @@ class Listing:
     base: float
     tick: float
     instrument_id: int = 1
+    volume: int | None = None      # set: every bar has this volume (else front-weighted)
 
     @property
     def root(self) -> str:
@@ -75,11 +76,21 @@ class Market:
     def count(self, name: str) -> int:
         return sum(1 for n, _ in self.calls if n == name)
 
-    def listing(self, raw: str) -> Listing:
-        for li in self.listings:
-            if li.raw == raw:
-                return li
-        raise KeyError(raw)
+    def listing(self, raw: str, near: date | None = None) -> Listing:
+        """The listing with this raw symbol (GLBX reuses a one-digit-year symbol every
+        ten years, so ``near`` picks the one trading closest to that date)."""
+        found = [li for li in self.listings if li.raw == raw]
+        if not found:
+            raise KeyError(raw)
+        if near is None:
+            return found[0]
+        return min(found, key=lambda li: abs((li.front_from - near).days))
+
+    def listings_for(self, raw: str, start, end) -> list[Listing]:
+        """Listings with this raw symbol trading inside [start, end)."""
+        lo, hi = _day(start), _day(end)
+        return [li for li in self.listings
+                if li.raw == raw and li.trades_from < hi and lo < li.trades_to]
 
 
 def _day(value) -> date:
@@ -126,6 +137,8 @@ def make_bars(li: Listing, schema: str, start, end) -> pd.DataFrame:
     days = np.asarray(idx.date) if len(idx) else np.array([], dtype=object)
     front = np.array([li.front_from <= d < li.front_to for d in days], dtype=bool)
     vol = np.where(front, 1000, 50).astype(np.uint64)
+    if li.volume is not None:
+        vol = np.full(len(idx), li.volume, dtype=np.uint64)
     df = pd.DataFrame({
         "rtype": np.full(len(idx), _RTYPE[schema], dtype=np.uint8),
         "publisher_id": np.full(len(idx), 1, dtype=np.uint16),
@@ -225,8 +238,7 @@ class _Timeseries:
             raise m.fail_get_range[n]
         assert dataset == DATASET and schema in _STEP and stype_in == "raw_symbol"
         parts = []
-        for raw in symbols:
-            li = m.listing(raw)
+        for raw, li in [(r, li) for r in symbols for li in m.listings_for(r, start, end)]:
             df = make_bars(li, schema, start, end)
             if m.spread_rows and len(df):
                 # Calendar-spread rows at the same timestamps, ahead of the outright's.
@@ -237,6 +249,9 @@ class _Timeseries:
                     spread[col] = 3.333
                 parts.append(spread)
             parts.append(df)
+        if not parts:
+            parts.append(make_bars(Listing("X", date(1970, 1, 2), date(1970, 1, 3), 1.0,
+                                           1.0), schema, start, end))
         out = pd.concat(parts).sort_index(kind="stable")
         out.index.name = "ts_event"
         return FakeDBNStore(out, m)

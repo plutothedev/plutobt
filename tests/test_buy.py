@@ -55,17 +55,18 @@ def test_quote_sums_cost_per_piece_and_charges_nothing(tmp_path):
     assert m.count("get_range") == 0
     assert q.root == "NQ" and q.bars == "1h"
     assert (q.start, q.end, q.data_ends) == (date(2024, 2, 1), date(2024, 4, 1), None)
-    # Front H4 [2/1, 3/8) and M4 [3/8, 4/1), each padded 10 days both ways.
+    # Front H4 [2/1, 3/8) and M4 [3/8, 4/1): padded 10 days around the roll only;
+    # the outer edges stop at the requested start and end.
     assert q.pieces == (
-        B.Piece("NQH2024", "NQH4", date(2024, 1, 22), date(2024, 3, 18)),
-        B.Piece("NQM2024", "NQM4", date(2024, 2, 27), date(2024, 4, 11)),
+        B.Piece("NQH2024", "NQH4", date(2024, 2, 1), date(2024, 3, 18)),
+        B.Piece("NQM2024", "NQM4", date(2024, 2, 27), date(2024, 4, 1)),
     )
     assert q.held == ()
     costs = [kw for n, kw in m.calls if n == "get_cost"]
     assert len(costs) == 2
     assert costs[0] == dict(dataset="GLBX.MDP3", symbols=["NQH4"], schema=H1,
-                            start="2024-01-22", end="2024-03-18", stype_in="raw_symbol")
-    assert q.price_usd == pytest.approx(0.01 * (56 + 44))
+                            start="2024-02-01", end="2024-03-18", stype_in="raw_symbol")
+    assert q.price_usd == pytest.approx(0.01 * (46 + 34))
     res = [kw for n, kw in m.calls if n == "resolve"]
     assert res == [dict(dataset="GLBX.MDP3", symbols=["NQ.v.0"], stype_in="continuous",
                         stype_out="raw_symbol", start_date="2024-02-01",
@@ -113,7 +114,7 @@ def test_quote_refuses_a_range_past_the_data(tmp_path):
 
 def test_quote_window_never_runs_before_dataset_start(tmp_path):
     m = fake.nq_market(dataset_start="2024-01-25T00:00:00.000000000Z")
-    _, _, _, q = nq_quote(tmp_path, market=m)
+    _, _, _, q = nq_quote(tmp_path, market=m, start=date(2024, 1, 25))
     assert q.pieces[0].start == date(2024, 1, 25)
     with pytest.raises(B.BuyError, match="2024-01-25"):
         nq_quote(tmp_path, market=m, start=date(2024, 1, 20))
@@ -154,11 +155,61 @@ def test_partly_held_request_quotes_only_the_missing_piece(tmp_path):
     m, c, st, q = nq_quote(tmp_path, end=date(2024, 3, 1))
     B.buy(c, q, q.price_usd, st)
     q2 = B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), st)
-    assert q2.held == (B.Piece("NQH2024", "NQH4", date(2024, 1, 22), date(2024, 3, 11)),)
+    assert q2.held == (B.Piece("NQH2024", "NQH4", date(2024, 2, 1), date(2024, 3, 1)),)
     assert q2.pieces == (
-        B.Piece("NQH2024", "NQH4", date(2024, 3, 11), date(2024, 3, 18)),
-        B.Piece("NQM2024", "NQM4", date(2024, 2, 27), date(2024, 4, 11)),
+        B.Piece("NQH2024", "NQH4", date(2024, 3, 1), date(2024, 3, 18)),
+        B.Piece("NQM2024", "NQM4", date(2024, 2, 27), date(2024, 4, 1)),
     )
+
+
+def test_quote_tells_decade_reused_raw_symbols_apart(tmp_path):
+    # GLBX raw symbols carry a one-digit year: NQH4 is NQH2014 and NQH2024.
+    m = fake.Market([
+        fake.Listing("NQH4", date(2013, 12, 13), date(2014, 3, 14), 3500.0, 0.25, 1),
+        fake.Listing("NQM4", date(2014, 3, 14), date(2014, 6, 13), 3600.0, 0.25, 2),
+        fake.Listing("NQH4", date(2023, 12, 15), date(2024, 3, 8), 17000.0, 0.25, 3),
+    ])
+    c = client(m)
+    st = Store(tmp_path)
+    q = B.quote(c, "NQ", "1d", date(2014, 1, 2), date(2024, 3, 1), st)
+    assert q.pieces == (
+        B.Piece("NQH2014", "NQH4", date(2014, 1, 2), date(2014, 3, 24)),
+        B.Piece("NQM2014", "NQM4", date(2014, 3, 4), date(2014, 6, 23)),
+        B.Piece("NQH2024", "NQH4", date(2023, 12, 5), date(2024, 3, 1)),
+    )
+    B.buy(c, q, q.price_usd, st)
+    assert st.held("ohlcv-1d", "NQH2014") == [(date(2014, 1, 2), date(2014, 3, 24))]
+    assert st.held("ohlcv-1d", "NQH2024") == [(date(2023, 12, 5), date(2024, 3, 1))]
+    old = st.frame("ohlcv-1d", "NQH2014", date(2014, 1, 2), date(2014, 3, 24))
+    new = st.frame("ohlcv-1d", "NQH2024", date(2023, 12, 5), date(2024, 3, 1))
+    assert old["close"].between(3400, 3600).all() and len(old)
+    assert new["close"].between(16900, 17100).all() and len(new)
+
+
+def test_quote_skips_a_first_contract_rolled_out_before_the_start(tmp_path):
+    # Databento keeps H4 front until 3/13, past CME's calendar roll (3/11); a request
+    # starting 3/12 never uses H4 under the calendar rule, so it is not bought.
+    m = fake.Market([
+        fake.Listing("NQH4", date(2023, 12, 15), date(2024, 3, 13), 17000.0, 0.25, 1),
+        fake.Listing("NQM4", date(2024, 3, 13), date(2024, 6, 14), 17200.0, 0.25, 2),
+    ])
+    _, c, st, q = nq_quote(tmp_path, market=m, start=date(2024, 3, 12))
+    assert q.pieces == (B.Piece("NQM2024", "NQM4", date(2024, 3, 12), date(2024, 4, 1)),)
+    B.buy(c, q, q.price_usd, st)
+    df, meta = B.assemble(st, q, session="rth")
+    assert meta is None and df["ts"].iloc[0] >= _ts(date(2024, 3, 12))
+
+
+def test_outer_edges_buy_nothing_outside_the_request(tmp_path):
+    m, c, st, q = nq_quote(tmp_path)
+    B.buy(c, q, q.price_usd, st)
+    assert q.pieces[0].start == q.start and q.pieces[-1].end == q.end
+    for n, kw in m.calls:
+        if n in ("get_range", "get_cost"):
+            assert kw["start"] >= q.start.isoformat() and kw["end"] <= q.end.isoformat()
+    for p in q.pieces:
+        f = st.frame(H1, p.contract, p.start, p.end)
+        assert f["ts"].min() >= _ts(q.start) and f["ts"].max() < _ts(q.end)
 
 
 # -- buy -----------------------------------------------------------------------
@@ -191,13 +242,43 @@ def test_buy_with_no_pieces_calls_nothing(tmp_path):
     assert len(m.calls) == n
 
 
+def test_buying_the_same_quote_twice_buys_nothing_the_second_time(tmp_path):
+    m, c, st, q = nq_quote(tmp_path)
+    B.buy(c, q, q.price_usd, st)
+    n_range, n_cost = m.count("get_range"), m.count("get_cost")
+    with pytest.raises(B.BuyError) as ei:
+        B.buy(c, q, q.price_usd, st)
+    assert str(ei.value) == ("The data on this computer changed since the quote; quote "
+                             "again. Nothing was bought.")
+    assert (m.count("get_range"), m.count("get_cost")) == (n_range, n_cost)
+
+
+def test_store_filled_by_another_run_while_waiting_buys_nothing(tmp_path):
+    m, c, st, q = nq_quote(tmp_path)
+    other = B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 3, 1), Store(tmp_path))
+    B.buy(c, other, other.price_usd, Store(tmp_path))
+    n = m.count("get_range")
+    with pytest.raises(B.BuyError, match="changed since the quote"):
+        B.buy(c, q, q.price_usd, st)
+    assert m.count("get_range") == n
+
+
+def test_bad_price_text_is_redacted(tmp_path):
+    m = fake.nq_market(cost_fn=lambda kw: f"oops {KEY}")
+    with pytest.raises(B.BuyError) as ei:
+        nq_quote(tmp_path, market=m)
+    assert "***" in str(ei.value)
+    _no_key_anywhere(ei.value)
+
+
 def test_price_changed_buys_nothing(tmp_path):
     m, c, st, q = nq_quote(tmp_path)
     m.rate_per_day = 0.02
     with pytest.raises(B.PriceChanged) as ei:
         B.buy(c, q, q.price_usd, st)
-    assert ei.value.new_usd == pytest.approx(2.0)
-    assert "$2.00" in str(ei.value) and "Nothing was bought" in str(ei.value)
+    assert ei.value.new_usd == pytest.approx(2 * q.price_usd)
+    assert f"${2 * q.price_usd:.2f}" in str(ei.value)
+    assert "Nothing was bought" in str(ei.value)
     assert m.count("get_range") == 0
     assert st.held(H1, "NQH2024") == [] and st.held(H1, "NQM2024") == []
 
@@ -215,15 +296,15 @@ def test_price_within_half_a_cent_still_buys(tmp_path):
 def test_max_cost_checked_on_fresh_price(tmp_path):
     m, c, st, q = nq_quote(tmp_path)
     assert q.price_usd < 5
-    m.rate_per_day = 0.06                       # fresh price 6.00
-    with pytest.raises(B.PriceChanged) as ei:
-        B.buy(c, q, q.price_usd, st, max_cost=5)
-    # The trader says yes to the new price; --max-cost still refuses it.
-    with pytest.raises(B.BuyError,
-                       match=r"Databento price \$6\.00 is above --max-cost \$5\.00\. "
-                             r"Nothing was bought\.") as ei2:
-        B.buy(c, q, ei.value.new_usd, st, max_cost=5)
-    assert not isinstance(ei2.value, B.PriceChanged)
+    m.rate_per_day = 0.1                        # fresh price 8.00
+    # Refused by --max-cost first: the trader is never asked to approve a price that
+    # --max-cost would refuse anyway.
+    for approved in (q.price_usd, 8.0):
+        with pytest.raises(B.BuyError,
+                           match=r"Databento price \$8\.00 is above --max-cost \$5\.00\. "
+                                 r"Nothing was bought\.") as ei:
+            B.buy(c, q, approved, st, max_cost=5)
+        assert not isinstance(ei.value, B.PriceChanged)
     assert m.count("get_range") == 0
 
 
@@ -442,6 +523,27 @@ def test_assemble_volume_root_drops_a_last_contract_that_never_crossed(tmp_path)
     df, meta = B.assemble(st, q, session="rth")
     assert meta is None
     assert df["close"].between(71, 73).all()          # G4's prices, not H4's
+
+
+def test_assemble_refuses_a_series_that_would_stop_early(tmp_path):
+    # CLH4 never beats CLG4 by volume and G4's bars stop near 1/29: the series would end
+    # weeks before the requested end. Refuse, keeping what was bought.
+    m = fake.cl_market()
+    m.listing("CLH4").volume = 10
+    st, q = bought(tmp_path, market=m, root="CL", start=date(2024, 1, 2),
+                   end=date(2024, 2, 15))
+    with pytest.raises(B.BuyError, match="CLH2024 never took over from CLG2024") as ei:
+        B.assemble(st, q, session="all")
+    assert "kept" in str(ei.value)
+    assert st.held(H1, "CLH2024") != []
+
+
+def test_assemble_refuses_a_single_contract_that_does_not_cover_the_range(tmp_path):
+    st, q = bought(tmp_path, start=date(2024, 2, 1), end=date(2024, 3, 1))
+    # The same bought contract, asked for past what was bought.
+    short = B.Quote(q.root, q.bars, q.start, date(2024, 3, 5), (), q.pieces, 0.0, None)
+    with pytest.raises(B.BuyError, match="2024-03-01"):
+        B.assemble(st, short, session="all")
 
 
 def test_assemble_refuses_bad_session(tmp_path):

@@ -3,14 +3,16 @@
 The money path, in the order the ``plutobt`` command runs it:
 
 1. ``quote`` asks Databento (free calls only) which contract was the front month when,
-   works out each contract's window (its front-month days padded by ``PAD_DAYS`` both
-   ways, so neighbouring contracts overlap around every roll), takes away what the local
+   works out each contract's window (its front-month days padded by ``PAD_DAYS`` around
+   each roll so neighbouring contracts overlap there, never outside the requested
+   range), takes away what the local
    store already holds, and prices the rest with Databento's free cost lookup. Nothing is
    charged.
 2. The trader sees the price and says yes or no.
-3. ``buy`` prices the same pieces again right before buying. A price different from the
-   one the trader said yes to (by more than half a cent) buys nothing and raises
-   ``PriceChanged``; ``max_cost`` is checked against the fresh price too. Then each piece
+3. ``buy`` refuses a quote whose pieces the store already holds, then prices the same
+   pieces again right before buying. A fresh price above ``max_cost`` buys nothing; a
+   price different from the one the trader said yes to (by more than half a cent) buys
+   nothing and raises ``PriceChanged``. Then each piece
    is bought with one ``get_range`` call and saved to the store at once. A failure stops
    the buy, names what was already saved, and is never retried.
 4. ``assemble`` reads each contract back from the store and joins them into one
@@ -203,12 +205,16 @@ def _schema_range(client, schema: str, keys: list[str]) -> tuple[date, date]:
                    "PlutoBT cannot read; nothing was charged.")
 
 
-def _check_price(value, raw: str) -> float:
+def _check_price(value, raw: str, keys: list[str]) -> float:
     ok = (isinstance(value, int | float) and not isinstance(value, bool)
           and math.isfinite(float(value)) and float(value) >= 0)
     if not ok:
-        raise BuyError(f"Databento returned a price PlutoBT cannot use for {raw} "
-                       f"({value!r}); nothing was charged.")
+        try:
+            shown = repr(value)
+        except Exception:
+            shown = type(value).__name__
+        raise BuyError(_redact(f"Databento returned a price PlutoBT cannot use for {raw} "
+                               f"({shown}); nothing was charged.", keys))
     return float(value)
 
 
@@ -220,7 +226,7 @@ def _price(client, pieces, schema: str, keys: list[str]) -> float:
                       client.metadata.get_cost, dataset=DATASET, symbols=[p.raw_symbol],
                       schema=schema, start=p.start.isoformat(), end=p.end.isoformat(),
                       stype_in="raw_symbol")
-        total += _check_price(value, p.raw_symbol)
+        total += _check_price(value, p.raw_symbol, keys)
     return round(total, 6)
 
 
@@ -240,9 +246,13 @@ def _check_request(root, bars, start, end) -> str:
     return root
 
 
-def _front_spans(answer, root: str, keys: list[str]) -> dict[str, list]:
-    """{raw symbol: [Contract, first d0, last d1]} from a symbology.resolve answer
-    (d1 exclusive)."""
+def _front_spans(answer, root: str, keys: list[str]) -> list[list]:
+    """[Contract, raw symbol, first d0, last d1] per contract, in contract order, from a
+    symbology.resolve answer (d1 exclusive).
+
+    Grouped by the canonical contract, not the raw symbol: GLBX raw symbols carry a
+    one-digit year, so ``NQH4`` is NQH2014 in one interval and NQH2024 in another. Each
+    interval is read in its own decade (``parse_contract(raw, near=d0)``)."""
     spans: dict[str, list] = {}
     problem = None
     try:
@@ -253,21 +263,22 @@ def _front_spans(answer, root: str, keys: list[str]) -> dict[str, list]:
             d1 = date.fromisoformat(str(row["d1"])[:10])
             if d0 >= d1:
                 continue
-            if raw not in spans:
-                spans[raw] = [parse_contract(raw, near=d0), d0, d1]
+            con = parse_contract(raw, near=d0)
+            if con.code not in spans:
+                spans[con.code] = [con, raw, d0, d1]
             else:
-                spans[raw][1] = min(spans[raw][1], d0)
-                spans[raw][2] = max(spans[raw][2], d1)
+                spans[con.code][2] = min(spans[con.code][2], d0)
+                spans[con.code][3] = max(spans[con.code][3], d1)
     except Exception as exc:
         problem = _redact(_describe(exc), keys)
     if problem is not None:
         raise BuyError(f"Databento's front-month list for {root} could not be read "
                        f"({problem}); nothing was charged.")
-    for raw, (con, _, _) in spans.items():
+    for con, raw, _, _ in spans.values():
         if con.root != root:
             raise BuyError(f"Databento named {raw} as a {root} front contract; PlutoBT "
                            "will not buy a different root. Nothing was charged.")
-    return spans
+    return sorted(spans.values(), key=lambda span: span[0])
 
 
 def quote(client, root: str, bars: str, start: date, end: date, store: Store) -> Quote:
@@ -296,19 +307,25 @@ def quote(client, root: str, bars: str, start: date, end: date, store: Store) ->
         raise BuyError(f"Databento lists no {root} front contract between {start} and {end} "
                        "(end not included); nothing was charged.")
 
-    ordered = sorted(spans.items(), key=lambda kv: kv[1][0])
     if root in CALENDAR_ROOTS:
         # A contract CME's calendar rolls into only after the end date never trades
         # inside the range: buy the outgoing contract through the end instead.
-        while len(ordered) >= 2 and calendar_roll_day(ordered[-2][1][0]) > end:
-            dropped = ordered.pop()
-            ordered[-1][1][2] = max(ordered[-1][1][2], dropped[1][2])
+        while len(spans) >= 2 and calendar_roll_day(spans[-2][0]) > end:
+            spans.pop()
+        # Likewise a first contract CME's calendar rolled out of before the start date
+        # (Databento's volume-ranked front can lag the calendar by a day or two).
+        while len(spans) >= 2 and calendar_roll_day(spans[0][0]) < start:
+            spans.pop(0)
 
+    # Windows: the front-month days padded by PAD_DAYS around each roll so neighbours
+    # overlap there, but never outside the request: the first contract starts at the
+    # requested start and the last ends at the requested end.
     pieces: list[Piece] = []
     held: list[Piece] = []
     pad = timedelta(days=PAD_DAYS)
-    for raw, (con, d0, d1) in ordered:
-        w0, w1 = max(d0 - pad, first_day), min(d1 + pad, avail_end)
+    for i, (con, raw, d0, d1) in enumerate(spans):
+        w0 = start if i == 0 else max(d0 - pad, start)
+        w1 = end if i == len(spans) - 1 else min(d1 + pad, end)
         if w0 >= w1:
             continue
         for s, e in store.missing(schema, con.code, w0, w1):
@@ -362,9 +379,10 @@ def buy(client, q: Quote, approved_usd: float, store: Store, *,
         max_cost: float | None = None) -> None:
     """Buy ``q.pieces`` on the trader's Databento account, for ``approved_usd`` only.
 
-    Re-prices first: a fresh price more than half a cent from ``approved_usd`` raises
-    ``PriceChanged`` and buys nothing; a fresh price above ``max_cost`` raises BuyError
-    and buys nothing. Then one ``get_range`` per piece, each saved to ``store`` at once.
+    Refuses (buying nothing) a quote whose pieces the store no longer misses in full.
+    Then re-prices: a fresh price above ``max_cost`` raises BuyError, and a fresh price
+    more than half a cent from ``approved_usd`` raises ``PriceChanged``; both buy
+    nothing. Then one ``get_range`` per piece, each saved to ``store`` at once.
     A failure raises BuyError naming the pieces already saved; nothing is retried."""
     if not q.pieces:
         return
@@ -376,14 +394,22 @@ def buy(client, q: Quote, approved_usd: float, store: Store, *,
     schema = SCHEMAS[q.bars]
     keys = _keys(client)
 
+    # Never buy what this computer already holds: a reused quote, or another run that
+    # bought the same bars while the trader sat at the prompt.
+    for p in q.pieces:
+        if store.missing(schema, p.contract, p.start, p.end) != [(p.start, p.end)]:
+            raise BuyError("The data on this computer changed since the quote; quote "
+                           "again. Nothing was bought.")
+
     fresh = _price(client, q.pieces, schema, keys)
+    # --max-cost first, so the trader is never asked to approve a price it would refuse.
+    if max_cost is not None and fresh > float(max_cost):
+        raise BuyError(f"Databento price ${fresh:.2f} is above --max-cost "
+                       f"${float(max_cost):.2f}. Nothing was bought.")
     if abs(fresh - float(approved_usd)) > PRICE_TOLERANCE_USD:
         raise PriceChanged(fresh, (
             f"Databento's price is now ${fresh:.2f}, not the ${float(approved_usd):.2f} "
             "you said yes to. Nothing was bought; say yes to the new price to buy."))
-    if max_cost is not None and fresh > float(max_cost):
-        raise BuyError(f"Databento price ${fresh:.2f} is above --max-cost "
-                       f"${float(max_cost):.2f}. Nothing was bought.")
 
     saved: list[Piece] = []
     for p in q.pieces:
@@ -455,18 +481,35 @@ def assemble(store: Store, q: Quote, *, session: str) -> tuple[pd.DataFrame, Rol
 
     codes = list(frames)
     # A last contract that never takes over inside the bars held (the data ends before
-    # its roll) would stop the build with no bar to roll at. None of its bars would be
-    # used, so leave it out.
+    # its roll) would stop the build with no bar to roll at, and none of its bars would
+    # be used. Leave it out only when the contract before it already covers the range
+    # to the end; otherwise the series would silently stop early, so refuse.
     while len(codes) >= 2:
         prev, last = frames[codes[-2]], frames[codes[-1]]
         if q.root in CALENDAR_ROOTS:
             roll_day = calendar_roll_day(parse_contract(codes[-2]))
             unused = trading_day(int(last["ts"].iloc[-1])) < roll_day
+            how = f"by CME's calendar roll on {roll_day}"
         else:
             unused = _volume_roll_ts(prev, last) is None
+            how = "by volume"
         if not unused:
             break
+        if windows[codes[-2]][1] < q.end:
+            raise BuyError(
+                f"{codes[-1]} never took over from {codes[-2]} {how} in the bars held, and "
+                f"{codes[-2]}'s bars stop at {windows[codes[-2]][1]}, before the requested "
+                f"end {q.end}. The bought data is kept; try an end date on or before "
+                f"{windows[codes[-2]][1]}.")
         codes.pop()
+
+    # The contracts used must cover the whole request: a series that starts late or
+    # stops early would be a backtest over less than the trader asked for.
+    if codes and (windows[codes[0]][0] > q.start or windows[codes[-1]][1] < q.end):
+        raise BuyError(
+            f"the {q.root} bars held cover {windows[codes[0]][0]} to "
+            f"{windows[codes[-1]][1]}, not the requested {q.start} to {q.end} (end not "
+            "included). Quote and buy the missing days first.")
 
     start_ts, end_ts = _day_ts(q.start), _day_ts(q.end) - 1
     if len(codes) <= 1:
