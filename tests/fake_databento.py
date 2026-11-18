@@ -10,9 +10,14 @@ Only the surface PlutoBT uses is modelled, shaped like the real package:
   -> {"result": {symbol: [{"d0", "d1", "s"}, ...]}, "partial", "not_found", ...}``
   (d1 exclusive). Like real GLBX.MDP3 (live check 2026-11-17) only two pairs answer:
   ``continuous -> instrument_id`` (``s`` is the id as a string, one row per front-month
-  span) and ``instrument_id -> raw_symbol`` (symbols are id strings; each id's raw symbol
-  covers the whole requested window). Any other pair, ``continuous -> raw_symbol``
-  included, raises ``BentoClientError`` shaped like the real 422.
+  span) and ``instrument_id -> raw_symbol`` (symbols are id strings). Any other pair,
+  ``continuous -> raw_symbol`` included, raises ``BentoClientError`` shaped like the
+  real 422. CME recycles instrument ids across unrelated instruments over the years, so
+  an id -> raw_symbol answer lists, per id, the contract's own life ([trades_from,
+  trades_to)) plus any ``recycled`` intervals naming other symbols (options, spreads,
+  other roots), each clipped to the requested window, with gaps where nothing held the
+  id. An id whose intervals do not cover the whole window is listed in ``partial``, as
+  real GLBX does (live check 2026-11-17); an unknown id is listed in ``not_found``.
 - ``.timeseries.get_range(dataset=, symbols=, schema=, start=, end=, stype_in=) -> store``
   whose ``to_df(price_type="float")`` is indexed by a tz-aware UTC DatetimeIndex named
   ``ts_event`` with columns rtype, publisher_id, instrument_id, open, high, low, close,
@@ -43,7 +48,10 @@ _RTYPE = {"ohlcv-1m": 33, "ohlcv-1h": 34, "ohlcv-1d": 35}
 class Listing:
     """One outright contract: its raw symbol, when Databento's ``.v.0`` calls it front
     ([front_from, front_to)), its price level and its instrument id (unique per contract,
-    as on CME: a raw symbol GLBX reuses ten years later gets a different id)."""
+    as on CME: a raw symbol GLBX reuses ten years later gets a different id).
+
+    ``recycled`` holds (d0, d1, raw symbol) intervals, outside the contract's own life,
+    when CME gave the same instrument id to an unrelated instrument (d1 exclusive)."""
 
     raw: str
     front_from: date
@@ -52,6 +60,7 @@ class Listing:
     tick: float
     instrument_id: int = 1
     volume: int | None = None      # set: every bar has this volume (else front-weighted)
+    recycled: tuple[tuple[date, date, str], ...] = ()
 
     @property
     def root(self) -> str:
@@ -83,6 +92,12 @@ class Market:
         ids = [li.instrument_id for li in self.listings]
         if len(ids) != len(set(ids)):
             raise ValueError(f"each fake listing needs its own instrument id, got {ids}")
+        for li in self.listings:
+            spans = sorted([(li.trades_from, li.trades_to, li.raw), *li.recycled])
+            for (a0, a1, _), (b0, b1, _) in zip(spans, spans[1:], strict=False):
+                if not a0 < a1 <= b0 < b1:
+                    raise ValueError(f"instrument id {li.instrument_id}: intervals overlap "
+                                     f"or are empty: {spans}")
 
     def count(self, name: str) -> int:
         return sum(1 for n, _ in self.calls if n == name)
@@ -211,6 +226,17 @@ class BentoClientError(Exception):
 _RESOLVE_PAIRS = {("continuous", "instrument_id"), ("instrument_id", "raw_symbol")}
 
 
+def _covers(rows: list[dict], lo: date, hi: date) -> bool:
+    """True when the (sorted) intervals cover [lo, hi) with no gap."""
+    at = lo
+    for row in rows:
+        d0, d1 = _day(row["d0"]), _day(row["d1"])
+        if d0 > at:
+            return False
+        at = max(at, d1)
+    return at >= hi
+
+
 class _Symbology:
     def __init__(self, client: Historical):
         self._c = client
@@ -231,7 +257,8 @@ class _Symbology:
                 f"`stype_in={stype_in}`, `stype_out={stype_out}`.")
         lo, hi = _day(start_date), _day(end_date)
         result: dict[str, list[dict]] = {}
-        not_found = []
+        not_found: list = []
+        partial: list = []
         for sym in symbols:
             rows = []
             if stype_in == "continuous":
@@ -244,17 +271,23 @@ class _Symbology:
                         rows.append({"d0": d0.isoformat(), "d1": d1.isoformat(),
                                      "s": str(li.instrument_id)})
             else:
-                for li in m.listings:
-                    if str(li.instrument_id) == str(sym):
-                        rows.append({"d0": lo.isoformat(), "d1": hi.isoformat(),
-                                     "s": li.raw})
+                known = [li for li in m.listings if str(li.instrument_id) == str(sym)]
+                for li in known:
+                    spans = [(li.trades_from, li.trades_to, li.raw), *li.recycled]
+                    for a, b, raw in sorted(spans):
+                        d0, d1 = max(a, lo), min(b, hi)
+                        if d0 < d1:
+                            rows.append({"d0": d0.isoformat(), "d1": d1.isoformat(),
+                                         "s": raw})
+                if rows and not _covers(rows, lo, hi):
+                    partial.append(sym)
             if rows:
                 result[str(sym)] = rows
             else:
                 not_found.append(sym)
         return {"result": result, "symbols": list(symbols), "stype_in": stype_in,
                 "stype_out": stype_out, "start_date": lo.isoformat(),
-                "end_date": hi.isoformat(), "partial": [], "not_found": not_found,
+                "end_date": hi.isoformat(), "partial": partial, "not_found": not_found,
                 "message": "OK", "status": 0}
 
 
@@ -314,17 +347,25 @@ class Historical:
 
 def nq_market(**kw) -> Market:
     """NQ 2024: Databento's front rolls H4 -> M4 on 2024-03-08 and M4 -> U4 on 2024-06-14.
-    CME's calendar roll days are 2024-03-11 and 2024-06-17."""
+    CME's calendar roll days are 2024-03-11 and 2024-06-17. As on real GLBX, the ids are
+    recycled outside each contract's life (an option, spreads, other roots, with gaps),
+    so a range reaching past 2024-04-07 gets ids listed in ``partial``."""
     return Market([
-        Listing("NQH4", date(2023, 12, 15), date(2024, 3, 8), 17000.0, 0.25, 101),
-        Listing("NQM4", date(2024, 3, 8), date(2024, 6, 14), 17200.0, 0.25, 102),
-        Listing("NQU4", date(2024, 6, 14), date(2024, 9, 13), 17400.0, 0.25, 103),
+        Listing("NQH4", date(2023, 12, 15), date(2024, 3, 8), 17000.0, 0.25, 101,
+                recycled=((date(2024, 4, 9), date(2024, 5, 20), "NQM4 C18000"),
+                          (date(2024, 5, 20), date(2025, 1, 1), "CLN4-CLQ4"))),
+        Listing("NQM4", date(2024, 3, 8), date(2024, 6, 14), 17200.0, 0.25, 102,
+                recycled=((date(2024, 7, 20), date(2025, 1, 1), "NQM4-NQU4"),)),
+        Listing("NQU4", date(2024, 6, 14), date(2024, 9, 13), 17400.0, 0.25, 103,
+                recycled=((date(2022, 6, 1), date(2023, 11, 1), "GCJ4"),
+                          (date(2023, 11, 1), date(2024, 4, 12), "ESM4 P4500"))),
     ], **kw)
 
 
 def cl_market(**kw) -> Market:
     """CL early 2024: Databento's front rolls G4 -> H4 on 2024-01-19 (by volume)."""
     return Market([
-        Listing("CLG4", date(2023, 12, 19), date(2024, 1, 19), 72.00, 0.01, 201),
+        Listing("CLG4", date(2023, 12, 19), date(2024, 1, 19), 72.00, 0.01, 201,
+                recycled=((date(2024, 2, 18), date(2024, 6, 1), "ZNM4"),)),
         Listing("CLH4", date(2024, 1, 19), date(2024, 2, 20), 72.50, 0.01, 202),
     ], **kw)

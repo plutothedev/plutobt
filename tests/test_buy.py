@@ -315,13 +315,12 @@ def test_quote_accepts_a_repeated_identical_interval(tmp_path):
     assert [p.raw_symbol for p in q.pieces] == ["NQH4", "NQM4"]
 
 
-@pytest.mark.parametrize("where", ["partial", "not_found"])
-def test_quote_refuses_an_id_step_two_lists_as_unmapped(tmp_path, where):
+def test_quote_refuses_an_id_step_two_lists_as_not_found(tmp_path):
     m = fake.nq_market()
     c = client(m)
 
     def change(answer):
-        answer[where] = ["102"]
+        answer["not_found"] = ["102"]
 
     _step2(c, change)
     with pytest.raises(B.BuyError, match="Databento could not map NQ for part of that range; "
@@ -348,6 +347,189 @@ def test_step_two_failure_is_redacted_and_charges_nothing(tmp_path):
     assert "***" in text
     _no_key_anywhere(ei.value)
     assert m.count("get_cost") == 0 and m.count("get_range") == 0
+
+
+def test_quote_accepts_ids_step_two_lists_as_partial(tmp_path):
+    # Real GLBX lists an id in step 2's partial whenever its intervals do not cover the
+    # whole window (the contract's own life is shorter than a long range): that is normal.
+    m = fake.nq_market()
+    c = client(m)
+    _step2(c, lambda a: a.__setitem__("partial", ["101", "102"]))
+    q = B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert [p.raw_symbol for p in q.pieces] == ["NQH4", "NQM4"]
+
+
+def test_fake_recycles_ids_and_lists_them_partial_like_real_glbx():
+    c = client(fake.nq_market())
+    a = c.symbology.resolve(dataset="GLBX.MDP3", symbols=["101", "102", "103"],
+                            stype_in="instrument_id", stype_out="raw_symbol",
+                            start_date="2024-02-01", end_date="2024-07-01")
+    assert a["result"]["101"] == [
+        {"d0": "2024-02-01", "d1": "2024-04-07", "s": "NQH4"},
+        {"d0": "2024-04-09", "d1": "2024-05-20", "s": "NQM4 C18000"},   # after a gap
+        {"d0": "2024-05-20", "d1": "2024-07-01", "s": "CLN4-CLQ4"},
+    ]
+    assert a["result"]["103"] == [
+        {"d0": "2024-02-01", "d1": "2024-04-12", "s": "ESM4 P4500"},
+        {"d0": "2024-04-15", "d1": "2024-07-01", "s": "NQU4"},
+    ]
+    assert a["result"]["102"] == [{"d0": "2024-02-01", "d1": "2024-07-01", "s": "NQM4"}]
+    assert a["partial"] == ["101", "103"] and a["not_found"] == []
+    with pytest.raises(ValueError, match="overlap"):
+        fake.Market([fake.Listing("NQH4", date(2023, 12, 15), date(2024, 3, 8), 1.0, 0.25,
+                                  1, recycled=((date(2024, 3, 1), date(2024, 5, 1), "X"),))])
+
+
+def _es_years_market() -> fake.Market:
+    """ES quarterly fronts 2020-12 to 2025-03, ids recycled before and after their life."""
+    listings = []
+    prev = date(2020, 12, 10)
+    months = [(y, mo) for y in range(2021, 2025) for mo in (3, 6, 9, 12)] + [(2025, 3)]
+    for i, (y, mon) in enumerate(months):
+        to = date(y, mon, 10)
+        raw = f"ES{'HMUZ'[(mon // 3) - 1]}{y % 10}"
+        recycled = ()
+        if raw == "ESU1":            # later an option, a gap, then a same-root spread
+            recycled = ((date(2021, 10, 20), date(2023, 1, 1), "ESH6 C4500"),
+                        (date(2023, 1, 4), date(2026, 1, 1), "ESH6-ESM6"))
+        if raw == "ESH4":            # earlier another root, a gap, then a spread
+            recycled = ((date(2020, 6, 1), date(2022, 5, 1), "CLZ2"),
+                        (date(2022, 5, 10), date(2023, 10, 11), "ESZ3-ESH4"))
+        listings.append(fake.Listing(raw, prev, to, 4000.0 + 10 * i, 0.25, 500 + i,
+                                     recycled=recycled))
+        prev = to
+    return fake.Market(listings)
+
+
+def test_multi_year_quote_succeeds_when_step_two_lists_ids_as_partial(tmp_path):
+    # The live check: ES 1m 2016..2026 was refused because step 2 listed ids in partial.
+    m = _es_years_market()
+    c = client(m)
+    seen = []
+    _step2(c, seen.append)
+    q = B.quote(c, "ES", "1d", date(2021, 1, 4), date(2025, 1, 1), Store(tmp_path))
+    assert len(seen) == 1 and len(seen[0]["partial"]) >= 17
+    assert {"ESH6 C4500", "ESH6-ESM6", "CLZ2", "ESZ3-ESH4"} <= {
+        iv["s"] for ivs in seen[0]["result"].values() for iv in ivs}
+    raws = [p.raw_symbol for p in q.pieces]
+    assert raws[:5] == ["ESH1", "ESM1", "ESU1", "ESZ1", "ESH2"]
+    assert raws[-2:] == ["ESZ4", "ESH5"] and len(raws) == 17
+    assert [p.contract for p in q.pieces][2] == "ESU2021"
+    assert m.count("get_cost") == 17 and m.count("get_range") == 0
+
+
+def test_decade_reuse_quote_succeeds_with_recycled_ids(tmp_path):
+    # NQH4 is NQH2014 (id 1) and NQH2024 (id 3); both ids name unrelated instruments in
+    # between, one of them an NQH4 option, so the ten-year step-2 answer lists all three
+    # ids in partial.
+    m = fake.Market([
+        fake.Listing("NQH4", date(2013, 12, 13), date(2014, 3, 14), 3500.0, 0.25, 1,
+                     recycled=((date(2014, 4, 20), date(2017, 1, 1), "ESZ6-ESH7"),
+                               (date(2017, 1, 1), date(2024, 3, 1), "GCJ8"))),
+        fake.Listing("NQM4", date(2014, 3, 14), date(2014, 6, 13), 3600.0, 0.25, 2,
+                     recycled=((date(2014, 7, 13), date(2024, 3, 1), "ZNU5"),)),
+        fake.Listing("NQH4", date(2023, 12, 15), date(2024, 3, 8), 17000.0, 0.25, 3,
+                     recycled=((date(2014, 1, 2), date(2015, 6, 1), "NQH4 C4000"),
+                               (date(2015, 6, 10), date(2023, 10, 16), "CLN9"))),
+    ])
+    c = client(m)
+    seen = []
+    _step2(c, seen.append)
+    st = Store(tmp_path)
+    q = B.quote(c, "NQ", "1d", date(2014, 1, 2), date(2024, 3, 1), st)
+    assert sorted(seen[0]["partial"]) == ["1", "2", "3"]
+    assert q.pieces == (
+        B.Piece("NQH2014", "NQH4", date(2014, 1, 2), date(2014, 3, 24)),
+        B.Piece("NQM2014", "NQM4", date(2014, 3, 4), date(2014, 6, 23)),
+        B.Piece("NQH2024", "NQH4", date(2023, 12, 5), date(2024, 3, 1)),
+    )
+    B.buy(c, q, q.price_usd, st)
+    old = st.frame("ohlcv-1d", "NQH2014", date(2014, 1, 2), date(2014, 3, 24))
+    new = st.frame("ohlcv-1d", "NQH2024", date(2023, 12, 5), date(2024, 3, 1))
+    assert old["close"].between(3400, 3600).all() and len(old)
+    assert new["close"].between(16900, 17100).all() and len(new)
+
+
+@pytest.mark.parametrize("intervals", [
+    # the id names NQM4 for the start of the row, then a recycled option
+    [("2024-02-01", "2024-03-20", "NQM4"), ("2024-03-20", "2024-04-01", "NQM4 C18000")],
+    # the same symbol twice with a gap inside the row
+    [("2024-02-01", "2024-03-15", "NQM4"), ("2024-03-18", "2024-04-01", "NQM4")],
+    # covered only up to a day before the row ends
+    [("2024-02-01", "2024-03-31", "NQM4")],
+])
+def test_quote_refuses_a_row_only_partly_covered_by_its_interval(tmp_path, intervals):
+    # Id 102 is front [3/8, 4/1). An interval holding only part of that span is the
+    # recycled-id case: never guessed.
+    m = fake.nq_market()
+    c = client(m)
+    _step2(c, lambda a: a["result"].__setitem__(
+        "102", [{"d0": d0, "d1": d1, "s": s} for d0, d1, s in intervals]))
+    with pytest.raises(B.BuyError, match="102") as ei:
+        B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert "nothing was charged" in str(ei.value).lower()
+    assert m.count("get_cost") == 0 and m.count("get_range") == 0
+
+
+@pytest.mark.parametrize("sym", ["ESM4", "CLM4", "NQM4 C18000", "ESH6 C4500", "NQM4-NQU4",
+                                 "ESH6-ESM6", "NQ JUN24", "NQM24", "TT2:SA 06D 25M6"])
+def test_quote_refuses_a_containing_interval_that_is_not_a_plain_outright_of_the_root(
+        tmp_path, sym):
+    m = fake.nq_market()
+    c = client(m)
+    _step2(c, lambda a: a["result"].__setitem__(
+        "102", [{"d0": "2024-02-01", "d1": "2024-04-01", "s": sym}]))
+    with pytest.raises(B.BuyError) as ei:
+        B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert "nothing was charged" in str(ei.value).lower()
+    assert m.count("get_cost") == 0 and m.count("get_range") == 0
+
+
+# Verbatim step-2 intervals from real Databento (ES 2016-01-01..2026-01-01, live check
+# 2026-11-17): CME recycled these ids across options, spreads and other roots.
+REAL_ES_RECYCLED = {
+    "1030": [{"d0": "2016-01-01", "d1": "2016-04-18", "s": "SIH6"},
+             {"d0": "2016-04-18", "d1": "2016-06-22", "s": "FTLM601"},
+             {"d0": "2016-06-22", "d1": "2017-05-14", "s": "TT2:SA 06D 25M6"},
+             {"d0": "2017-05-14", "d1": "2020-06-07", "s": "CHIK0-WDCK0"},
+             {"d0": "2020-06-07", "d1": "2021-10-03", "s": "ESU1"},
+             {"d0": "2021-10-03", "d1": "2021-12-15", "s": "AVZX111"},
+             {"d0": "2021-12-15", "d1": "2026-01-01", "s": "HRCG5"}],
+    "42140878": [{"d0": "2023-08-17", "d1": "2026-01-01", "s": "ESH6"}],
+    "736": [{"d0": "2016-01-01", "d1": "2016-10-17", "s": "GHYV6"},
+            {"d0": "2016-10-17", "d1": "2016-12-04", "s": "WSZ6-WSX7"},
+            {"d0": "2016-12-04", "d1": "2018-01-07", "s": "GUSH9"},
+            {"d0": "2018-01-10", "d1": "2018-03-04", "s": "PDLG809-PTLG809"},
+            {"d0": "2018-03-04", "d1": "2019-08-05", "s": "ESM9"},
+            {"d0": "2019-08-05", "d1": "2020-01-28", "s": "RPU0-RPF0"},
+            {"d0": "2020-01-28", "d1": "2020-03-17", "s": "PYPH004"},
+            {"d0": "2020-03-17", "d1": "2026-01-01", "s": "AL6H6"}],
+}
+
+
+def _real_es_answer():
+    return {"result": {k: [dict(iv) for iv in v] for k, v in REAL_ES_RECYCLED.items()},
+            "partial": ["42140878", "736"], "not_found": []}
+
+
+def test_real_recycled_intervals_map_each_front_row_to_its_outright():
+    rows = [(date(2019, 3, 15), date(2019, 6, 14), "736"),
+            (date(2021, 6, 18), date(2021, 9, 17), "1030"),
+            (date(2025, 12, 19), date(2026, 1, 1), "42140878")]
+    out = B._raw_rows(rows, _real_es_answer(), "ES", [KEY])
+    assert [r["s"] for r in out] == ["ESM9", "ESU1", "ESH6"]
+    assert out[0] == {"d0": "2019-03-15", "d1": "2019-06-14", "s": "ESM9"}
+
+
+@pytest.mark.parametrize("row", [
+    (date(2019, 7, 20), date(2019, 8, 20), "736"),      # runs from ESM9 into a spread
+    (date(2018, 1, 5), date(2018, 1, 12), "736"),       # straddles the 1/7..1/10 gap
+    (date(2021, 9, 20), date(2021, 12, 17), "1030"),    # runs from ESU1 into AVZX111
+])
+def test_real_recycled_intervals_refuse_a_row_no_interval_holds(row):
+    with pytest.raises(B.BuyError, match=row[2]) as ei:
+        B._raw_rows([row], _real_es_answer(), "ES", [KEY])
+    assert "nothing was charged" in str(ei.value).lower()
 
 
 def test_fake_market_refuses_a_reused_instrument_id():

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -56,6 +57,8 @@ BUYABLE = frozenset(_BUYABLE_ORDER)
 PAD_DAYS = 10
 PRICE_TOLERANCE_USD = 0.005
 _KEY_ENV = "DATABENTO_API_KEY"
+# A plain outright as GLBX names every front contract: root, month code, one-digit year.
+_OUTRIGHT = re.compile(r"^[A-Z]{1,6}[FGHJKMNQUVXZ]\d$")
 
 
 class BuyError(Exception):
@@ -325,8 +328,15 @@ def _front_ids(answer, root: str, keys: list[str]) -> list[tuple[date, date, str
 def _raw_rows(rows, answer, root: str, keys: list[str]) -> list[dict]:
     """The front-month rows with each instrument id replaced by its raw symbol, read from
     an instrument_id -> raw_symbol answer: the symbol of the id's interval that holds the
-    row's first day (d0 <= day < d1). No such interval, or intervals naming different
-    symbols, refuses."""
+    row's whole span (x.d0 <= row.d0 and row.d1 <= x.d1).
+
+    CME recycles instrument ids across unrelated instruments over the years, so one id
+    can name options, spreads and other roots before and after its contract's life, with
+    gaps between. An interval holding only part of the row is that case and is never
+    guessed: no interval holding the whole row, or more than one naming different
+    symbols, refuses. So does a symbol that is not a plain outright (root, month code,
+    one-digit year, as GLBX names every front contract); a different root is refused
+    later by ``_front_spans``."""
     out: list[dict] = []
     problem = None
     try:
@@ -336,14 +346,21 @@ def _raw_rows(rows, answer, root: str, keys: list[str]) -> list[dict]:
             for iv in table.get(ident) or []:
                 lo = date.fromisoformat(str(iv["d0"])[:10])
                 hi = date.fromisoformat(str(iv["d1"])[:10])
-                if lo <= d0 < hi:
+                if lo <= d0 and d1 <= hi:
                     names.add(str(iv["s"]))
             if len(names) != 1:
                 what = "no contract" if not names else "more than one contract"
-                problem = (f"Databento named {what} for {root} instrument id {ident} on "
-                           f"{d0}; nothing was charged.")
+                problem = (f"Databento named {what} for {root} instrument id {ident} for "
+                           f"the whole of {d0} to {d1} (end not included); nothing was "
+                           "charged.")
                 break
-            out.append({"d0": d0.isoformat(), "d1": d1.isoformat(), "s": names.pop()})
+            raw = names.pop()
+            if not _OUTRIGHT.match(raw):
+                problem = (f"Databento named {raw!r} for {root} instrument id {ident} from "
+                           f"{d0} to {d1}, which is not a plain futures contract; nothing "
+                           "was charged.")
+                break
+            out.append({"d0": d0.isoformat(), "d1": d1.isoformat(), "s": raw})
     except Exception as exc:
         problem = (f"Databento's contract list for {root} could not be read "
                    f"({_redact(_describe(exc), keys)}); nothing was charged.")
@@ -352,11 +369,11 @@ def _raw_rows(rows, answer, root: str, keys: list[str]) -> list[dict]:
     return out
 
 
-def _unmapped(answer, symbol: str) -> bool:
-    """True when symbology.resolve lists ``symbol`` as not found, or found for only part
-    of the range (``partial``)."""
+def _unmapped(answer, symbol: str, lists=("not_found", "partial")) -> bool:
+    """True when symbology.resolve lists ``symbol`` in any of ``lists``: ``not_found``
+    (not mapped at all) or ``partial`` (mapped for only part of the range)."""
     try:
-        listed = [*(answer.get("not_found") or []), *(answer.get("partial") or [])]
+        listed = [x for name in lists for x in (answer.get(name) or [])]
     except Exception:
         return False
     return symbol in [str(x) for x in listed]
@@ -398,7 +415,10 @@ def quote(client, root: str, bars: str, start: date, end: date, store: Store) ->
                   client.symbology.resolve, dataset=DATASET, symbols=ids,
                   stype_in="instrument_id", stype_out="raw_symbol",
                   start_date=start.isoformat(), end_date=end.isoformat())
-    if any(_unmapped(named, ident) for ident in ids):
+    # Step 2's ``partial`` is normal on real GLBX: CME recycles ids, so an id's intervals
+    # rarely cover a long window. Only ``not_found`` refuses here; ``_raw_rows`` then
+    # demands one interval holding each front-month row whole.
+    if any(_unmapped(named, ident, lists=("not_found",)) for ident in ids):
         raise BuyError(f"Databento could not map {root} for part of that range; nothing "
                        "was priced or bought.")
     spans = _front_spans({"result": {cont: _raw_rows(rows, named, root, keys)}}, root, keys)
