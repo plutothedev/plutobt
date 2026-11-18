@@ -67,10 +67,15 @@ def test_quote_sums_cost_per_piece_and_charges_nothing(tmp_path):
     assert costs[0] == dict(dataset="GLBX.MDP3", symbols=["NQH4"], schema=H1,
                             start="2024-02-01", end="2024-03-18", stype_in="raw_symbol")
     assert q.price_usd == pytest.approx(0.01 * (46 + 34))
+    # GLBX refuses continuous -> raw_symbol, so the front month is resolved in two free
+    # steps: continuous -> instrument_id, then ONE call instrument_id -> raw_symbol.
     res = [kw for n, kw in m.calls if n == "resolve"]
     assert res == [dict(dataset="GLBX.MDP3", symbols=["NQ.v.0"], stype_in="continuous",
-                        stype_out="raw_symbol", start_date="2024-02-01",
-                        end_date="2024-04-01")]
+                        stype_out="instrument_id", start_date="2024-02-01",
+                        end_date="2024-04-01"),
+                   dict(dataset="GLBX.MDP3", symbols=["101", "102"],
+                        stype_in="instrument_id", stype_out="raw_symbol",
+                        start_date="2024-02-01", end_date="2024-04-01")]
     assert st.held(H1, "NQH2024") == []          # nothing written by a quote
 
 
@@ -198,6 +203,160 @@ def test_quote_skips_a_first_contract_rolled_out_before_the_start(tmp_path):
     B.buy(c, q, q.price_usd, st)
     df, meta = B.assemble(st, q, session="rth")
     assert meta is None and df["ts"].iloc[0] >= _ts(date(2024, 3, 12))
+
+
+# -- symbology: real GLBX answers ---------------------------------------------
+
+# Verbatim from real Databento (live check 2026-11-17, NQ, 2024-02-01 to 2024-04-01).
+REAL_CONT_TO_ID = {
+    "result": {"NQ.v.0": [{"d0": "2024-02-01", "d1": "2024-03-13", "s": "750"},
+                          {"d0": "2024-03-13", "d1": "2024-04-01", "s": "13743"}]},
+    "symbols": ["NQ.v.0"], "stype_in": "continuous", "stype_out": "instrument_id",
+    "start_date": "2024-02-01", "end_date": "2024-04-01", "partial": [], "not_found": [],
+    "message": "OK", "status": 0}
+REAL_ID_TO_RAW = {
+    "result": {"13743": [{"d0": "2024-02-01", "d1": "2024-04-01", "s": "NQM4"}],
+               "750": [{"d0": "2024-02-01", "d1": "2024-04-01", "s": "NQH4"}]},
+    "symbols": ["13743", "750"], "stype_in": "instrument_id", "stype_out": "raw_symbol",
+    "start_date": "2024-02-01", "end_date": "2024-04-01", "partial": [], "not_found": [],
+    "message": "OK", "status": 0}
+
+
+def real_nq_market(**kw):
+    return fake.Market([
+        fake.Listing("NQH4", date(2023, 12, 15), date(2024, 3, 13), 17000.0, 0.25, 750),
+        fake.Listing("NQM4", date(2024, 3, 13), date(2024, 6, 14), 17200.0, 0.25, 13743),
+    ], **kw)
+
+
+def _resolve(c, symbols, stype_in, stype_out):
+    return c.symbology.resolve(dataset="GLBX.MDP3", symbols=symbols, stype_in=stype_in,
+                               stype_out=stype_out, start_date="2024-02-01",
+                               end_date="2024-04-01")
+
+
+def test_fake_refuses_continuous_to_raw_symbol_like_real_glbx():
+    # The first 3.1 code asked for exactly this and real Databento answered 422.
+    c = client(fake.nq_market())
+    with pytest.raises(fake.BentoClientError) as ei:
+        _resolve(c, ["NQ.v.0"], "continuous", "raw_symbol")
+    text = str(ei.value)
+    assert text.startswith("422 symbology_invalid_request")
+    assert "`stype_in=continuous`, `stype_out=raw_symbol`" in text
+
+
+def test_fake_answers_symbology_exactly_as_real_glbx():
+    c = client(real_nq_market())
+    assert _resolve(c, ["NQ.v.0"], "continuous", "instrument_id") == REAL_CONT_TO_ID
+    assert _resolve(c, ["13743", "750"], "instrument_id", "raw_symbol") == REAL_ID_TO_RAW
+
+
+def test_quote_on_real_shaped_answers_prices_the_roll(tmp_path):
+    m = real_nq_market()
+    _, c, st, q = nq_quote(tmp_path, market=m)
+    # Databento's front is H4 until 3/13 (CME's calendar roll is 3/11): both contracts
+    # are bought, padded 10 days around Databento's roll.
+    assert q.pieces == (
+        B.Piece("NQH2024", "NQH4", date(2024, 2, 1), date(2024, 3, 23)),
+        B.Piece("NQM2024", "NQM4", date(2024, 3, 3), date(2024, 4, 1)),
+    )
+    ids = [kw for n, kw in m.calls if n == "resolve" and kw["stype_in"] == "instrument_id"]
+    assert [kw["symbols"] for kw in ids] == [["750", "13743"]]
+
+
+def test_quote_asks_for_every_front_id_in_one_call(tmp_path):
+    m, _, _, q = nq_quote(tmp_path, start=date(2024, 2, 1), end=date(2024, 7, 1))
+    assert [p.raw_symbol for p in q.pieces] == ["NQH4", "NQM4", "NQU4"]
+    ids = [kw for n, kw in m.calls if n == "resolve" and kw["stype_in"] == "instrument_id"]
+    assert len(ids) == 1
+    assert ids[0]["symbols"] == ["101", "102", "103"]
+    assert m.count("resolve") == 2
+
+
+def _step2(c, change):
+    real = c.symbology.resolve
+
+    def resolve(**kw):
+        answer = real(**kw)
+        if kw["stype_in"] == "instrument_id":
+            change(answer)
+        return answer
+
+    c.symbology.resolve = resolve
+
+
+@pytest.mark.parametrize("how", ["missing", "late", "two"])
+def test_quote_refuses_an_id_step_two_cannot_name(tmp_path, how):
+    m = fake.nq_market()
+    c = client(m)
+
+    def change(answer):
+        if how == "missing":
+            answer["result"].pop("102")
+        elif how == "late":               # an interval that starts after the id was front
+            answer["result"]["102"] = [{"d0": "2024-03-20", "d1": "2024-04-01",
+                                        "s": "NQM4"}]
+        else:                              # two different symbols on the same day
+            answer["result"]["102"].append({"d0": "2024-02-01", "d1": "2024-04-01",
+                                            "s": "NQU4"})
+
+    _step2(c, change)
+    with pytest.raises(B.BuyError, match="102") as ei:
+        B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert "nothing was charged" in str(ei.value).lower()
+    assert m.count("get_cost") == 0 and m.count("get_range") == 0
+
+
+def test_quote_accepts_a_repeated_identical_interval(tmp_path):
+    m = fake.nq_market()
+    c = client(m)
+    _step2(c, lambda a: a["result"]["102"].append(dict(a["result"]["102"][0])))
+    q = B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert [p.raw_symbol for p in q.pieces] == ["NQH4", "NQM4"]
+
+
+@pytest.mark.parametrize("where", ["partial", "not_found"])
+def test_quote_refuses_an_id_step_two_lists_as_unmapped(tmp_path, where):
+    m = fake.nq_market()
+    c = client(m)
+
+    def change(answer):
+        answer[where] = ["102"]
+
+    _step2(c, change)
+    with pytest.raises(B.BuyError, match="Databento could not map NQ for part of that range; "
+                                         "nothing was priced or bought."):
+        B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    assert m.count("get_cost") == 0
+
+
+def test_step_two_failure_is_redacted_and_charges_nothing(tmp_path):
+    m = fake.nq_market()
+    c = client(m)
+    real = c.symbology.resolve
+
+    def resolve(**kw):
+        if kw["stype_in"] == "instrument_id":
+            raise RuntimeError(f"401 Unauthorized for key {KEY}")
+        return real(**kw)
+
+    c.symbology.resolve = resolve
+    with pytest.raises(B.BuyError) as ei:
+        B.quote(c, "NQ", "1h", date(2024, 2, 1), date(2024, 4, 1), Store(tmp_path))
+    text = str(ei.value)
+    assert "Asking Databento which contract each front-month id is" in text
+    assert "***" in text
+    _no_key_anywhere(ei.value)
+    assert m.count("get_cost") == 0 and m.count("get_range") == 0
+
+
+def test_fake_market_refuses_a_reused_instrument_id():
+    # CME never reuses an instrument id, even when GLBX reuses the raw symbol (NQH4).
+    with pytest.raises(ValueError, match="instrument id"):
+        fake.Market([
+            fake.Listing("NQH4", date(2013, 12, 13), date(2014, 3, 14), 3500.0, 0.25, 7),
+            fake.Listing("NQH4", date(2023, 12, 15), date(2024, 3, 8), 17000.0, 0.25, 7),
+        ])
 
 
 def test_outer_edges_buy_nothing_outside_the_request(tmp_path):
@@ -394,8 +553,41 @@ def test_redact():
 def test_make_client_without_databento(monkeypatch):
     monkeypatch.setitem(sys.modules, "databento", None)
     monkeypatch.setenv("DATABENTO_API_KEY", KEY)
-    with pytest.raises(B.BuyError, match=r"pip install plutobt\[databento\]"):
+    with pytest.raises(B.BuyError) as ei:
         B.make_client()
+    text = str(ei.value)
+    assert "not installed" in text
+    assert 'pip install -e ".[databento]"' in text and "PlutoBT folder" in text
+    assert "plutobt[databento]" not in text           # not on PyPI: that line 404s
+
+
+def test_make_client_with_databento_installed_but_broken(monkeypatch):
+    # Live check 2026-11-17: databento pulled pyarrow 26, which needs NumPy 2 and fails at
+    # import under PlutoBT's numpy 1.26.4. The add-on IS installed; say so, with the reason.
+    import builtins
+    real_import = builtins.__import__
+
+    def broken(name, *args, **kwargs):
+        if name == "databento":
+            raise ImportError("pyarrow requires NumPy 2.0 or newer, found 1.26.4"
+                              f"\n  key {KEY}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "databento", raising=False)
+    monkeypatch.setenv("DATABENTO_API_KEY", KEY)
+    monkeypatch.setattr(builtins, "__import__", broken)
+    try:
+        with pytest.raises(B.BuyError) as ei:
+            B.make_client()
+    finally:
+        monkeypatch.setattr(builtins, "__import__", real_import)
+    text = str(ei.value)
+    assert "installed but failed to load" in text
+    assert "not installed" not in text
+    assert "pyarrow requires NumPy 2.0 or newer, found 1.26.4" in text
+    assert 'pip install -e ".[databento]"' in text and "PlutoBT folder" in text
+    assert "***" in text and text.isascii() and "\n" not in text
+    _no_key_anywhere(ei.value)
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])

@@ -7,7 +7,12 @@ Only the surface PlutoBT uses is modelled, shaped like the real package:
 - ``.metadata.get_cost(dataset=, symbols=, schema=, start=, end=, stype_in=) -> float``
 - ``.metadata.get_dataset_range(dataset) -> {"start", "end", "schema": {schema: {...}}}``
 - ``.symbology.resolve(dataset=, symbols=, stype_in=, stype_out=, start_date=, end_date=)
-  -> {"result": {"NQ.v.0": [{"d0", "d1", "s"}, ...]}, ...}`` (d1 exclusive)
+  -> {"result": {symbol: [{"d0", "d1", "s"}, ...]}, "partial", "not_found", ...}``
+  (d1 exclusive). Like real GLBX.MDP3 (live check 2026-11-17) only two pairs answer:
+  ``continuous -> instrument_id`` (``s`` is the id as a string, one row per front-month
+  span) and ``instrument_id -> raw_symbol`` (symbols are id strings; each id's raw symbol
+  covers the whole requested window). Any other pair, ``continuous -> raw_symbol``
+  included, raises ``BentoClientError`` shaped like the real 422.
 - ``.timeseries.get_range(dataset=, symbols=, schema=, start=, end=, stype_in=) -> store``
   whose ``to_df(price_type="float")`` is indexed by a tz-aware UTC DatetimeIndex named
   ``ts_event`` with columns rtype, publisher_id, instrument_id, open, high, low, close,
@@ -37,7 +42,8 @@ _RTYPE = {"ohlcv-1m": 33, "ohlcv-1h": 34, "ohlcv-1d": 35}
 @dataclass
 class Listing:
     """One outright contract: its raw symbol, when Databento's ``.v.0`` calls it front
-    ([front_from, front_to)), and its price level."""
+    ([front_from, front_to)), its price level and its instrument id (unique per contract,
+    as on CME: a raw symbol GLBX reuses ten years later gets a different id)."""
 
     raw: str
     front_from: date
@@ -72,6 +78,11 @@ class Market:
     fail_get_range: dict[int, Exception] = field(default_factory=dict)  # 1-based call no.
     spread_rows: bool = False
     calls: list[tuple[str, dict]] = field(default_factory=list)
+
+    def __post_init__(self):
+        ids = [li.instrument_id for li in self.listings]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"each fake listing needs its own instrument id, got {ids}")
 
     def count(self, name: str) -> int:
         return sum(1 for n, _ in self.calls if n == name)
@@ -188,6 +199,18 @@ class _Metadata:
         return {"start": m.dataset_start, "end": m.available_end, "schema": sch}
 
 
+class BentoClientError(Exception):
+    """Shaped like databento's 4xx error: ``str()`` is "<status> <code>" then the message."""
+
+    def __init__(self, http_status: int, code: str, message: str):
+        super().__init__(f"{http_status} {code}\n{message}")
+        self.http_status = http_status
+        self.json_body = {"detail": {"case": code, "message": message}}
+
+
+_RESOLVE_PAIRS = {("continuous", "instrument_id"), ("instrument_id", "raw_symbol")}
+
+
 class _Symbology:
     def __init__(self, client: Historical):
         self._c = client
@@ -200,21 +223,33 @@ class _Symbology:
         m.calls.append(("resolve", kw))
         if m.fail_resolve is not None:
             raise m.fail_resolve
-        assert dataset == DATASET and stype_in == "continuous" and stype_out == "raw_symbol"
+        assert dataset == DATASET
+        if (stype_in, stype_out) not in _RESOLVE_PAIRS:
+            raise BentoClientError(
+                422, "symbology_invalid_request",
+                "Unable to process symbology with parameters: `dataset=GLBX.MDP3`, "
+                f"`stype_in={stype_in}`, `stype_out={stype_out}`.")
         lo, hi = _day(start_date), _day(end_date)
         result: dict[str, list[dict]] = {}
         not_found = []
         for sym in symbols:
-            root = sym.split(".")[0]
             rows = []
-            for li in sorted(m.listings, key=lambda x: x.front_from):
-                if li.root != root:
-                    continue
-                d0, d1 = max(li.front_from, lo), min(li.front_to, hi)
-                if d0 < d1:
-                    rows.append({"d0": d0.isoformat(), "d1": d1.isoformat(), "s": li.raw})
+            if stype_in == "continuous":
+                root = sym.split(".")[0]
+                for li in sorted(m.listings, key=lambda x: x.front_from):
+                    if li.root != root:
+                        continue
+                    d0, d1 = max(li.front_from, lo), min(li.front_to, hi)
+                    if d0 < d1:
+                        rows.append({"d0": d0.isoformat(), "d1": d1.isoformat(),
+                                     "s": str(li.instrument_id)})
+            else:
+                for li in m.listings:
+                    if str(li.instrument_id) == str(sym):
+                        rows.append({"d0": lo.isoformat(), "d1": hi.isoformat(),
+                                     "s": li.raw})
             if rows:
-                result[sym] = rows
+                result[str(sym)] = rows
             else:
                 not_found.append(sym)
         return {"result": result, "symbols": list(symbols), "stype_in": stype_in,

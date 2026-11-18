@@ -52,6 +52,17 @@ def test_pyproject_declares_package_and_src_layout():
     assert "--import-mode=importlib" in cfg["tool"]["pytest"]["ini_options"]["addopts"]
 
 
+def test_databento_extra_caps_pyarrow_below_26():
+    # Live check 2026-11-17: pyarrow 26 needs NumPy 2 and fails at import under the pinned
+    # numpy 1.26.4, so `import databento` broke after the documented install.
+    with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
+        cfg = tomllib.load(fh)
+    extra = cfg["project"]["optional-dependencies"]["databento"]
+    assert extra == ["databento==0.84.0", "pyarrow>=21,<26"]
+    assert cfg["project"]["dependencies"] == [
+        "pandas==2.2.2", "numpy==1.26.4", "matplotlib==3.8.4"]
+
+
 def test_all_contract_modules_import():
     for name in CONTRACT_MODULES:
         assert importlib.import_module(name) is not None

@@ -2,7 +2,8 @@
 
 The money path, in the order the ``plutobt`` command runs it:
 
-1. ``quote`` asks Databento (free calls only) which contract was the front month when,
+1. ``quote`` asks Databento (free calls only) which contract was the front month when
+   (two symbology calls: continuous -> instrument id, then the ids -> raw symbols),
    works out each contract's window (its front-month days padded by ``PAD_DAYS`` around
    each roll so neighbouring contracts overlap there, never outside the requested
    range), takes away what the local
@@ -19,9 +20,10 @@ The money path, in the order the ``plutobt`` command runs it:
    back-adjusted continuous series with PlutoBT's own builder (calendar roll for the
    equity-index roots, volume roll for CL, GC and ZN).
 
-The ``databento`` package is optional (``pip install plutobt[databento]``) and is imported
-only inside ``make_client``. The API key is read from ``DATABENTO_API_KEY`` only, never
-saved, and replaced by ``***`` in any error text that passes through this module.
+The ``databento`` package is optional (``pip install -e ".[databento]"`` in the PlutoBT
+folder) and is imported only inside ``make_client``. The API key is read from
+``DATABENTO_API_KEY`` only, never saved, and replaced by ``***`` in any error text that
+passes through this module.
 
 Dates are ``datetime.date`` and every range is half-open [start, end) of UTC days.
 """
@@ -152,15 +154,32 @@ def _call(what: str, keys: list[str], fn, *args, **kwargs):
     raise BuyError(message)
 
 
+_INSTALL = 'in the PlutoBT folder run: pip install -e ".[databento]"'
+
+
 def make_client() -> object:
     """A ``databento.Historical`` client on the trader's own key (``DATABENTO_API_KEY``).
     The only place PlutoBT imports ``databento``."""
+    problem = None
     try:
         import databento
-    except ImportError:
+    except ModuleNotFoundError as exc:
         databento = None
+        if exc.name != "databento":
+            problem = _describe(exc)
+    except ImportError as exc:
+        databento = None
+        problem = _describe(exc)
+    if databento is None and problem is None:
+        raise BuyError(f"Buying data needs the Databento add-on, which is not installed: "
+                       f"{_INSTALL}")
     if databento is None:
-        raise BuyError("Buying data needs the Databento add-on: pip install plutobt[databento]")
+        # Installed, but it (or a package it needs) failed to import: say so, with the
+        # reason, on one plain ASCII line. Raised outside the except: no chained cause.
+        reason = " ".join(_redact(problem, _keys(None)).split())
+        reason = reason.encode("ascii", "backslashreplace").decode("ascii")
+        raise BuyError(f"The Databento add-on is installed but failed to load ({reason}). "
+                       f"To reinstall it, {_INSTALL}")
     raw = os.environ.get(_KEY_ENV)
     if raw is None or not raw.strip():
         raise BuyError("Set DATABENTO_API_KEY to your Databento API key (it is read from "
@@ -281,6 +300,58 @@ def _front_spans(answer, root: str, keys: list[str]) -> list[list]:
     return sorted(spans.values(), key=lambda span: span[0])
 
 
+def _front_ids(answer, root: str, keys: list[str]) -> list[tuple[date, date, str]]:
+    """(d0, d1, instrument id) per front-month span, from a continuous -> instrument_id
+    symbology.resolve answer (d1 exclusive; empty spans dropped)."""
+    rows: list[tuple[date, date, str]] = []
+    problem = None
+    try:
+        for row in (answer.get("result") or {}).get(f"{root}.v.0") or []:
+            ident = str(row["s"]).strip()
+            d0 = date.fromisoformat(str(row["d0"])[:10])
+            d1 = date.fromisoformat(str(row["d1"])[:10])
+            if not ident:
+                raise ValueError("a front-month span has no instrument id")
+            if d0 < d1:
+                rows.append((d0, d1, ident))
+    except Exception as exc:
+        problem = _redact(_describe(exc), keys)
+    if problem is not None:
+        raise BuyError(f"Databento's front-month list for {root} could not be read "
+                       f"({problem}); nothing was charged.")
+    return rows
+
+
+def _raw_rows(rows, answer, root: str, keys: list[str]) -> list[dict]:
+    """The front-month rows with each instrument id replaced by its raw symbol, read from
+    an instrument_id -> raw_symbol answer: the symbol of the id's interval that holds the
+    row's first day (d0 <= day < d1). No such interval, or intervals naming different
+    symbols, refuses."""
+    out: list[dict] = []
+    problem = None
+    try:
+        table = {str(k): v for k, v in (answer.get("result") or {}).items()}
+        for d0, d1, ident in rows:
+            names = set()
+            for iv in table.get(ident) or []:
+                lo = date.fromisoformat(str(iv["d0"])[:10])
+                hi = date.fromisoformat(str(iv["d1"])[:10])
+                if lo <= d0 < hi:
+                    names.add(str(iv["s"]))
+            if len(names) != 1:
+                what = "no contract" if not names else "more than one contract"
+                problem = (f"Databento named {what} for {root} instrument id {ident} on "
+                           f"{d0}; nothing was charged.")
+                break
+            out.append({"d0": d0.isoformat(), "d1": d1.isoformat(), "s": names.pop()})
+    except Exception as exc:
+        problem = (f"Databento's contract list for {root} could not be read "
+                   f"({_redact(_describe(exc), keys)}); nothing was charged.")
+    if problem is not None:
+        raise BuyError(_redact(problem, keys))
+    return out
+
+
 def _unmapped(answer, symbol: str) -> bool:
     """True when symbology.resolve lists ``symbol`` as not found, or found for only part
     of the range (``partial``)."""
@@ -308,14 +379,29 @@ def quote(client, root: str, bars: str, start: date, end: date, store: Store) ->
     if end > avail_end:
         end, data_ends = avail_end, avail_end
 
+    # GLBX refuses continuous -> raw_symbol (422), so two free calls: which instrument id
+    # was front when, then ONE call naming the raw symbol of every id over the same range.
+    cont = f"{root}.v.0"
     answer = _call("Asking Databento which contract was front when", keys,
-                   client.symbology.resolve, dataset=DATASET, symbols=[f"{root}.v.0"],
-                   stype_in="continuous", stype_out="raw_symbol",
+                   client.symbology.resolve, dataset=DATASET, symbols=[cont],
+                   stype_in="continuous", stype_out="instrument_id",
                    start_date=start.isoformat(), end_date=end.isoformat())
-    spans = _front_spans(answer, root, keys)
-    if spans and _unmapped(answer, f"{root}.v.0"):
+    rows = _front_ids(answer, root, keys)
+    if rows and _unmapped(answer, cont):
         raise BuyError(f"Databento could not map {root} for part of that range; nothing "
                        "was priced or bought.")
+    if not rows:
+        raise BuyError(f"Databento lists no {root} front contract between {start} and {end} "
+                       "(end not included); nothing was charged.")
+    ids = list(dict.fromkeys(ident for _, _, ident in rows))
+    named = _call("Asking Databento which contract each front-month id is", keys,
+                  client.symbology.resolve, dataset=DATASET, symbols=ids,
+                  stype_in="instrument_id", stype_out="raw_symbol",
+                  start_date=start.isoformat(), end_date=end.isoformat())
+    if any(_unmapped(named, ident) for ident in ids):
+        raise BuyError(f"Databento could not map {root} for part of that range; nothing "
+                       "was priced or bought.")
+    spans = _front_spans({"result": {cont: _raw_rows(rows, named, root, keys)}}, root, keys)
     if not spans:
         raise BuyError(f"Databento lists no {root} front contract between {start} and {end} "
                        "(end not included); nothing was charged.")

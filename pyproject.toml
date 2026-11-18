@@ -20,7 +20,7 @@ dependencies = [
 plutobt = "plutobt.cli:main"
 
 [project.optional-dependencies]
-databento = ["databento==0.84.0"]
+databento = ["databento==0.84.0", "pyarrow>=21,<26"]
 dev = [
     "pytest==8.2.0",
     "ruff==0.4.4",

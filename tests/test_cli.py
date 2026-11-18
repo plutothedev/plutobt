@@ -114,7 +114,8 @@ def test_cli_quote_without_databento(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("DATABENTO_API_KEY", KEY)
     assert cli.main(["quote", *QUOTE_ARGS]) == 2
     err = one_line(capsys.readouterr().err)
-    assert "pip install plutobt[databento]" in err
+    assert 'pip install -e ".[databento]"' in err and "not installed" in err
+    assert "plutobt[databento]" not in err
 
 
 def test_cli_quote_without_key(tmp_path, monkeypatch, capsys):
